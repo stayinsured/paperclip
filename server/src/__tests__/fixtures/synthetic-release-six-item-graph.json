@@ -1,0 +1,23 @@
+{
+  "name": "normal-external-release",
+  "maxDurableItems": 6,
+  "items": [
+    { "key": "outcome", "title": "Release outcome and decision", "parentKey": null },
+    { "key": "implementation", "title": "Implementation", "parentKey": "outcome" },
+    { "key": "qualification", "title": "Independent qualification", "parentKey": "outcome" },
+    { "key": "sandbox", "title": "Sandbox validation", "parentKey": "outcome" },
+    { "key": "production", "title": "Authorized production execution", "parentKey": "outcome" },
+    { "key": "verification", "title": "Independent production verification", "parentKey": "outcome" }
+  ],
+  "nonIssueAttempts": [
+    { "key": "retry-1", "action": "release.retry_recorded", "sourceItemKey": "implementation" },
+    { "key": "marker-refresh-1", "action": "release.marker_refreshed", "sourceItemKey": "implementation" },
+    { "key": "access-check-1", "action": "release.access_checked", "sourceItemKey": "qualification" },
+    { "key": "evidence-1", "action": "release.evidence_collected", "sourceItemKey": "qualification" }
+  ],
+  "handoff": {
+    "sourceItemKey": "implementation",
+    "targetItemKey": "qualification",
+    "transitionKey": "fast-gate-complete"
+  }
+}

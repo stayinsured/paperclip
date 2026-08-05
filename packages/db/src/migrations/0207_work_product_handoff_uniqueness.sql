@@ -1,0 +1,2 @@
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: Drizzle migrations run transactionally, and this narrow partial expression index is the atomic at-most-once boundary for the new work-product handoff action.
+CREATE UNIQUE INDEX "activity_log_work_product_handoff_key_uq" ON "activity_log" USING btree ("company_id", "action", "entity_id", (("details" ->> 'handoffKey'))) WHERE "activity_log"."action" = 'issue.work_product_handoff_emitted';

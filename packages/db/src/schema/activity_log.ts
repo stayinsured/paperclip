@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, jsonb, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
@@ -33,5 +34,13 @@ export const activityLog = pgTable(
     ),
     runIdIdx: index("activity_log_run_id_idx").on(table.runId),
     entityIdx: index("activity_log_entity_type_id_idx").on(table.entityType, table.entityId),
+    workProductHandoffKeyUq: uniqueIndex("activity_log_work_product_handoff_key_uq")
+      .on(
+        table.companyId,
+        table.action,
+        table.entityId,
+        sql`(${table.details} ->> 'handoffKey')`,
+      )
+      .where(sql`${table.action} = 'issue.work_product_handoff_emitted'`),
   }),
 );

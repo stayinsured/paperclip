@@ -2681,6 +2681,10 @@ export function issueRoutes(
       agentId: string,
       options: Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1],
     ) => ReturnType<ReturnType<typeof heartbeatService>["wakeup"]>;
+    workProductHandoffEnqueueWakeup?: (
+      agentId: string,
+      options: Parameters<ReturnType<typeof heartbeatService>["wakeup"]>[1],
+    ) => ReturnType<ReturnType<typeof heartbeatService>["wakeup"]>;
     issueListDiagnostics?: IssueListDiagnostics;
     approveToolActionRequest?: (input: {
       companyId: string;
@@ -2699,6 +2703,7 @@ export function issueRoutes(
   });
   const enqueueStalledReviewDecisionWakeup = opts.stalledReviewDecisionEnqueueWakeup ?? heartbeat.wakeup;
   const enqueueRecoveryActionWakeup = opts.recoveryActionEnqueueWakeup ?? heartbeat.wakeup;
+  const enqueueWorkProductHandoffWakeup = opts.workProductHandoffEnqueueWakeup ?? heartbeat.wakeup;
   const feedback = feedbackService(db);
   const companiesSvc = companyService(db);
   let searchSvc = opts.searchService ?? null;
@@ -2769,16 +2774,23 @@ export function issueRoutes(
     }
 
     const emitted = await db.transaction(async (tx) => {
-      await tx.select({ id: issueRows.id }).from(issueRows)
-        .where(and(eq(issueRows.id, targetIssue.id), eq(issueRows.companyId, product.companyId)))
-        .for("update");
-      const existing = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
-        eq(activityLog.companyId, product.companyId),
-        eq(activityLog.action, "issue.work_product_handoff_emitted"),
-        eq(activityLog.entityId, targetIssue.id),
-        sql`${activityLog.details} ->> 'handoffKey' = ${handoff.handoffKey}`,
-      )).limit(1).then((rows) => rows[0] ?? null);
-      if (existing) return false;
+      const activity = await tx.insert(activityLog).values({
+        companyId: product.companyId,
+        actorType: "system",
+        actorId: "work_product_handoff",
+        action: "issue.work_product_handoff_emitted",
+        entityType: "issue",
+        entityId: targetIssue.id,
+        agentId: handoff.nextOwnerAgentId,
+        details: {
+          handoffKey: handoff.handoffKey,
+          workProductId: product.id,
+          sourceIssueId: product.issueId,
+          transitionKey: handoff.transitionKey,
+          nextOwnerAgentId: handoff.nextOwnerAgentId,
+        },
+      }).onConflictDoNothing().returning({ id: activityLog.id }).then((rows) => rows[0] ?? null);
+      if (!activity) return false;
 
       await tx.insert(issueComments).values({
         companyId: product.companyId,
@@ -2803,27 +2815,11 @@ export function issueRoutes(
           }],
         },
       });
-      await tx.insert(activityLog).values({
-        companyId: product.companyId,
-        actorType: "system",
-        actorId: "work_product_handoff",
-        action: "issue.work_product_handoff_emitted",
-        entityType: "issue",
-        entityId: targetIssue.id,
-        agentId: handoff.nextOwnerAgentId,
-        details: {
-          handoffKey: handoff.handoffKey,
-          workProductId: product.id,
-          sourceIssueId: product.issueId,
-          transitionKey: handoff.transitionKey,
-          nextOwnerAgentId: handoff.nextOwnerAgentId,
-        },
-      });
       return true;
     });
     if (!emitted) return false;
 
-    void heartbeat.wakeup(handoff.nextOwnerAgentId, {
+    void enqueueWorkProductHandoffWakeup(handoff.nextOwnerAgentId, {
       source: "automation",
       triggerDetail: "system",
       reason: "work_product_handoff",
