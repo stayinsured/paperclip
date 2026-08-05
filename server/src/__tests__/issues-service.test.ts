@@ -4455,6 +4455,69 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       childIssueSummaryTruncated: false,
     });
   });
+
+  it("reconciles cancelled blocker edges and advances only after every active blocker clears", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const firstBlockerId = randomUUID();
+    const secondBlockerId = randomUUID();
+    const dependentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "Executor",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: firstBlockerId, companyId, title: "First blocker", status: "todo", priority: "high" },
+      { id: secondBlockerId, companyId, title: "Second blocker", status: "todo", priority: "high" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId,
+      },
+    ]);
+    await svc.update(dependentId, { blockedByIssueIds: [firstBlockerId, secondBlockerId] });
+
+    const firstCancellation = await svc.update(firstBlockerId, { status: "cancelled" });
+    expect(firstCancellation?.reconciledCancelledBlockerDependentIds).toEqual([dependentId]);
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: false,
+      unresolvedBlockerIssueIds: [secondBlockerId],
+    });
+    await expect(svc.listWakeableDependentsAfterBlockerReconciliation(
+      firstBlockerId,
+      firstCancellation!.reconciledCancelledBlockerDependentIds,
+    )).resolves.toEqual([]);
+
+    const secondCancellation = await svc.update(secondBlockerId, { status: "cancelled" });
+    await expect(svc.getDependencyReadiness(dependentId)).resolves.toMatchObject({
+      isDependencyReady: true,
+      blockerIssueIds: [],
+    });
+    await expect(svc.listWakeableDependentsAfterBlockerReconciliation(
+      secondBlockerId,
+      secondCancellation!.reconciledCancelledBlockerDependentIds,
+    )).resolves.toEqual([expect.objectContaining({
+      id: dependentId,
+      assigneeAgentId,
+      blockerIssueIds: [secondBlockerId],
+    })]);
+  });
 });
 
 describeEmbeddedPostgres("issueService.create workspace inheritance", () => {

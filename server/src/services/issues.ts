@@ -94,6 +94,7 @@ import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallbac
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
+import { assertExecutionAdmission } from "./execution-admission.js";
 import { insertRowsInChunks } from "./batch-insert.js";
 import type {
   ImportIssueRow,
@@ -6446,6 +6447,39 @@ export function issueService(db: Db) {
         }));
     },
 
+    listWakeableDependentsAfterBlockerReconciliation: async (
+      blockerIssueId: string,
+      dependentIssueIds: string[],
+    ) => {
+      if (dependentIssueIds.length === 0) return [];
+      const blockerIssue = await db
+        .select({ companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, blockerIssueId))
+        .then((rows) => rows[0] ?? null);
+      if (!blockerIssue) return [];
+      const candidates = await db
+        .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
+        .from(issues)
+        .where(and(eq(issues.companyId, blockerIssue.companyId), inArray(issues.id, dependentIssueIds)));
+      const wakeable = candidates.filter((candidate) =>
+        candidate.assigneeAgentId && !["backlog", "done", "cancelled"].includes(candidate.status));
+      const readinessMap = await listIssueDependencyReadinessMap(
+        db,
+        blockerIssue.companyId,
+        wakeable.map((candidate) => candidate.id),
+      );
+      return wakeable.flatMap((candidate) => {
+        const readiness = readinessMap.get(candidate.id) ?? createIssueDependencyReadiness(candidate.id);
+        if (!readiness.isDependencyReady) return [];
+        return [{
+          id: candidate.id,
+          assigneeAgentId: candidate.assigneeAgentId!,
+          blockerIssueIds: [blockerIssueId, ...readiness.blockerIssueIds],
+        }];
+      });
+    },
+
     getWakeableParentAfterChildCompletion: async (parentIssueId: string) => {
       const parent = await db
         .select({
@@ -7527,6 +7561,15 @@ export function issueService(db: Db) {
       if (shouldValidateNextAssignee) {
         await assertAssignableAgent(dbOrTx as Db, existing.companyId, nextAssigneeAgentId, { kind: "work" });
       }
+      if (patch.status === "in_progress" && nextAssigneeAgentId) {
+        await assertExecutionAdmission(dbOrTx as Db, {
+          companyId: existing.companyId,
+          issueId: existing.id,
+          agentId: nextAssigneeAgentId,
+          executionPolicy: issueData.executionPolicy,
+          projectId: issueData.projectId,
+        });
+      }
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
       }
@@ -7650,6 +7693,7 @@ export function issueService(db: Db) {
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+        let reconciledCancelledBlockerDependentIds: string[] = [];
         if (existing.status !== updated.status) {
           if (updated.status === "done" || updated.status === "cancelled") {
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
@@ -7681,6 +7725,24 @@ export function issueService(db: Db) {
                   result: interaction.result ?? null,
                 },
               });
+            }
+          }
+          if (updated.status === "cancelled") {
+            reconciledCancelledBlockerDependentIds = await tx
+              .select({ id: issueRelations.relatedIssueId })
+              .from(issueRelations)
+              .where(and(
+                eq(issueRelations.companyId, updated.companyId),
+                eq(issueRelations.issueId, updated.id),
+                eq(issueRelations.type, "blocks"),
+              ))
+              .then((rows: Array<{ id: string }>) => [...new Set(rows.map((row) => row.id))]);
+            if (reconciledCancelledBlockerDependentIds.length > 0) {
+              await tx.delete(issueRelations).where(and(
+                eq(issueRelations.companyId, updated.companyId),
+                eq(issueRelations.issueId, updated.id),
+                eq(issueRelations.type, "blocks"),
+              ));
             }
           }
           // A status-card generation task that goes done/cancelled/blocked stops
@@ -7818,6 +7880,9 @@ export function issueService(db: Db) {
           ...enriched,
           ...(nextBlockedByIssueIds !== undefined ? { blockedByIssueIds: nextBlockedByIssueIds } : {}),
           changes,
+          ...(reconciledCancelledBlockerDependentIds.length > 0
+            ? { reconciledCancelledBlockerDependentIds }
+            : {}),
         };
       };
 
@@ -7903,6 +7968,11 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
       await assertAssignableAgent(db, issueCompany.companyId, agentId, { kind: "work" });
+      await assertExecutionAdmission(db, {
+        companyId: issueCompany.companyId,
+        issueId: id,
+        agentId,
+      });
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);

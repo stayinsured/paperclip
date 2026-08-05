@@ -72,6 +72,12 @@ export type AttachmentArtifactWorkProductMetadata = z.infer<typeof attachmentArt
 export const issueWorkProductMetadataSchema = z
   .object({
     resourceRef: workspaceFileRefSchema.optional().nullable(),
+    handoff: z.object({
+      transitionKey: z.string().trim().min(1).max(200),
+      nextOwnerAgentId: z.string().uuid(),
+      targetIssueId: z.string().uuid().optional().nullable(),
+      summary: z.string().trim().min(1).max(2_000).optional().nullable(),
+    }).strict().optional().nullable(),
   })
   .passthrough();
 

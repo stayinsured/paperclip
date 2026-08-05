@@ -33,6 +33,7 @@ import type { Goal } from "./goal.js";
 import type { Project, ProjectWorkspace } from "./project.js";
 import type { ExecutionWorkspace, IssueExecutionWorkspaceSettings } from "./workspace-runtime.js";
 import type { IssueWorkProduct } from "./work-product.js";
+import type { AgentAdmissionCapability } from "./agent.js";
 import type {
   LowTrustReviewPresetPolicy,
   SourceTrustMetadata,
@@ -671,12 +672,23 @@ export interface IssueExecutionPolicy {
   monitor?: IssueExecutionMonitorPolicy | null;
   reviewPreset?: LowTrustReviewPresetPolicy;
   authorizationPolicy?: TrustAuthorizationPolicy;
+  admission?: IssueExecutionAdmissionRequirements;
   /**
    * Maximum consecutive agent-initiated changes-requested rounds before the
    * pending stage escalates to the responsible human. Null uses the server
    * default. Human decisions reset the round counter.
    */
   maxReviewRounds?: number | null;
+}
+
+export interface IssueExecutionAdmissionRequirements {
+  requiredCapabilities: AgentAdmissionCapability[];
+  allowedAdapterTypes: string[];
+  allowedModels: string[];
+  requireGatewayReachable: boolean;
+  requireWorkspaceAvailable: boolean;
+  productionProviderMutation: boolean;
+  maxProfileAgeSeconds: number;
 }
 
 export interface IssueExecutionMonitorState {

@@ -181,7 +181,7 @@ Use it for:
 
 Blocked issues should stay idle while blockers remain unresolved. Paperclip should not create a queued heartbeat run for that issue until the final blocker is done and the `issue_blockers_resolved` wake can start real work.
 
-`cancelled` is terminal for the blocker issue itself, but it does not satisfy the dependency. A cancelled blocker edge remains unresolved until the edge is removed or replaced, and Paperclip must surface blocker attention on the dependent regardless of whether that dependent is currently displayed as `blocked`, `todo`, `backlog`, or another non-terminal agent-owned status.
+`cancelled` is terminal for the blocker issue itself. Cancelling a blocker atomically removes its outgoing `blocks` edges. Dependents advance only when the post-reconciliation readiness check finds no other active blocker; stale blocker-resolved wakes are discarded by the same readiness gate before a run is claimed.
 
 If a parent is truly waiting on a child, model that with blockers. Do not rely on the parent/child relationship alone.
 
@@ -537,6 +537,12 @@ Recovery rule:
 
 - Paperclip queues one automatic continuation wake
 - if that continuation wake also finishes and the issue is still stranded, Paperclip moves the issue to `blocked` and opens or updates an explicit recovery action when a bounded owner/action is known; the visible comment is evidence, not the recovery path by itself
+
+The retry stays on the original issue/run lineage. Identical second failures upsert the same source-scoped recovery action fingerprint, so one source issue has at most one active infrastructure incident and recovery work never nests recursively.
+
+Revision-bound `request_confirmation` interactions are immutable-target waits: unrelated comments do not supersede them. They become stale only when the bound revision changes, or when an authorized resolver rejects, cancels, or withdraws the request.
+
+Completed work products may declare `metadata.handoff` with a transition key, target issue, and next-owner agent. Ready/reviewed/merged/failed transitions emit one system handoff comment and one owner wake per target/transition key; repeated CI callbacks or product updates reuse the same key.
 
 This is an active-work continuity recovery.
 

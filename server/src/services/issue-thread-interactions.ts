@@ -316,11 +316,12 @@ function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
   return true;
 }
 
-function shouldSupersedeInteractionOnUserComment(interaction: UserCommentSupersedableInteraction) {
+export function shouldSupersedeInteractionOnUserComment(interaction: UserCommentSupersedableInteraction) {
+  if (interaction.kind === "request_confirmation" && interaction.payload.target) return false;
   return interaction.payload.supersedeOnUserComment === true;
 }
 
-function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
+export function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
   switch (input.kind) {
     case "ask_user_questions":
       return {
@@ -335,7 +336,9 @@ function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): C
         ...input,
         payload: {
           ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+          // Immutable revision targets are invalidated by a revision change,
+          // not by unrelated discussion on the issue thread.
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? !input.payload.target,
         },
       };
     case "request_checkbox_confirmation":

@@ -85,6 +85,37 @@ describe("issueThreadInteractionService", () => {
     vi.clearAllMocks();
   });
 
+  it("keeps revision-bound confirmations alive across unrelated comments", async () => {
+    const {
+      normalizeCreateInteractionInput,
+      shouldSupersedeInteractionOnUserComment,
+    } = await import("./issue-thread-interactions.js");
+    const normalized = normalizeCreateInteractionInput({
+      kind: "request_confirmation",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Approve this plan revision?",
+        target: {
+          type: "issue_document",
+          key: "plan",
+          revisionId: "77777777-7777-4777-8777-777777777777",
+          revisionNumber: 7,
+        },
+      },
+    } as never);
+    expect(normalized.kind).toBe("request_confirmation");
+    if (normalized.kind !== "request_confirmation") throw new Error("unexpected interaction kind");
+    expect(normalized.payload.supersedeOnUserComment).toBe(false);
+    expect(shouldSupersedeInteractionOnUserComment(normalized as never)).toBe(false);
+
+    const explicitlySupersedable = {
+      ...normalized,
+      payload: { ...normalized.payload, supersedeOnUserComment: true },
+    };
+    expect(shouldSupersedeInteractionOnUserComment(explicitlySupersedable as never)).toBe(false);
+  });
+
   it.each([
     ["ask_user_questions", undefined, {}, "board_or_agents", "board_or_agents"],
     ["suggest_tasks", undefined, {}, "board_only", "board_only"],

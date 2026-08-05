@@ -96,6 +96,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { evaluateExecutionAdmission, type ExecutionAdmissionResult } from "./execution-admission.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -12367,6 +12368,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
         return null;
       }
+
+      const admission = await evaluateExecutionAdmission(db, {
+        companyId: run.companyId,
+        issueId,
+        agentId: run.agentId,
+      });
+      if (!admission.admitted) {
+        await cancelQueuedRunForExecutionAdmission(run, admission);
+        logger.info(
+          { runId: run.id, issueId, failedChecks: admission.checks.filter((check) => !check.passed).map((check) => check.code) },
+          "claimQueuedRun: cancelled run that failed execution admission",
+        );
+        return null;
+      }
     }
 
     const claimedAt = new Date();
@@ -12493,6 +12508,53 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       },
     });
 
+    return cancelled;
+  }
+
+  async function cancelQueuedRunForExecutionAdmission(
+    run: typeof heartbeatRuns.$inferSelect,
+    admission: ExecutionAdmissionResult,
+  ) {
+    const now = new Date();
+    const failedChecks = admission.checks.filter((check) => !check.passed).map((check) => check.code);
+    const reason = `Cancelled before execution because admission failed: ${failedChecks.join(", ")}`;
+    const cancelled = await setRunStatus(run.id, "cancelled", {
+      finishedAt: now,
+      error: reason,
+      errorCode: "execution_admission_failed",
+      resultJson: {
+        ...parseObject(run.resultJson),
+        stopReason: "execution_admission_failed",
+        admission,
+      },
+    });
+    if (!cancelled) return null;
+
+    await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now, error: reason });
+    await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: reason,
+      payload: { issueId: admission.issueId, failedChecks },
+    });
+    await logActivity(db, {
+      companyId: run.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: run.agentId,
+      runId: run.id,
+      action: "heartbeat.execution_admission_failed",
+      entityType: "heartbeat_run",
+      entityId: run.id,
+      issueId: admission.issueId,
+      details: {
+        failedChecks,
+        adapterType: admission.adapterType,
+        model: admission.model,
+        productionMutationAuthorized: admission.productionMutationAuthorized,
+      },
+    });
     return cancelled;
   }
 

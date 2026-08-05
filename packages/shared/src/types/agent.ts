@@ -29,8 +29,28 @@ export interface AgentModelProfileConfig {
   adapterConfig: Record<string, unknown>;
 }
 
+export type AgentAdmissionCapability =
+  | "repository_write"
+  | "repository_push"
+  | "github_workflow_dispatch"
+  | "hubspot_sandbox_readback"
+  | "hubspot_sandbox_upload"
+  | "cloudflare_readback"
+  | "cloudflare_deploy"
+  | "observability_read"
+  | "production_provider_mutation";
+
+export interface AgentAdmissionProfile {
+  gatewayReachable: boolean;
+  workspaceAvailable: boolean;
+  capabilities: Partial<Record<AgentAdmissionCapability, boolean>>;
+  productionProviderMutationAuthorized: boolean;
+  verifiedAt: string | null;
+}
+
 export interface AgentRuntimeConfig extends Record<string, unknown> {
   modelProfiles?: Partial<Record<ModelProfileKey, AgentModelProfileConfig>>;
+  admissionProfile?: AgentAdmissionProfile;
 }
 
 export type AgentInstructionsBundleMode = "managed" | "external";

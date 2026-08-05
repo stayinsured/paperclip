@@ -62,10 +62,31 @@ const agentModelProfileConfigSchema = z.object({
   adapterConfig: adapterConfigSchema,
 }).strict();
 
+export const agentAdmissionCapabilitySchema = z.enum([
+  "repository_write",
+  "repository_push",
+  "github_workflow_dispatch",
+  "hubspot_sandbox_readback",
+  "hubspot_sandbox_upload",
+  "cloudflare_readback",
+  "cloudflare_deploy",
+  "observability_read",
+  "production_provider_mutation",
+]);
+
+export const agentAdmissionProfileSchema = z.object({
+  gatewayReachable: z.boolean().optional().default(false),
+  workspaceAvailable: z.boolean().optional().default(false),
+  capabilities: z.record(agentAdmissionCapabilitySchema, z.boolean()).optional().default({}),
+  productionProviderMutationAuthorized: z.boolean().optional().default(false),
+  verifiedAt: z.string().datetime().optional().nullable().default(null),
+}).strict();
+
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
     cheap: agentModelProfileConfigSchema.optional(),
   }).strict().optional(),
+  admissionProfile: agentAdmissionProfileSchema.optional(),
 }).catchall(z.unknown());
 
 export const createAgentSchema = z.object({

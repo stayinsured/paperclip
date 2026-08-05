@@ -33,6 +33,7 @@ import {
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
+import { agentAdmissionCapabilitySchema } from "./agent.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
 
 export const issueBlockedInboxStateSchema = z.enum([
@@ -245,6 +246,16 @@ export const issueExecutionMonitorPolicySchema = z.object({
   recoveryPolicy: z.enum(ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES).optional().nullable().default(null),
 });
 
+export const issueExecutionAdmissionRequirementsSchema = z.object({
+  requiredCapabilities: z.array(agentAdmissionCapabilitySchema).max(20).optional().default([]),
+  allowedAdapterTypes: z.array(z.string().trim().min(1)).max(20).optional().default([]),
+  allowedModels: z.array(z.string().trim().min(1)).max(50).optional().default([]),
+  requireGatewayReachable: z.boolean().optional().default(true),
+  requireWorkspaceAvailable: z.boolean().optional().default(true),
+  productionProviderMutation: z.boolean().optional().default(false),
+  maxProfileAgeSeconds: z.number().int().positive().max(86_400).optional().default(900),
+}).strict();
+
 export const issueExecutionPolicySchema = z.object({
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
@@ -252,6 +263,7 @@ export const issueExecutionPolicySchema = z.object({
   monitor: issueExecutionMonitorPolicySchema.optional().nullable(),
   reviewPreset: lowTrustReviewPresetPolicySchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
+  admission: issueExecutionAdmissionRequirementsSchema.optional(),
   maxReviewRounds: z.number().int().positive().max(50).optional().nullable().default(null),
 });
 

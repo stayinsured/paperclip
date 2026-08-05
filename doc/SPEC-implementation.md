@@ -953,9 +953,12 @@ instances return `404`.
 
 Server behavior:
 
-1. single SQL update with `WHERE id = ? AND status IN (?) AND (assignee_agent_id IS NULL OR assignee_agent_id = :agentId)`
-2. if updated row count is 0, return `409` with current owner/status
-3. successful checkout sets `assignee_agent_id`, `status = in_progress`, and `started_at`
+1. run fail-closed execution admission before activation: active adapter, issue-allowed model/adapter, gateway canary, readable/writable workspace canary, declared non-secret capability profile, profile freshness, and explicit production-provider authorization when production mutation is requested
+2. single SQL update with `WHERE id = ? AND status IN (?) AND (assignee_agent_id IS NULL OR assignee_agent_id = :agentId)`
+3. if admission fails, return `422` with the secret-free capability matrix; if updated row count is 0, return `409` with current owner/status
+4. successful checkout sets `assignee_agent_id`, `status = in_progress`, and `started_at`
+
+The same admission gate applies to direct `PATCH` transitions into `in_progress` and to queued heartbeats before they are promoted to `running`. Production-provider mutation is prohibited unless both the issue policy requests it and the current agent profile explicitly authorizes it.
 
 `POST /issues/:issueId/admin/force-release` is an operator recovery endpoint for stale harness locks. It requires board access to the issue company, clears checkout and execution run lock fields, and may clear the agent assignee when `clearAssignee=true` is passed. The route must write an `issue.admin_force_release` activity log entry containing the previous checkout and execution run IDs.
 

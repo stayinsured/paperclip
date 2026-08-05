@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { and, asc, desc, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -89,6 +89,7 @@ import {
   type IssueWakeDiagnosticWakeRequest,
   type IssueWakeDiagnosticsResponse,
   type IssueRelationIssueSummary,
+  type IssueWorkProduct,
   type IssueCommentPresentation,
   type IssueWatchdogDiscoveryKind,
   type ProjectWorkspace,
@@ -131,6 +132,7 @@ import {
   publishActivity,
   projectService,
   routineService,
+  resolveWorkProductHandoff,
   workProductService,
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
@@ -2751,6 +2753,101 @@ export function issueRoutes(
   };
   const feedbackExportService = opts?.feedbackExportService;
   const environmentsSvc = environmentService(db);
+
+  async function emitWorkProductHandoff(product: IssueWorkProduct) {
+    const handoff = resolveWorkProductHandoff(product);
+    if (!handoff) return false;
+    const [targetIssue, nextOwner] = await Promise.all([
+      svc.getById(handoff.targetIssueId),
+      agentsSvc.getById(handoff.nextOwnerAgentId),
+    ]);
+    if (!targetIssue || targetIssue.companyId !== product.companyId) {
+      throw unprocessable("Work product handoff target is unavailable", { handoffKey: handoff.handoffKey });
+    }
+    if (!nextOwner || nextOwner.companyId !== product.companyId || nextOwner.status === "terminated") {
+      throw unprocessable("Work product handoff owner is not invokable", { handoffKey: handoff.handoffKey });
+    }
+
+    const emitted = await db.transaction(async (tx) => {
+      await tx.select({ id: issueRows.id }).from(issueRows)
+        .where(and(eq(issueRows.id, targetIssue.id), eq(issueRows.companyId, product.companyId)))
+        .for("update");
+      const existing = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
+        eq(activityLog.companyId, product.companyId),
+        eq(activityLog.action, "issue.work_product_handoff_emitted"),
+        eq(activityLog.entityId, targetIssue.id),
+        sql`${activityLog.details} ->> 'handoffKey' = ${handoff.handoffKey}`,
+      )).limit(1).then((rows) => rows[0] ?? null);
+      if (existing) return false;
+
+      await tx.insert(issueComments).values({
+        companyId: product.companyId,
+        issueId: targetIssue.id,
+        authorType: "system",
+        body: [
+          `Work product handoff \`${handoff.transitionKey}\` is ready for @${nextOwner.name}.`,
+          "",
+          `- Work product: \`${product.title}\` (\`${product.status}\`)`,
+          ...(handoff.summary ? [`- Handoff: ${handoff.summary}`] : []),
+          `- Next owner: ${nextOwner.name}`,
+        ].join("\n"),
+        metadata: {
+          version: 1,
+          sections: [{
+            title: "Work product handoff",
+            rows: [
+              { type: "key_value", label: "Handoff key", value: handoff.handoffKey },
+              { type: "key_value", label: "Work product", value: product.id },
+              { type: "key_value", label: "Next owner", value: handoff.nextOwnerAgentId },
+            ],
+          }],
+        },
+      });
+      await tx.insert(activityLog).values({
+        companyId: product.companyId,
+        actorType: "system",
+        actorId: "work_product_handoff",
+        action: "issue.work_product_handoff_emitted",
+        entityType: "issue",
+        entityId: targetIssue.id,
+        agentId: handoff.nextOwnerAgentId,
+        details: {
+          handoffKey: handoff.handoffKey,
+          workProductId: product.id,
+          sourceIssueId: product.issueId,
+          transitionKey: handoff.transitionKey,
+          nextOwnerAgentId: handoff.nextOwnerAgentId,
+        },
+      });
+      return true;
+    });
+    if (!emitted) return false;
+
+    void heartbeat.wakeup(handoff.nextOwnerAgentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "work_product_handoff",
+      idempotencyKey: handoff.handoffKey,
+      payload: {
+        issueId: targetIssue.id,
+        workProductId: product.id,
+        transitionKey: handoff.transitionKey,
+      },
+      requestedByActorType: "system",
+      requestedByActorId: "work_product_handoff",
+      contextSnapshot: {
+        issueId: targetIssue.id,
+        taskId: targetIssue.id,
+        wakeReason: "work_product_handoff",
+        source: "work_product.handoff",
+        workProductId: product.id,
+        transitionKey: handoff.transitionKey,
+      },
+    }).catch((err) => {
+      logger.error({ err, handoffKey: handoff.handoffKey }, "work product handoff wake failed");
+    });
+    return true;
+  }
 
   async function queueTaskWatchdogEvaluation(issue: { id: string; companyId: string }, runId?: string | null) {
     await taskWatchdogsSvc
@@ -7023,6 +7120,7 @@ export function issueRoutes(
       entityId: issue.id,
       details: { workProductId: product.id, type: product.type, provider: product.provider },
     });
+    await emitWorkProductHandoff(product);
     await revalidateActiveSourceRecoveryAfterCommittedWrite({
       issue,
       trigger: "work_product",
@@ -7222,6 +7320,7 @@ export function issueRoutes(
       entityId: existing.issueId,
       details: { workProductId: product.id, changedKeys: Object.keys(req.body).sort() },
     });
+    await emitWorkProductHandoff(product);
     await revalidateActiveSourceRecoveryAfterCommittedWrite({
       issue,
       trigger: "work_product",
@@ -9581,6 +9680,24 @@ export function issueRoutes(
             blockerIssueIds: dependent.blockerIssueIds,
             source: "issue.blockers_resolved",
             mutation: "blocker_done",
+          });
+        }
+      }
+
+      const becameCancelled = existing.status !== "cancelled" && issue.status === "cancelled";
+      if (becameCancelled && (issue.reconciledCancelledBlockerDependentIds?.length ?? 0) > 0) {
+        const dependents = await svc.listWakeableDependentsAfterBlockerReconciliation(
+          issue.id,
+          issue.reconciledCancelledBlockerDependentIds ?? [],
+        );
+        for (const dependent of dependents) {
+          await addDependencyResolvedWakeup({
+            agentId: dependent.assigneeAgentId,
+            dependentIssueId: dependent.id,
+            resolvedBlockerIssueId: issue.id,
+            blockerIssueIds: dependent.blockerIssueIds,
+            source: "issue.blockers_reconciled",
+            mutation: "blocker_cancelled",
           });
         }
       }
