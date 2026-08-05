@@ -38,7 +38,7 @@ describePostgres("execution admission", () => {
     const projectId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
-    const now = new Date("2026-08-05T09:00:00.000Z");
+    const now = new Date();
     const admissionPolicy = {
       requiredCapabilities: ["repository_write", "github_workflow_dispatch", "observability_read"],
       allowedAdapterTypes: ["process"],
@@ -138,6 +138,14 @@ describePostgres("execution admission", () => {
     });
     expect(productionDenied.admitted).toBe(false);
     expect(productionDenied.checks.find((check) => check.code === "production_authorized")?.passed).toBe(false);
+    const staleProfileDenied = await evaluateExecutionAdmission(db, {
+      companyId,
+      issueId,
+      agentId,
+      now: new Date(now.getTime() + (admissionPolicy.maxProfileAgeSeconds + 1) * 1_000),
+    });
+    expect(staleProfileDenied.admitted).toBe(false);
+    expect(staleProfileDenied.checks.find((check) => check.code === "profile_fresh")?.passed).toBe(false);
     await expect(issueService(db).update(issueId, {
       status: "in_progress",
       assigneeAgentId: agentId,

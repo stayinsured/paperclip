@@ -7968,11 +7968,6 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
       await assertAssignableAgent(db, issueCompany.companyId, agentId, { kind: "work" });
-      await assertExecutionAdmission(db, {
-        companyId: issueCompany.companyId,
-        issueId: id,
-        agentId,
-      });
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);
@@ -8007,6 +8002,12 @@ export function issueService(db: Db) {
           unresolvedBlockers,
         });
       }
+
+      await assertExecutionAdmission(db, {
+        companyId: issueCompany.companyId,
+        issueId: id,
+        agentId,
+      });
 
       const sameRunAssigneeCondition = checkoutRunId
         ? and(
