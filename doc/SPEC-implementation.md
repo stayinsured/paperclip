@@ -908,6 +908,7 @@ instances return `404`.
 ## 10.3 Agents
 
 - `GET /companies/:companyId/agents`
+- `GET /companies/:companyId/agent-metadata-audit` (strict metadata-only projection; active same-company QA agents may read it without agent-config mutation authority)
 - `POST /companies/:companyId/agents`
 - `GET /agents/:agentId`
 - `PATCH /agents/:agentId`

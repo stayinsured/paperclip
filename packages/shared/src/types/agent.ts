@@ -132,6 +132,43 @@ export interface AgentDetail extends Agent {
   access: AgentAccessState;
 }
 
+export type AgentMetadataAuditEnvironmentBindingType =
+  | "plain"
+  | "secret_ref"
+  | "user_secret_ref"
+  | "unknown";
+
+export interface AgentMetadataAuditEnvironmentBinding {
+  name: string;
+  type: AgentMetadataAuditEnvironmentBindingType;
+  target: string | null;
+}
+
+export interface AgentMetadataAuditSkillIdentity {
+  key: string;
+  versionId: string | null;
+}
+
+/**
+ * Strict read-only projection for independent agent-roster audits.
+ *
+ * Keep this contract metadata-only. In particular, it must never grow raw
+ * adapter/runtime configuration, env values, prompts, paths, or materialized
+ * skill content.
+ */
+export interface AgentMetadataAuditEntry {
+  id: string;
+  name: string;
+  role: string;
+  title: string | null;
+  status: AgentStatus;
+  adapterType: AgentAdapterType;
+  configuredModel: string | null;
+  maxConcurrentRuns: number | null;
+  environmentBindings: AgentMetadataAuditEnvironmentBinding[];
+  desiredSkills: AgentMetadataAuditSkillIdentity[];
+}
+
 export type ClearAgentErrorResponse = Agent;
 
 export interface AgentKeyCreated {

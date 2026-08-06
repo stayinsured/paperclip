@@ -37,7 +37,12 @@ async function createCompany(db: ReturnType<typeof createDb>, label: string) {
 async function createAgent(
   db: ReturnType<typeof createDb>,
   companyId: string,
-  input: { role?: string; reportsTo?: string | null; permissions?: Record<string, unknown> } = {},
+  input: {
+    role?: string;
+    status?: "active" | "paused" | "idle" | "running" | "error" | "pending_approval" | "terminated";
+    reportsTo?: string | null;
+    permissions?: Record<string, unknown>;
+  } = {},
 ) {
   return db
     .insert(agents)
@@ -45,6 +50,7 @@ async function createAgent(
       companyId,
       name: `Agent ${randomUUID()}`,
       role: input.role ?? "engineer",
+      status: input.status ?? "idle",
       reportsTo: input.reportsTo ?? null,
       permissions: input.permissions ?? {},
       adapterType: "process",
@@ -224,6 +230,78 @@ describeEmbeddedPostgres("authorization service", () => {
       },
     });
     expect(decision.explanation).toContain("Allowed by explicit grant tasks:assign");
+  });
+
+  it("allows metadata-only roster audits for active same-company QA agents", async () => {
+    const company = await createCompany(db, "AgentMetadataAuditQa");
+    const qaAgent = await createAgent(db, company.id, { role: "qa", status: "idle" });
+    const peerAgent = await createAgent(db, company.id, { role: "engineer", status: "idle" });
+    const authorization = authorizationService(db);
+
+    const decision = await authorization.decide({
+      actor: { type: "agent", agentId: qaAgent.id, companyId: company.id, source: "agent_key" },
+      action: "agent_metadata:audit",
+      resource: { type: "company", companyId: company.id },
+    });
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      reason: "allow_company_agent",
+      explanation: expect.stringContaining("metadata-only audit projection"),
+    });
+
+    const actor = { type: "agent" as const, agentId: qaAgent.id, companyId: company.id, source: "agent_key" as const };
+    await expect(authorization.decide({
+      actor,
+      action: "agent_config:read",
+      resource: { type: "agent", companyId: company.id, agentId: peerAgent.id },
+    })).resolves.toMatchObject({ allowed: false });
+    await expect(authorization.decide({
+      actor,
+      action: "agent_config:update",
+      resource: { type: "agent", companyId: company.id, agentId: peerAgent.id },
+    })).resolves.toMatchObject({ allowed: false });
+    await expect(authorization.decide({
+      actor,
+      action: "skill_config:update",
+      resource: { type: "company", companyId: company.id },
+    })).resolves.toMatchObject({ allowed: false });
+    await expect(authorization.decide({
+      actor,
+      action: "environments:manage",
+      resource: { type: "company", companyId: company.id },
+    })).resolves.toMatchObject({ allowed: false });
+  });
+
+  it("denies metadata roster audits without the active QA role", async () => {
+    const company = await createCompany(db, "AgentMetadataAuditDenied");
+    const engineer = await createAgent(db, company.id, { role: "engineer", status: "idle" });
+    const terminatedQa = await createAgent(db, company.id, { role: "qa", status: "terminated" });
+    const authorization = authorizationService(db);
+
+    await expect(authorization.decide({
+      actor: { type: "agent", agentId: engineer.id, companyId: company.id, source: "agent_key" },
+      action: "agent_metadata:audit",
+      resource: { type: "company", companyId: company.id },
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_missing_grant" });
+
+    await expect(authorization.decide({
+      actor: { type: "agent", agentId: terminatedQa.id, companyId: company.id, source: "agent_key" },
+      action: "agent_metadata:audit",
+      resource: { type: "company", companyId: company.id },
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_missing_membership" });
+  });
+
+  it("denies cross-company metadata roster audits", async () => {
+    const actorCompany = await createCompany(db, "AgentMetadataAuditActor");
+    const targetCompany = await createCompany(db, "AgentMetadataAuditTarget");
+    const qaAgent = await createAgent(db, actorCompany.id, { role: "qa", status: "idle" });
+
+    await expect(authorizationService(db).decide({
+      actor: { type: "agent", agentId: qaAgent.id, companyId: actorCompany.id, source: "agent_key" },
+      action: "agent_metadata:audit",
+      resource: { type: "company", companyId: targetCompany.id },
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_company_boundary" });
   });
 
   it("allows suggest grants to read peer agent configuration", async () => {
