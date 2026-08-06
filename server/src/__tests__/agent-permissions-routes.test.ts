@@ -435,7 +435,7 @@ describe.sequential("agent permission routes", () => {
     expect(res.body.runtimeConfig).toEqual({});
   }, 20_000);
 
-  it("returns the strict metadata-only audit projection without resolving secrets or skills", async () => {
+  it("returns active and terminated agents in the strict audit projection without resolving secrets or skills", async () => {
     mockAgentService.list.mockResolvedValue([{
       ...baseAgent,
       name: "QA",
@@ -463,6 +463,13 @@ describe.sequential("agent permission routes", () => {
       },
       permissions: { canCreateAgents: false, internal: "do-not-return-permission" },
       metadata: { private: "do-not-return-metadata" },
+    }, {
+      ...baseAgent,
+      id: "55555555-5555-4555-8555-555555555555",
+      name: "Stacy",
+      role: "engineer",
+      title: "Retired Builder",
+      status: "terminated",
     }]);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
@@ -484,25 +491,40 @@ describe.sequential("agent permission routes", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{
-      id: agentId,
-      name: "QA",
-      role: "qa",
-      title: "Builder",
-      status: "idle",
-      adapterType: "codex_local",
-      configuredModel: "gpt-5.6-sol",
-      maxConcurrentRuns: 4,
-      environmentBindings: [
-        {
-          name: "GITHUB_ACCESS",
-          type: "secret_ref",
-          target: "33333333-3333-4333-8333-333333333333",
-        },
-        { name: "RAILWAY_TOKEN", type: "plain", target: "inline" },
-      ],
-      desiredSkills: [{ key: "para-memory-files", versionId: null }],
-    }]);
+    expect(res.body).toEqual([
+      {
+        id: agentId,
+        name: "QA",
+        role: "qa",
+        title: "Builder",
+        status: "idle",
+        adapterType: "codex_local",
+        configuredModel: "gpt-5.6-sol",
+        maxConcurrentRuns: 4,
+        environmentBindings: [
+          {
+            name: "GITHUB_ACCESS",
+            type: "secret_ref",
+            target: "33333333-3333-4333-8333-333333333333",
+          },
+          { name: "RAILWAY_TOKEN", type: "plain", target: "inline" },
+        ],
+        desiredSkills: [{ key: "para-memory-files", versionId: null }],
+      },
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        name: "Stacy",
+        role: "engineer",
+        title: "Retired Builder",
+        status: "terminated",
+        adapterType: "process",
+        configuredModel: null,
+        maxConcurrentRuns: null,
+        environmentBindings: [],
+        desiredSkills: [],
+      },
+    ]);
+    expect(mockAgentService.list).toHaveBeenCalledWith(companyId, { includeTerminated: true });
     expect(mockAccessService.decide).toHaveBeenCalledWith({
       actor: expect.objectContaining({ type: "agent", agentId, companyId }),
       action: "agent_metadata:audit",

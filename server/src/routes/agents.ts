@@ -2220,7 +2220,7 @@ export function agentRoutes(
   router.get("/companies/:companyId/agent-metadata-audit", async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanAuditAgentMetadata(req, companyId);
-    const rows = await svc.list(companyId);
+    const rows = await svc.list(companyId, { includeTerminated: true });
     res.json(buildAgentMetadataAuditProjection(rows));
   });
 
