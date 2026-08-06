@@ -57,7 +57,6 @@ export type AuthorizationActor =
 
 export type AuthorizationAction =
   | PermissionKey
-  | "agent_metadata:audit"
   | "agent_config:read"
   | "agent_config:update"
   | "skill_config:update"
@@ -143,12 +142,7 @@ function companyIdForResource(resource: AuthorizationResource) {
 }
 
 function permissionForAction(action: AuthorizationAction): PermissionKey | null {
-  if (
-    action === "agent_metadata:audit" ||
-    action === "agent_config:read" ||
-    action === "agent_config:update" ||
-    action === "skill_config:update"
-  ) {
+  if (action === "agent_config:read" || action === "agent_config:update" || action === "skill_config:update") {
     return null;
   }
   if (
@@ -200,10 +194,6 @@ function scopeIncludesId(ids: string[], id: string | null | undefined) {
 
 function isSimpleAssignableAgentStatus(status: string | null | undefined) {
   return status !== "pending_approval" && status !== "terminated";
-}
-
-function isActiveAgentMetadataAuditorStatus(status: string | null | undefined) {
-  return status === "active" || status === "idle" || status === "running";
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -989,7 +979,6 @@ export function authorizationService(db: Db) {
       input.action === "decision_queue:manage" ||
       input.action === "decision_queue:read" ||
       input.action === "decision_triage:manage" ||
-      input.action === "agent_metadata:audit" ||
       input.action === "agent_config:read" ||
       input.action === "agent_config:update" ||
       input.action === "skill_config:update" ||
@@ -1164,7 +1153,6 @@ export function authorizationService(db: Db) {
       input.action === "decision_queue:manage" ||
       input.action === "decision_queue:read" ||
       input.action === "decision_triage:manage" ||
-      input.action === "agent_metadata:audit" ||
       input.action === "agent:read" ||
       input.action === "agent:wake" ||
       input.action === "project:read" ||
@@ -1667,7 +1655,6 @@ export function authorizationService(db: Db) {
         if (membership) {
           if (
             input.action === "agent:read" ||
-            input.action === "agent_metadata:audit" ||
             input.action === "company_scope:read" ||
             input.action === "decision_queue:read" ||
             input.action === "issue:read" ||
@@ -1742,7 +1729,6 @@ export function authorizationService(db: Db) {
       if (!permissionKey) {
         if (
           input.action === "agent:read" ||
-          input.action === "agent_metadata:audit" ||
           input.action === "company_scope:read" ||
           input.action === "decision_queue:manage" ||
           input.action === "decision_queue:read" ||
@@ -2023,28 +2009,6 @@ export function authorizationService(db: Db) {
         explanation: policy?.mode === "allowlist"
           ? "Allowed by the responsible user's inbox agent allowlist."
           : "Allowed by the responsible user's default-open inbox policy.",
-      });
-    }
-
-    if (input.action === "agent_metadata:audit") {
-      if (!isActiveAgentMetadataAuditorStatus(actorAgent.status)) {
-        return deny({
-          action: input.action,
-          reason: "deny_missing_membership",
-          explanation: "Agent metadata audit requires an active agent lifecycle state.",
-        });
-      }
-      if (actorAgent.role !== "qa") {
-        return deny({
-          action: input.action,
-          reason: "deny_missing_grant",
-          explanation: "Agent metadata audit requires the QA agent role.",
-        });
-      }
-      return allow({
-        action: input.action,
-        reason: "allow_company_agent",
-        explanation: "Allowed for an active same-company QA agent using the metadata-only audit projection.",
       });
     }
 

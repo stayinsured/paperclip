@@ -108,7 +108,6 @@ import { resolveCoreTrustPreset } from "../services/trust-preset-resolver.js";
 import { readObject } from "../lib/objects.js";
 import { listInvalidOrgChainDescendantIds } from "../services/agent-invokability.js";
 import { logger } from "../middleware/logger.js";
-import { buildAgentMetadataAuditProjection } from "../services/agent-metadata-audit.js";
 import {
   AGENT_PROFILE_CHANGE_CONSENT_FIELDS,
   agentInstructionsChangeTargetKey,
@@ -805,18 +804,6 @@ export function agentRoutes(
       return req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
     }
     return null;
-  }
-
-  async function assertCanAuditAgentMetadata(req: Request, companyId: string) {
-    assertCompanyAccess(req, companyId);
-    const decision = await access.decide({
-      actor: req.actor,
-      action: "agent_metadata:audit",
-      resource: { type: "company", companyId },
-    });
-    if (!decision.allowed) {
-      throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
-    }
   }
 
   async function getAccessibleAgent(req: Request, res: Response, id: string) {
@@ -2215,13 +2202,6 @@ export function agentRoutes(
     await assertCanReadConfigurations(req, companyId);
     const rows = await svc.list(companyId);
     res.json(rows.map((row) => redactAgentConfiguration(row)));
-  });
-
-  router.get("/companies/:companyId/agent-metadata-audit", async (req, res) => {
-    const companyId = req.params.companyId as string;
-    await assertCanAuditAgentMetadata(req, companyId);
-    const rows = await svc.list(companyId, { includeTerminated: true });
-    res.json(buildAgentMetadataAuditProjection(rows));
   });
 
   router.get("/agents/me", async (req, res) => {

@@ -1645,39 +1645,6 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
-const AgentMetadataAuditEntrySchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  role: z.string(),
-  title: z.string().nullable(),
-  status: z.string(),
-  adapterType: z.string(),
-  configuredModel: z.string().nullable(),
-  maxConcurrentRuns: z.number().nullable(),
-  environmentBindings: z.array(z.object({
-    name: z.string(),
-    type: z.enum(["plain", "secret_ref", "user_secret_ref", "unknown"]),
-    target: z.string().nullable(),
-  }).strict()),
-  desiredSkills: z.array(z.object({
-    key: z.string(),
-    versionId: z.string().nullable(),
-  }).strict()),
-}).strict();
-
-registry.registerPath({
-  method: "get",
-  path: "/api/companies/{companyId}/agent-metadata-audit",
-  tags: ["agents"],
-  summary: "List strict agent metadata audit projections for a company",
-  request: { params: z.object({ companyId: z.string() }) },
-  responses: {
-    200: r.ok(z.array(AgentMetadataAuditEntrySchema)),
-    401: r.unauthorized,
-    403: r.forbidden,
-  },
-});
-
 registry.registerPath({
   method: "get",
   path: "/api/companies/{companyId}/org",

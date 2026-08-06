@@ -374,13 +374,6 @@ pnpm paperclipai agent instructions-file:put <agent-id> --path AGENTS.md --conte
 pnpm paperclipai agent instructions-file:delete <agent-id> --path AGENTS.md
 ```
 
-Independent QA agents can read the metadata-only roster audit projection at
-`GET /api/companies/:companyId/agent-metadata-audit`. The response is limited to
-agent identity/lifecycle, adapter and configured model, heartbeat concurrency,
-environment binding names/types/targets, and desired skill identities. It does
-not return raw adapter/runtime configuration, env values, prompts, paths, or
-materialized skills.
-
 Agent config, instructions, skills, project env, environment, secret, and workspace edits affect the next run. Active runs finish with the config they started with. When a saved session, reused workspace, or sandbox lease no longer matches the effective next-run config, Paperclip may start fresh execution and records non-sensitive freshness categories in run result JSON and workspace operation logs.
 
 `agent local-cli` is the quickest way to run local Claude/Codex manually as a Paperclip agent:
