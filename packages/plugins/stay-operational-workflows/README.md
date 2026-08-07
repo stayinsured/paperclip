@@ -2,9 +2,13 @@
 
 Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.
 
-This release performs no provider calls. It deliberately omits outbound HTTP,
-secret resolution, webhooks, and UI capabilities. The database enforces
-read-only modules, disabled destinations, and a zero external-write count.
+Outline and ClickUp remain strictly shadow-only. The Sentry pilot adds a separate,
+fail-closed activation path for read-only polling and one-way Slack notifications.
+It performs no provider call until the exact configuration fingerprint and
+capabilities are present in a current issue-document revision, that revision has
+an accepted board-only confirmation, and both least-privilege provider identity
+proofs are current. The currently accepted pilot policy authorizes zero polling
+and zero Slack messages, so installation alone is inert.
 
 ## Runtime model
 
@@ -70,6 +74,39 @@ separately approved release and migration.
 
 The host resolves and authorizes company scope before worker dispatch. Every SQL
 read/write repeats that company predicate.
+
+## Governed Sentry pilot
+
+The Sentry path polls every five minutes with a ten-minute overlap and a daily
+24-hour backscan. Provider `Link` cursors are persisted only after every issue on
+the page is mapped to a stable company/org/project/Sentry-issue identity. Restart,
+overlap, replay, and recurrence therefore reuse the same Paperclip triage issue.
+
+The worker installs one managed, non-executing triage identity and the
+`sentry-triage-proposal` skill. A valid proposal is stored as immutable revisioned
+JSON in the triage issue's `remediation-proposal` document. The plugin creates a
+board-only confirmation targeting that exact revision. A semantic edit creates a
+new revision and a new confirmation; acceptance of an older revision cannot
+create remediation work. Accepted current proposals create at most one child
+remediation issue and require a separately configured assignee.
+
+Slack receives only the approved summary allowlist: sanitized title, severity and
+confidence, project, first/last seen, aggregate count, confirmed aggregate impact,
+and links to Paperclip and Sentry. The message has no actions. Slack cannot
+approve, create work, or trigger remediation. Ambiguous delivery is never blindly
+retried; rate limits use their retry window and repeated failures create a
+Paperclip exception.
+
+Operator endpoints are:
+
+- `POST /api/plugins/<id>/api/sentry/config` — board-only, company-scoped config upsert.
+- `GET /api/plugins/<id>/api/sentry/report?companyId=<uuid>` — redacted operational report.
+- `POST /api/plugins/<id>/api/sentry/reconcile` — board-only manual reconciliation.
+
+Rollback is a board-authorized config update setting both `pollingEnabled` and
+`slackEnabled` to false. This stops new provider calls while retaining cursors,
+dedupe mappings, notification receipts, and exception evidence. Uninstalling the
+plugin also stops jobs; provider token revocation is the external hard stop.
 
 ## Failure and rollback notes
 

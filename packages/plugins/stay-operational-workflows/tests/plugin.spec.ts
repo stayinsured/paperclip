@@ -51,22 +51,27 @@ function configBody(projectId: string): Record<string, unknown> {
 }
 
 describe("stay operational workflows plugin", () => {
-  it("declares only shadow foundation capabilities and no provider write surface", () => {
+  it("declares shadow foundations plus an approval-gated Sentry notification surface", () => {
     expect(pluginManifestV1Schema.parse(manifest)).toMatchObject({
       id: "staydigital.stay-operational-workflows",
       database: {
         namespaceSlug: "stay_operational_workflows",
         migrationsDir: "migrations",
-        coreReadTables: ["companies", "issues", "projects"],
+        coreReadTables: ["companies", "issues", "projects", "agents"],
       },
-      jobs: [expect.objectContaining({ jobKey: "reconcile", schedule: "*/5 * * * *" })],
+      jobs: expect.arrayContaining([
+        expect.objectContaining({ jobKey: "reconcile", schedule: "*/5 * * * *" }),
+        expect.objectContaining({ jobKey: "sentry-poll", schedule: "*/5 * * * *" }),
+      ]),
     });
     expect(manifest.capabilities).toContain("events.subscribe");
     expect(manifest.capabilities).toContain("jobs.schedule");
     expect(manifest.capabilities).toContain("database.namespace.write");
-    expect(manifest.capabilities).not.toContain("http.outbound");
-    expect(manifest.capabilities).not.toContain("secrets.read-ref");
+    expect(manifest.capabilities).toContain("http.outbound");
+    expect(manifest.capabilities).toContain("secrets.read-ref");
     expect(manifest.capabilities).toContain("projects.read");
+    expect(manifest.agents).toEqual([expect.objectContaining({ agentKey: "sentry-triage", status: "idle" })]);
+    expect(manifest.skills).toEqual([expect.objectContaining({ skillKey: "sentry-triage-proposal" })]);
     expect(manifest.entrypoints.ui).toBeUndefined();
   });
 
@@ -239,13 +244,14 @@ describe("stay operational workflows plugin", () => {
     expect(sql).not.toMatch(/raw_payload|request_body|authorization|secret_value|customer_email/i);
   });
 
-  it("reports health as shadow-only with scheduled reconciliation authoritative", async () => {
+  it("reports shadow-only modules and the separately gated Sentry mode", async () => {
     const health = await plugin.definition.onHealth?.();
     expect(health).toMatchObject({
       status: "ok",
       details: {
-        mode: "shadow",
-        externalWritesEnabled: false,
+        outlineAndClickupMode: "shadow",
+        sentryMode: "configuration-gated",
+        slackApprovalCapability: false,
         authoritativeSource: "scheduled-reconciliation",
         eventRole: "latency-hint",
       },

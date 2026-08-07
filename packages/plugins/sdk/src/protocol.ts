@@ -1458,6 +1458,7 @@ export interface WorkerToHostMethods {
       originKind?: string | null;
       originId?: string | null;
       originRunId?: string | null;
+      idempotencyKey?: string | null;
       blockedByIssueIds?: string[];
       labelIds?: string[];
       executionWorkspaceId?: string | null;

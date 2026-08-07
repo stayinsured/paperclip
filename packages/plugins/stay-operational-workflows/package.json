@@ -1,6 +1,6 @@
 {
   "name": "@staydigital/stay-operational-workflows",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
   "description": "Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.",
@@ -10,6 +10,7 @@
     "build:rollup": "rollup -c",
     "dev": "node ./esbuild.config.mjs --watch",
     "test": "vitest run --config ./vitest.config.ts",
+    "test:sentry": "vitest run --config ./vitest.config.ts tests/sentry.spec.ts",
     "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit"
   },
   "paperclipPlugin": {

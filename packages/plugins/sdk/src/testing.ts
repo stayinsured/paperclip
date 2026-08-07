@@ -495,6 +495,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const routines = new Map<string, Routine>();
   const routineRuns = new Map<string, RoutineRun>();
   const issues = new Map<string, Issue>();
+  const issueIdempotencyKeys = new Map<string, string>();
   const blockedByIssueIds = new Map<string, string[]>();
   const issueComments = new Map<string, IssueComment[]>();
   const issueInteractions = new Map<string, IssueThreadInteraction[]>();
@@ -1585,6 +1586,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
       async create(input) {
         requireCapability(manifest, capabilitySet, "issues.create");
+        const idempotencyKey = input.idempotencyKey?.trim() || null;
+        if (idempotencyKey) {
+          const existingId = issueIdempotencyKeys.get(`${input.companyId}:${idempotencyKey}`);
+          const existing = existingId ? issues.get(existingId) : null;
+          if (existing) return existing;
+        }
         const now = new Date();
         const originKind = normalizePluginOriginKind(
           input.surfaceVisibility === "plugin_operation" && !input.originKind
@@ -1631,6 +1638,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           updatedAt: now,
         };
         issues.set(record.id, record);
+        if (idempotencyKey) {
+          issueIdempotencyKeys.set(`${input.companyId}:${idempotencyKey}`, record.id);
+        }
         if (input.blockedByIssueIds) blockedByIssueIds.set(record.id, [...new Set(input.blockedByIssueIds)]);
         return record;
       },

@@ -1440,6 +1440,8 @@ export interface PluginIssuesClient {
     originKind?: PluginIssueOriginKind;
     originId?: string | null;
     originRunId?: string | null;
+    /** Stable key for atomic replay/overlap dedupe, scoped to the company. */
+    idempotencyKey?: string | null;
     blockedByIssueIds?: string[];
     labelIds?: string[];
     executionWorkspaceId?: string | null;

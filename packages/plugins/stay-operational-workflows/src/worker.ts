@@ -12,6 +12,16 @@ import {
 } from "./contracts.js";
 import { ShadowReconciler } from "./reconciler.js";
 import { PostgresWorkflowRepository } from "./repository.js";
+import {
+  parseSentryPilotConfig,
+  PluginSentryControlPlane,
+  PostgresSentryWorkflowRepository,
+  SentryApiClient,
+  SentryWorkflow,
+  SentryWorkflowConfigError,
+  SlackApiClient,
+  type SentryPilotConfig,
+} from "./modules/sentry/index.js";
 
 const plugin = definePlugin({
   multiCompanyConfig: true,
@@ -19,6 +29,19 @@ const plugin = definePlugin({
   async setup(ctx) {
     const repository = new PostgresWorkflowRepository(ctx.db);
     const reconciler = new ShadowReconciler(repository);
+    const sentryRepository = new PostgresSentryWorkflowRepository(ctx.db);
+    const sentryControlPlane = new PluginSentryControlPlane(ctx);
+    const sentryWorkflow = new SentryWorkflow(
+      sentryRepository,
+      sentryControlPlane,
+      new SentryApiClient(ctx.http),
+      new SlackApiClient(ctx.http),
+      async (config, provider) => {
+        const secretRef = provider === "sentry" ? config.sentry.tokenRef : config.slack.tokenRef;
+        if (!secretRef) throw new SentryWorkflowConfigError(`${provider}_secret_missing`, `${provider} secret reference is missing`);
+        return ctx.secrets.resolve(secretRef, { companyId: config.companyId, configPath: `sentry.${provider}.tokenRef` });
+      },
+    );
 
     const systemAudit = (runId: string | null): AuditIdentity => ({
       actorType: "system",
@@ -52,7 +75,35 @@ const plugin = definePlugin({
       }
     };
 
+    const pollSentryForAllCompanies = async (job: PluginJobContext): Promise<void> => {
+      let offset = 0;
+      const limit = 100;
+      while (true) {
+        const companies = await ctx.companies.list({ limit, offset });
+        for (const company of companies) {
+          try {
+            const result = await sentryWorkflow.reconcileCompany({
+              companyId: company.id,
+              audit: systemAudit(job.runId),
+            });
+            await ctx.metrics.write("sentry_issues_observed", result.observed, { companyId: company.id });
+            await ctx.metrics.write("sentry_triage_created", result.triageCreated, { companyId: company.id });
+            await ctx.metrics.write("sentry_notifications_sent", result.notificationsSent, { companyId: company.id });
+            await ctx.metrics.write("sentry_workflow_exceptions", result.exceptions, { companyId: company.id });
+          } catch {
+            ctx.logger.error("Company Sentry reconciliation failed closed", {
+              companyId: company.id,
+              runId: job.runId,
+            });
+          }
+        }
+        if (companies.length < limit) break;
+        offset += limit;
+      }
+    };
+
     ctx.jobs.register("reconcile", reconcileAllCompanies);
+    ctx.jobs.register("sentry-poll", pollSentryForAllCompanies);
 
     ctx.events.on("issue.created", async (event) => {
       await reconcileEventHint(reconciler, event);
@@ -62,10 +113,26 @@ const plugin = definePlugin({
       await reconcileEventHint(reconciler, event);
     });
 
+    const reconcileSentryDocument = async (event: PluginEvent): Promise<void> => {
+      if (!event.entityId) return;
+      const payload = objectBody(event.payload);
+      const key = typeof payload.key === "string" ? payload.key : payload.documentKey;
+      if (key !== "remediation-proposal") return;
+      await sentryWorkflow.reconcileTriageIssue(event.companyId, event.entityId, {
+        actorType: event.actorType ?? "system",
+        actorId: event.actorId ?? null,
+        runId: null,
+      });
+    };
+    ctx.events.on("issue.document.created", reconcileSentryDocument);
+    ctx.events.on("issue.document.updated", reconcileSentryDocument);
 
     apiHandler = async (input) => {
       if (input.routeKey === "report") {
         return { body: await reconciler.getReport(input.companyId) };
+      }
+      if (input.routeKey === "sentry.report") {
+        return { body: await sentryWorkflow.getReport(input.companyId) };
       }
 
       const body = objectBody(input.body);
@@ -98,6 +165,43 @@ const plugin = definePlugin({
         });
         return { body: { config, mode: "shadow", externalWritesEnabled: false } };
       }
+      if (input.routeKey === "sentry.config.upsert") {
+        const config = parseSentryPilotConfig({ ...body, companyId: input.companyId });
+        const project = await ctx.projects.get(config.projectId, input.companyId);
+        if (!project) {
+          throw new WorkflowRequestError(
+            404,
+            "project_not_found",
+            "Project not found in the authorized company",
+            "Project not found",
+          );
+        }
+        await sentryControlPlane.verifyExactConfigurationApproval(config);
+        await sentryRepository.upsertConfig(config, audit);
+        await ctx.activity.log({
+          companyId: input.companyId,
+          entityType: "project",
+          entityId: config.projectId,
+          message: "Stay Operational Workflows updated the governed Sentry pilot configuration",
+          metadata: {
+            pollingEnabled: config.pollingEnabled,
+            slackEnabled: config.slackEnabled,
+            policyVersion: config.policyVersion,
+            sentryOrganizationId: config.sentry.organizationId,
+            sentryProjectId: config.sentry.projectId,
+            sentryEnvironment: config.sentry.environment,
+            slackTeamId: config.slack.teamId,
+            slackChannelId: config.slack.channelId,
+          },
+        });
+        return {
+          body: {
+            config: redactSentryConfig(config),
+            mode: config.pollingEnabled ? "active-approved" : "disabled",
+            slackNotificationOnly: true,
+          },
+        };
+      }
       if (input.routeKey === "reconcile.manual") {
         const result = await reconciler.reconcileCompany({
           companyId: input.companyId,
@@ -114,6 +218,27 @@ const plugin = definePlugin({
             duplicates: result.duplicates,
             exceptions: result.exceptions,
             externalWrites: 0,
+          },
+        });
+        return { body: result };
+      }
+      if (input.routeKey === "sentry.reconcile.manual") {
+        const result = await sentryWorkflow.reconcileCompany({
+          companyId: input.companyId,
+          mode: "manual",
+          audit,
+        });
+        await ctx.activity.log({
+          companyId: input.companyId,
+          message: "Stay Operational Workflows completed a manual Sentry reconciliation",
+          metadata: {
+            observed: result.observed,
+            triageCreated: result.triageCreated,
+            proposalsBound: result.proposalsBound,
+            notificationsSent: result.notificationsSent,
+            remediationCreated: result.remediationCreated,
+            duplicates: result.duplicates,
+            exceptions: result.exceptions,
           },
         });
         return { body: result };
@@ -156,6 +281,15 @@ const plugin = definePlugin({
           },
         };
       }
+      if (error instanceof SentryWorkflowConfigError) {
+        return {
+          status: 422,
+          body: {
+            error: error.message,
+            code: error.code,
+          },
+        };
+      }
       throw error;
     }
   },
@@ -164,7 +298,8 @@ const plugin = definePlugin({
     return {
       ok: true,
       warnings: [
-        "This release is structurally locked to shadow mode; external writes and provider credentials are unsupported.",
+        "Outline and ClickUp remain structurally locked to shadow mode.",
+        "Sentry polling and Slack notification remain disabled unless exact scope, least-privilege identities, non-expired proofs, and an immutable board-approved configuration revision all match.",
       ],
     };
   },
@@ -172,10 +307,11 @@ const plugin = definePlugin({
   async onHealth() {
     return {
       status: "ok",
-      message: "Shadow reconciliation worker is running",
+      message: "Operational reconciliation worker is running",
       details: {
-        mode: "shadow",
-        externalWritesEnabled: false,
+        outlineAndClickupMode: "shadow",
+        sentryMode: "configuration-gated",
+        slackApprovalCapability: false,
         authoritativeSource: "scheduled-reconciliation",
         eventRole: "latency-hint",
       },
@@ -217,6 +353,20 @@ async function reconcileEventHint(reconciler: ShadowReconciler, event: PluginEve
       runId: null,
     },
   });
+}
+
+function redactSentryConfig(config: SentryPilotConfig): Record<string, unknown> {
+  return {
+    ...config,
+    sentry: {
+      ...config.sentry,
+      tokenRef: config.sentry.tokenRef ? { type: "secret_ref", configured: true } : null,
+    },
+    slack: {
+      ...config.slack,
+      tokenRef: config.slack.tokenRef ? { type: "secret_ref", configured: true } : null,
+    },
+  };
 }
 
 export default plugin;
