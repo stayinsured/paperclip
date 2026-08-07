@@ -133,6 +133,44 @@ describe("buildPaperclipTaskMarkdown", () => {
     expect(compact).toContain("Please also update the changelog.");
   });
 
+  it("inlines the exact pinned Skill Studio revision only in the authoritative initial prompt", () => {
+    const input = {
+      issue: {
+        id: "issue-skill-test",
+        identifier: "PAP-418",
+        title: "Run pinned skill",
+        workMode: "skill_test",
+        harnessKind: "skill_test",
+        description: "Exercise the pinned revision.",
+      },
+      skillTest: {
+        testRunId: "test-run-1",
+        skillId: "skill-1",
+        skillVersionId: "version-7",
+        revisionNumber: 7,
+        label: "approved draft",
+        outputDocumentKey: "output",
+        fileInventory: [
+          { path: "SKILL.md", kind: "skill", content: "# Pinned revision seven\n\nUse exact behavior." },
+          { path: "references/rules.md", kind: "reference", content: "Never consult live files." },
+        ],
+      },
+    };
+
+    const initial = buildPaperclipTaskMarkdown(input);
+    expect(initial).toContain("Pinned skill revision (authoritative initial input):");
+    expect(initial).toContain("Do not discover, scan, read, or fetch the live skill directory");
+    expect(initial).toContain("- Revision: 7");
+    expect(initial).toContain("Pinned file \"SKILL.md\" (\"skill\"):");
+    expect(initial).toContain("# Pinned revision seven\n\nUse exact behavior.");
+    expect(initial).toContain("Never consult live files.");
+    expect(initial.indexOf("Pinned skill revision")).toBeLessThan(initial.indexOf("Issue description:"));
+
+    const compact = buildPaperclipTaskMarkdown({ ...input, includeDescription: false });
+    expect(compact).not.toContain("Pinned skill revision");
+    expect(compact).not.toContain("# Pinned revision seven");
+  });
+
   it("prefers ordinary comment planning guidance over stale accepted confirmation state", () => {
     const commentWake = buildPaperclipTaskMarkdown({
       issue: {

@@ -9,6 +9,7 @@ import {
   agents,
   approvals,
   companyMemberships,
+  companySkillTestRuns,
   documents,
   executionWorkspaces,
   heartbeatRuns,
@@ -3701,6 +3702,45 @@ export function issueRoutes(
     return req.actor.type === "agent" && req.actor.keyScope?.kind === "skill_test";
   }
 
+  async function assertActiveSkillTestScopedMutation(
+    req: Request,
+    res: Response,
+    issue: { id: string; companyId: string; status: string },
+  ) {
+    if (!isSkillTestScopedActor(req)) return true;
+    const testRun = await db
+      .select({
+        id: companySkillTestRuns.id,
+        status: companySkillTestRuns.status,
+        deletedAt: companySkillTestRuns.deletedAt,
+        supersededAt: companySkillTestRuns.supersededAt,
+      })
+      .from(companySkillTestRuns)
+      .where(and(
+        eq(companySkillTestRuns.companyId, issue.companyId),
+        eq(companySkillTestRuns.issueId, issue.id),
+      ))
+      .then((rows) => rows[0] ?? null);
+    const active =
+      issue.status !== "done" &&
+      issue.status !== "cancelled" &&
+      (testRun?.status === "queued" || testRun?.status === "running") &&
+      testRun.deletedAt === null &&
+      testRun.supersededAt === null;
+    if (active) return true;
+    res.status(409).json({
+      error: "Skill Studio test run is terminal; scoped mutations are no longer allowed",
+      details: {
+        issueId: issue.id,
+        issueStatus: issue.status,
+        testRunId: testRun?.id ?? null,
+        testRunStatus: testRun?.status ?? null,
+        code: "skill_test_terminal",
+      },
+    });
+    return false;
+  }
+
   function taskBridgeOriginForActor(req: Request) {
     return isTaskBridgeKeyActor(req) && req.actor.keyId
       ? { originKind: "task_bridge", originId: req.actor.keyId }
@@ -3953,6 +3993,7 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
+    if (!(await assertActiveSkillTestScopedMutation(req, res, issue))) return false;
     // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
     // watched subtree. This must be evaluated before the base assignee-ownership
     // boundary below: that boundary denies an agent mutating an issue owned by a

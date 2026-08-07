@@ -5,6 +5,9 @@ import {
   agents,
   agentWakeupRequests,
   companies,
+  companySkillTestRuns,
+  companySkillVersions,
+  companySkills,
   costEvents,
   createDb,
   documentRevisions,
@@ -1644,4 +1647,304 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(run?.errorCode).toBeNull();
     expect(countExecuteCallsForRun(runId)).toBe(1);
   });
+
+  it("cancels queued, deferred, and scheduled Skill Studio work before any adapter invocation", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Cancelled Skill Studio harness",
+      status: "cancelled",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      harnessKind: "skill_test",
+      workMode: "skill_test",
+    });
+    const queued = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "skill_test_run_created",
+    });
+    const scheduled = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "issue_continuation_needed",
+      invocationSource: "automation",
+      scheduledRetryReason: "process_lost",
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "scheduled_retry",
+        scheduledRetryAt: new Date(Date.now() - 60_000),
+      })
+      .where(eq(heartbeatRuns.id, scheduled.runId));
+    const deferredWakeId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: deferredWakeId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_commented",
+      payload: { issueId },
+      status: "deferred_issue_execution",
+    });
+
+    const cancelled = await heartbeat.cancelIssueInvocations(
+      companyId,
+      issueId,
+      "Cancelled by Skill Studio operator request",
+      {
+        errorCode: "skill_test_cancelled",
+        resultJson: {
+          stopReason: "skill_test_cancelled",
+          skillTestCancellation: { kind: "operator", issueId },
+        },
+      },
+    );
+    await heartbeat.promoteDueScheduledRetries(new Date());
+    await heartbeat.resumeQueuedRuns();
+
+    expect(cancelled.cancelledRunIds).toEqual(expect.arrayContaining([queued.runId, scheduled.runId]));
+    expect(cancelled.cancelledWakeupIds).toEqual(expect.arrayContaining([
+      queued.wakeupRequestId,
+      scheduled.wakeupRequestId,
+      deferredWakeId,
+    ]));
+    const persistedRuns = await db
+      .select({
+        id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        resultJson: heartbeatRuns.resultJson,
+      })
+      .from(heartbeatRuns);
+    expect(persistedRuns).toHaveLength(2);
+    for (const run of persistedRuns) {
+      expect(run.status).toBe("cancelled");
+      expect(run.errorCode).toBe("skill_test_cancelled");
+      expect(run.resultJson).toMatchObject({
+        stopReason: "skill_test_cancelled",
+        skillTestCancellation: { kind: "operator", issueId },
+      });
+    }
+    const persistedWakeups = await db
+      .select({ status: agentWakeupRequests.status })
+      .from(agentWakeupRequests);
+    expect(persistedWakeups).toHaveLength(3);
+    expect(persistedWakeups.every((wake) => wake.status === "cancelled")).toBe(true);
+    expect(countExecuteCallsForRun(queued.runId)).toBe(0);
+    expect(countExecuteCallsForRun(scheduled.runId)).toBe(0);
+    const [persistedIssue] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, issueId));
+    expect(persistedIssue?.status).toBe("cancelled");
+  });
+
+  it("cancels a stale persisted Skill Studio heartbeat at dispatch without invoking the adapter", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Terminal Skill Studio harness",
+      status: "cancelled",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      harnessKind: "skill_test",
+      workMode: "skill_test",
+    });
+    const queued = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "skill_test_run_created",
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const [run] = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, queued.runId));
+      return run?.status === "cancelled";
+    });
+    const [run] = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, queued.runId));
+    expect(run).toMatchObject({ status: "cancelled", errorCode: "skill_test_terminal" });
+    expect(countExecuteCallsForRun(queued.runId)).toBe(0);
+  });
+
+  it("executes from the persisted pinned skill revision and suppresses only the skill-test continuation summary", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const skillId = randomUUID();
+    const versionId = randomUUID();
+    const testRunId = randomUUID();
+    const skillIssueId = randomUUID();
+    await db.insert(companySkills).values({
+      id: skillId,
+      companyId,
+      key: "company/test/pinned",
+      slug: "pinned",
+      name: "Pinned Skill",
+      markdown: "# LIVE HEAD MUST NOT BE USED",
+      sourceType: "local_path",
+      sourceLocator: "/definitely/missing/live-skill-directory",
+      fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+    });
+    await db.insert(companySkillVersions).values({
+      id: versionId,
+      companyId,
+      companySkillId: skillId,
+      revisionNumber: 7,
+      label: "immutable revision",
+      fileInventory: [
+        { path: "SKILL.md", kind: "skill", content: "# PINNED REVISION SEVEN\n\nExact immutable content." },
+        { path: "references/contract.md", kind: "reference", content: "Pinned contract contents." },
+      ],
+    });
+    await db.insert(issues).values({
+      id: skillIssueId,
+      companyId,
+      title: "Execute pinned skill",
+      description: "Use the pinned skill revision.",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      harnessKind: "skill_test",
+      workMode: "skill_test",
+    });
+    await db.insert(companySkillTestRuns).values({
+      id: testRunId,
+      companyId,
+      skillId,
+      inputSnapshot: "Exercise the pinned revision",
+      skillVersionId: versionId,
+      agentId,
+      agentConfigSnapshot: {},
+      issueId: skillIssueId,
+      harnessIssueDescription: "Exercise the pinned revision",
+      status: "queued",
+      outputDocumentKey: "output",
+    });
+    const skillRun = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId: skillIssueId,
+      wakeReason: "skill_test_run_created",
+    });
+    let skillAdapterInput: any = null;
+    mockAdapterExecute.mockImplementationOnce(async (input) => {
+      skillAdapterInput = input;
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Pinned Skill Studio run completed.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const [run] = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, skillRun.runId));
+      return run?.status === "succeeded";
+    }, 10_000);
+    await heartbeat.waitForRunExecutionDrain(skillRun.runId);
+    const [skillHeartbeat] = await db
+      .select({
+        status: heartbeatRuns.status,
+        error: heartbeatRuns.error,
+        errorCode: heartbeatRuns.errorCode,
+        resultJson: heartbeatRuns.resultJson,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, skillRun.runId));
+    expect(skillHeartbeat?.status, JSON.stringify(skillHeartbeat)).toBe("succeeded");
+    expect(skillAdapterInput).toEqual(expect.objectContaining({
+      runId: skillRun.runId,
+      context: expect.objectContaining({
+        paperclipTaskMarkdown: expect.any(String),
+      }),
+    }));
+    expect(skillAdapterInput?.context.paperclipTaskMarkdown).toContain("# PINNED REVISION SEVEN");
+    expect(skillAdapterInput?.context.paperclipTaskMarkdown).toContain("Pinned contract contents.");
+    expect(skillAdapterInput?.context.paperclipTaskMarkdown).not.toContain("LIVE HEAD MUST NOT BE USED");
+    expect(skillAdapterInput?.context.paperclipTaskMarkdown).toContain(
+      "Do not discover, scan, read, or fetch the live skill directory",
+    );
+    expect(await db
+      .select()
+      .from(issueDocuments)
+      .where(eq(issueDocuments.issueId, skillIssueId))).toHaveLength(0);
+
+    const ordinaryIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: ordinaryIssueId,
+      companyId,
+      title: "Ordinary continuation",
+      description: "Continue ordinary work.",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+    const ordinaryRun = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId: ordinaryIssueId,
+      wakeReason: "issue_continuation_needed",
+      invocationSource: "automation",
+    });
+    mockAdapterExecute.mockImplementationOnce(async (input) => {
+      await db.insert(issueComments).values({
+        companyId,
+        issueId: ordinaryIssueId,
+        body: "Ordinary run left durable progress.",
+        authorAgentId: agentId,
+        createdByRunId: input.runId,
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Ordinary run completed.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const [run] = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, ordinaryRun.runId));
+      return run?.status === "succeeded";
+    }, 10_000);
+    await heartbeat.waitForRunExecutionDrain(ordinaryRun.runId);
+    const ordinarySummary = await db
+      .select()
+      .from(issueDocuments)
+      .where(eq(issueDocuments.issueId, ordinaryIssueId));
+    expect(ordinarySummary).toEqual([
+      expect.objectContaining({ key: ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY }),
+    ]);
+  }, 20_000);
+
 });

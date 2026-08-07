@@ -6710,10 +6710,29 @@ export function companySkillService(db: Db) {
         error: input.error ?? null,
         updatedAt: new Date(),
       })
-      .where(and(eq(companySkillTestRuns.companyId, input.companyId), eq(companySkillTestRuns.id, row.id)))
+      .where(and(
+        eq(companySkillTestRuns.companyId, input.companyId),
+        eq(companySkillTestRuns.id, row.id),
+        inArray(companySkillTestRuns.status, ["queued", "running"]),
+        isNull(companySkillTestRuns.deletedAt),
+        isNull(companySkillTestRuns.supersededAt),
+      ))
       .returning()
       .then((rows) => rows[0] ?? null);
-    return updated ? (await hydrateTestRuns(input.companyId, [updated]))[0] ?? null : null;
+    if (updated) return (await hydrateTestRuns(input.companyId, [updated]))[0] ?? null;
+
+    // Completion and cancellation can race with a late heartbeat finalizer.
+    // The guarded update above makes the first terminal disposition win; return
+    // that persisted disposition instead of letting a stale caller overwrite it.
+    const terminal = await db
+      .select()
+      .from(companySkillTestRuns)
+      .where(and(
+        eq(companySkillTestRuns.companyId, input.companyId),
+        eq(companySkillTestRuns.id, row.id),
+      ))
+      .then((rows) => rows[0] ?? null);
+    return terminal ? (await hydrateTestRuns(input.companyId, [terminal]))[0] ?? null : null;
   }
 
   async function markTestRunRunning(companyId: string, issueId: string): Promise<CompanySkillTestRun | null> {
@@ -6753,13 +6772,18 @@ export function companySkillService(db: Db) {
     if (["succeeded", "failed", "cancelled"].includes(existing.status)) {
       return (await hydrateTestRuns(companyId, [existing]))[0] ?? null;
     }
-    await deps.cancelHarnessIssue(existing.issueId);
-    return completeTestRunForIssue({
+    // Persist the test-run terminal state first. The route callback then makes
+    // the linked harness terminal before it tears down any process, so late
+    // scoped writes fail closed throughout process termination.
+    const cancelled = await completeTestRunForIssue({
       companyId,
       issueId: existing.issueId,
       outcome: "cancelled",
       error: "Cancelled by operator",
     });
+    if (cancelled?.status !== "cancelled") return cancelled;
+    await deps.cancelHarnessIssue(existing.issueId);
+    return cancelled;
   }
 
   async function deleteTestRun(

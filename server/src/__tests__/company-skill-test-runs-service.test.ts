@@ -23,6 +23,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { companySkillService } from "../services/company-skills.js";
+import { issueService } from "../services/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -750,4 +751,61 @@ describeEmbeddedPostgres("companySkillService skill test runs", () => {
       workProducts: [],
     });
   });
+
+  it("makes cancellation terminal before teardown and rejects a late successful finalizer", async () => {
+    const { companyId, skillId, agentId } = await seedSkillAndAgent();
+    const run = await svc.createTestRun(
+      companyId,
+      skillId,
+      { content: "race cancellation against finalization", agentId },
+      { type: "user", userId: "local-board" },
+      runDeps(companyId),
+    );
+
+    let statusObservedBeforeTeardown: string | null = null;
+    let lateFinalizerStatus: string | null = null;
+    const cancelled = await svc.cancelTestRun(companyId, skillId, run.id, {
+      cancelHarnessIssue: async (issueId) => {
+        statusObservedBeforeTeardown = await db
+          .select({ status: companySkillTestRuns.status })
+          .from(companySkillTestRuns)
+          .where(eq(companySkillTestRuns.id, run.id))
+          .then((rows) => rows[0]?.status ?? null);
+        await db
+          .update(issues)
+          .set({ status: "cancelled" })
+          .where(eq(issues.id, issueId));
+        lateFinalizerStatus = (await svc.completeTestRunForIssue({
+          companyId,
+          issueId,
+          outcome: "succeeded",
+        }))?.status ?? null;
+      },
+    });
+
+    expect(statusObservedBeforeTeardown).toBe("cancelled");
+    expect(lateFinalizerStatus).toBe("cancelled");
+    expect(cancelled?.status).toBe("cancelled");
+    const [persistedRun] = await db
+      .select({ status: companySkillTestRuns.status, error: companySkillTestRuns.error })
+      .from(companySkillTestRuns)
+      .where(eq(companySkillTestRuns.id, run.id));
+    const [persistedIssue] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, run.issueId));
+    expect(persistedRun).toMatchObject({ status: "cancelled", error: "Cancelled by operator" });
+    expect(persistedIssue?.status).toBe("cancelled");
+
+    await expect(issueService(db).update(run.issueId, { status: "done" })).rejects.toMatchObject({
+      status: 409,
+      details: expect.objectContaining({ code: "skill_test_terminal" }),
+    });
+    const [stillCancelled] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, run.issueId));
+    expect(stillCancelled?.status).toBe("cancelled");
+  });
+
 });

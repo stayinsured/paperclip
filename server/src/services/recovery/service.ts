@@ -2067,6 +2067,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const runningAgent = await getAgent(input.run.agentId);
     if (!runningAgent || runningAgent.companyId !== input.run.companyId) return { kind: "skipped" as const };
     const sourceIssue = await resolveStaleRunSourceIssue(input.run);
+    if (sourceIssue?.harnessKind === "skill_test" || sourceIssue?.workMode === "skill_test") {
+      return { kind: "skipped" as const };
+    }
     const existing = await findOpenStaleRunEvaluation(input.run.companyId, input.run.id);
     if (sourceIssue && isRecoveryOriginIssue(sourceIssue)) {
       await logActivity(db, {
@@ -3676,6 +3679,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     };
 
     for (const issue of candidates) {
+      if (issue.harnessKind === "skill_test" || issue.workMode === "skill_test") {
+        result.skipped += 1;
+        continue;
+      }
       const executionState = issue.status === "in_review"
         ? parseIssueExecutionState(issue.executionState)
         : null;
@@ -4326,6 +4333,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         and(
           visibleIssueCondition(),
           notInArray(issues.originKind, [RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation]),
+          sql`${issues.harnessKind} is distinct from 'skill_test'`,
+          sql`${issues.workMode} is distinct from 'skill_test'`,
         ),
       ));
 

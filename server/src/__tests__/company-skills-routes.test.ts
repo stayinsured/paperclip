@@ -70,6 +70,7 @@ const mockIssueService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(),
   cancelRun: vi.fn(),
+  cancelIssueInvocations: vi.fn(),
 }));
 
 const mockCatalogService = vi.hoisted(() => ({
@@ -2125,7 +2126,21 @@ describe("company skill mutation permissions", () => {
       .post("/api/companies/company-1/skills/skill-1/test-runs/22222222-2222-4222-8222-222222222222/cancel")
       .send({});
     expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("run-1", "Cancelled by skill test run request");
+    expect(mockHeartbeatService.cancelIssueInvocations).toHaveBeenCalledWith(
+      "company-1",
+      "44444444-4444-4444-8444-444444444444",
+      "Cancelled by Skill Studio operator request",
+      expect.objectContaining({
+        errorCode: "skill_test_cancelled",
+        resultJson: expect.objectContaining({
+          stopReason: "skill_test_cancelled",
+          skillTestCancellation: expect.objectContaining({
+            kind: "operator",
+            testRunId: "22222222-2222-4222-8222-222222222222",
+          }),
+        }),
+      }),
+    );
     expect(mockIssueService.update).toHaveBeenCalledWith("44444444-4444-4444-8444-444444444444", expect.objectContaining({
       status: "cancelled",
       actorUserId: "local-board",

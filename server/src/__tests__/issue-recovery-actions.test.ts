@@ -235,6 +235,41 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     return app;
   }
 
+  it("recovers ordinary issues while persisted Skill Studio harnesses never enter generic recovery", async () => {
+    const skillTest = await seedCompany();
+    const ordinary = await seedCompany();
+    await db
+      .update(issues)
+      .set({ status: "todo", harnessKind: "skill_test", workMode: "skill_test" })
+      .where(eq(issues.id, skillTest.sourceIssueId));
+    await db
+      .update(issues)
+      .set({ status: "todo" })
+      .where(eq(issues.id, ordinary.sourceIssueId));
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+
+    const result = await recovery.reconcileStrandedAssignedIssues();
+
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(enqueueWakeup).toHaveBeenCalledWith(
+      ordinary.coderId,
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: ordinary.sourceIssueId }),
+      }),
+    );
+    expect(enqueueWakeup).not.toHaveBeenCalledWith(
+      skillTest.coderId,
+      expect.objectContaining({
+        payload: expect.objectContaining({ issueId: skillTest.sourceIssueId }),
+      }),
+    );
+    expect(await db.select().from(issueRecoveryActions).where(eq(
+      issueRecoveryActions.sourceIssueId,
+      skillTest.sourceIssueId,
+    ))).toHaveLength(0);
+  });
+
   it("upserts one active source-scoped action per issue and keeps company scoping explicit", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const svc = issueRecoveryActionService(db);

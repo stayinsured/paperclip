@@ -681,16 +681,34 @@ export function companySkillRoutes(db: Db) {
       cancelHarnessIssue: async (issueId) => {
         const issue = await issues.getById(issueId);
         if (!issue || issue.companyId !== companyId) return;
-        if (issue.executionRunId) {
-          await heartbeat.cancelRun(issue.executionRunId, "Cancelled by skill test run request");
-        }
-        if (issue.status !== "done" && issue.status !== "cancelled") {
+        if (issue.status !== "cancelled") {
           await issues.update(issueId, {
             status: "cancelled",
             actorAgentId: actor.agentId ?? null,
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
           });
         }
+        await heartbeat.cancelIssueInvocations(
+          companyId,
+          issueId,
+          "Cancelled by Skill Studio operator request",
+          {
+            errorCode: "skill_test_cancelled",
+            resultJson: {
+              stopReason: "skill_test_cancelled",
+              skillTestCancellation: {
+                kind: "operator",
+                skillId,
+                testRunId: runId,
+                issueId,
+                requestedByActorType: actor.actorType,
+                requestedByActorId: actor.actorId,
+              },
+            },
+            eventMessage: "Skill Studio run cancelled by operator",
+            eventPayload: { skillId, testRunId: runId, issueId },
+          },
+        );
       },
     });
     if (!result) {

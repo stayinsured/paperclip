@@ -6057,6 +6057,7 @@ export function buildPaperclipTaskMarkdown(input: {
     identifier: string | null;
     title: string;
     workMode?: string | null;
+    harnessKind?: string | null;
     description?: string | null;
   } | null;
   ancestors?: Array<{
@@ -6075,6 +6076,15 @@ export function buildPaperclipTaskMarkdown(input: {
     status?: string | null;
   } | null;
   acceptedPlanContinuation?: boolean;
+  skillTest?: {
+    testRunId: string;
+    skillId: string;
+    skillVersionId: string;
+    revisionNumber: number;
+    label: string | null;
+    outputDocumentKey: string;
+    fileInventory: Array<{ path: string; kind: string; content: string }>;
+  } | null;
   // false builds the compact variant used for resume deltas, where the session
   // already received the description with the assignment.
   includeDescription?: boolean;
@@ -6143,6 +6153,31 @@ export function buildPaperclipTaskMarkdown(input: {
         "Accepted plan directive:",
         "Create child issues from the approved plan only. Do not write code or perform implementation work on the source issue.",
       );
+    }
+    if (
+      (issue.workMode === "skill_test" || issue.harnessKind === "skill_test") &&
+      input.skillTest &&
+      input.includeDescription !== false
+    ) {
+      lines.push(
+        "",
+        "Pinned skill revision (authoritative initial input):",
+        "Use the exact immutable file inventory and contents below. Do not discover, scan, read, or fetch the live skill directory; it is not a source of truth for this run.",
+        `- Test run: ${quoteTaskScalar(input.skillTest.testRunId)}`,
+        `- Skill: ${quoteTaskScalar(input.skillTest.skillId)}`,
+        `- Version: ${quoteTaskScalar(input.skillTest.skillVersionId)}`,
+        `- Revision: ${input.skillTest.revisionNumber}`,
+        `- Label: ${quoteTaskScalar(input.skillTest.label ?? "")}`,
+        `- Output document: ${quoteTaskScalar(input.skillTest.outputDocumentKey)}`,
+        `- File count: ${input.skillTest.fileInventory.length}`,
+      );
+      for (const entry of input.skillTest.fileInventory) {
+        lines.push(
+          "",
+          `Pinned file ${quoteTaskScalar(entry.path)} (${quoteTaskScalar(entry.kind)}):`,
+          fenceTaskText(entry.content),
+        );
+      }
     }
     const description = input.includeDescription === false ? "" : issue.description?.trim();
     if (description) {
@@ -7067,6 +7102,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         description: issues.description,
         status: issues.status,
         workMode: issues.workMode,
+        harnessKind: issues.harnessKind,
         priority: issues.priority,
         projectId: issues.projectId,
         projectWorkspaceId: issues.projectWorkspaceId,
@@ -7136,6 +7172,37 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       outputDocumentKey: row.outputDocumentKey,
       fileInventory,
     };
+  }
+
+  async function getPersistedSkillTestHarnessState(companyId: string, issueId: string) {
+    const row = await db
+      .select({
+        issueStatus: issues.status,
+        harnessKind: issues.harnessKind,
+        workMode: issues.workMode,
+        testRunId: companySkillTestRuns.id,
+        testRunStatus: companySkillTestRuns.status,
+        testRunDeletedAt: companySkillTestRuns.deletedAt,
+        testRunSupersededAt: companySkillTestRuns.supersededAt,
+      })
+      .from(issues)
+      .leftJoin(
+        companySkillTestRuns,
+        and(
+          eq(companySkillTestRuns.companyId, issues.companyId),
+          eq(companySkillTestRuns.issueId, issues.id),
+        ),
+      )
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+      .then((rows) => rows[0] ?? null);
+    if (!row || (row.harnessKind !== "skill_test" && row.workMode !== "skill_test")) return null;
+    const active =
+      row.issueStatus !== "done" &&
+      row.issueStatus !== "cancelled" &&
+      (row.testRunStatus === "queued" || row.testRunStatus === "running") &&
+      row.testRunDeletedAt === null &&
+      row.testRunSupersededAt === null;
+    return { ...row, active };
   }
 
   async function getRoutineEnvForExecutionIssue(
@@ -8939,6 +9006,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           identifier: issues.identifier,
           title: issues.title,
           status: issues.status,
+          harnessKind: issues.harnessKind,
+          workMode: issues.workMode,
           assigneeAgentId: issues.assigneeAgentId,
           executionState: issues.executionState,
           projectId: issues.projectId,
@@ -8956,6 +9025,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(eq(agents.id, run.agentId))
         .then((rows) => rows[0] ?? null),
     ]);
+
+    if (issue && (issue.harnessKind === "skill_test" || issue.workMode === "skill_test")) return;
 
     const budgetBlock =
       issue && agent
@@ -9139,6 +9210,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         title: issues.title,
         description: issues.description,
         status: issues.status,
+        harnessKind: issues.harnessKind,
+        workMode: issues.workMode,
         assigneeAgentId: issues.assigneeAgentId,
         assigneeUserId: issues.assigneeUserId,
         executionState: issues.executionState,
@@ -9148,6 +9221,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
       .then((rows) => rows[0] ?? null);
+    if (issue && (issue.harnessKind === "skill_test" || issue.workMode === "skill_test")) return;
     const idempotencyKey = issue
       ? buildFinishSuccessfulRunHandoffIdempotencyKey({
         issueId: issue.id,
@@ -9663,6 +9737,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) return null;
+    if (await getPersistedSkillTestHarnessState(run.companyId, issueId)) return null;
     try {
       return await refreshIssueContinuationSummary({
         db,
@@ -9867,6 +9942,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
+    if (await getPersistedSkillTestHarnessState(run.companyId, issueId)) {
+      if (run.issueCommentStatus !== "not_applicable") {
+        await patchRunIssueCommentStatus(run.id, {
+          issueCommentStatus: "not_applicable",
+          issueCommentSatisfiedByCommentId: null,
+          issueCommentRetryQueuedAt: null,
+        });
+      }
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
     const postedComment = await findRunIssueComment(run.id, run.companyId, issueId);
     if (postedComment) {
       await patchRunIssueCommentStatus(run.id, {
@@ -9980,6 +10066,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
+    if (issueId && await getPersistedSkillTestHarnessState(run.companyId, issueId)) {
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "Process-loss retry suppressed for persisted Skill Studio harness",
+        payload: { issueId },
+      });
+      return null;
+    }
     const retryReason = readNonEmptyString(contextSnapshot.wakeReason) === "issue_monitor_due"
       ? "issue_continuation_needed"
       : "process_lost";
@@ -10997,6 +11093,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
+
+    if (issueId && await getPersistedSkillTestHarnessState(run.companyId, issueId)) {
+      const reason = "Scheduled retry suppressed for persisted Skill Studio harness";
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: reason,
+        payload: { issueId, retryReason },
+      });
+      return {
+        outcome: "not_scheduled" as const,
+        reason,
+        errorCode: "skill_test_retry_suppressed" as const,
+        issueId,
+      };
+    }
 
     if (!baseSchedule) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
@@ -12570,7 +12683,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
-          | "issue_continuation_waiting_on_review";
+          | "issue_continuation_waiting_on_review"
+          | "skill_test_terminal";
         details: Record<string, unknown>;
       };
 
@@ -12597,6 +12711,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         errorCode: "issue_not_found",
         reason: "Cancelled because the target issue no longer exists",
         details: { issueId },
+      };
+    }
+
+    const skillTestState = await getPersistedSkillTestHarnessState(run.companyId, issueId);
+    if (skillTestState && !skillTestState.active) {
+      return {
+        stale: true,
+        errorCode: "skill_test_terminal",
+        reason: "Cancelled because the persisted Skill Studio test run or harness is terminal",
+        details: {
+          issueId,
+          issueStatus: skillTestState.issueStatus,
+          testRunId: skillTestState.testRunId,
+          testRunStatus: skillTestState.testRunStatus,
+          testRunDeleted: skillTestState.testRunDeletedAt !== null,
+          testRunSuperseded: skillTestState.testRunSupersededAt !== null,
+        },
       };
     }
 
@@ -13772,6 +13903,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           status: issueContext.status,
           priority: issueContext.priority,
           workMode: issueContext.workMode,
+          harnessKind: issueContext.harnessKind,
           description: issueContext.description,
           projectId: issueContext.projectId,
           projectWorkspaceId: issueContext.projectWorkspaceId,
@@ -13806,7 +13938,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       delete context.paperclipContinuationSummary;
     }
     const pinnedSkillTestContext =
-      issueRef?.workMode === "skill_test"
+      issueRef?.workMode === "skill_test" || issueRef?.harnessKind === "skill_test"
         ? await getPinnedSkillTestContext(agent.companyId, issueRef.id)
         : null;
     if (pinnedSkillTestContext) {
@@ -13861,6 +13993,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       acceptedPlanContinuation:
         readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation"
         && Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0,
+      skillTest: pinnedSkillTestContext,
     };
     const taskMarkdown = buildPaperclipTaskMarkdown(taskMarkdownInput);
     const taskMarkdownCompact = buildPaperclipTaskMarkdown({ ...taskMarkdownInput, includeDescription: false });
@@ -14146,11 +14279,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       runScopedMentionedSkillKeys,
     );
     const runtimeSkillPreference = readPaperclipSkillSyncPreference(effectiveResolvedConfig);
-    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId, {
-      versionSelections: skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries, {
-        versionPinsEnabled: resolvedInstanceSettings.experimental.enableBetaSkills === true,
-      }),
-    });
+    // Skill Studio runs receive their immutable version contents in the initial
+    // prompt. Do not refresh or materialize the live company-skill inventory:
+    // local-source reconciliation can observe a newer/missing directory and is
+    // not authoritative for the pinned test run.
+    const runtimeSkillEntries = pinnedSkillTestContext
+      ? []
+      : await companySkills.listRuntimeSkillEntries(agent.companyId, {
+          versionSelections: skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries, {
+            versionPinsEnabled: resolvedInstanceSettings.experimental.enableBetaSkills === true,
+          }),
+        });
     let runtimeConfig: Record<string, unknown> = {
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
@@ -15280,7 +15419,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const adapter = getServerAdapter(agent.adapterType);
       const localAgentJwtScope =
-        issueRef?.workMode === "skill_test"
+        issueRef?.workMode === "skill_test" || issueRef?.harnessKind === "skill_test"
           ? { kind: "skill_test" as const, issueId: issueRef.id }
           : { kind: "standard" as const };
       const authToken = adapter.supportsLocalAgentJwt
@@ -15484,6 +15623,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
+        const skillTestDispatchState = issueId
+          ? await getPersistedSkillTestHarnessState(run.companyId, issueId)
+          : null;
+        if (skillTestDispatchState && !skillTestDispatchState.active) {
+          await cancelRunInternal(
+            run.id,
+            "Cancelled before adapter invocation because the Skill Studio test is terminal",
+            {
+              errorCode: "skill_test_terminal",
+              resultJson: {
+                stopReason: "skill_test_terminal",
+                skillTestCancellation: {
+                  kind: "stale_dispatch",
+                  issueId,
+                  testRunId: skillTestDispatchState.testRunId,
+                  issueStatus: skillTestDispatchState.issueStatus,
+                  testRunStatus: skillTestDispatchState.testRunStatus,
+                },
+              },
+              eventMessage: "stale Skill Studio heartbeat cancelled before adapter invocation",
+              eventPayload: { issueId, testRunId: skillTestDispatchState.testRunId },
+            },
+          );
+          return;
+        }
         const adapterContext = { ...context };
         const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
           db,
@@ -16473,6 +16637,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       if (!issue) return null;
       if (issue.executionRunId && issue.executionRunId !== run.id) return null;
+      if (issue.harnessKind === "skill_test" || issue.workMode === "skill_test") {
+        return { kind: "released" as const };
+      }
 
       // Workspace-validation recovery: if the finalizing run failed workspace
       // validation, surface the primary issue for the blocked-recovery comment path.
@@ -18550,6 +18717,96 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return cancelled;
   }
 
+  async function cancelIssueInvocationsInternal(
+    companyId: string,
+    issueId: string,
+    reason: string,
+    options: CancelRunOptions = {},
+  ) {
+    const targetRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
+        sql`(
+          ${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}
+          or ${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${issueId}
+        )`,
+      ));
+
+    const now = new Date();
+    const pendingWakeups = await db
+      .update(agentWakeupRequests)
+      .set({
+        status: "cancelled",
+        finishedAt: now,
+        error: reason,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "claimed"]),
+        sql`(
+          ${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}
+          or ${agentWakeupRequests.payload} ->> 'taskId' = ${issueId}
+          or ${agentWakeupRequests.payload} -> '_paperclipWakeContext' ->> 'issueId' = ${issueId}
+          or ${agentWakeupRequests.payload} -> '_paperclipWakeContext' ->> 'taskId' = ${issueId}
+        )`,
+      ))
+      .returning({ id: agentWakeupRequests.id });
+
+    const passiveRuns = targetRuns.filter((run) => run.status !== "running");
+    for (const run of passiveRuns) {
+      const cancelled = await setRunStatus(run.id, "cancelled", {
+        finishedAt: now,
+        error: reason,
+        errorCode: options.errorCode ?? "cancelled",
+        resultJson: {
+          ...parseObject(run.resultJson),
+          ...(options.resultJson ?? {}),
+        },
+      });
+      await setWakeupStatus(run.wakeupRequestId, "cancelled", { finishedAt: now, error: reason });
+      if (cancelled) {
+        await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: options.eventMessage ?? "run cancelled",
+          ...(options.eventPayload ? { payload: options.eventPayload } : {}),
+        });
+      }
+    }
+
+    const passiveRunIds = passiveRuns.map((run) => run.id);
+    if (passiveRunIds.length > 0) {
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(issues.companyId, companyId),
+          eq(issues.id, issueId),
+          or(inArray(issues.checkoutRunId, passiveRunIds), inArray(issues.executionRunId, passiveRunIds)),
+        ));
+    }
+
+    const runningRuns = targetRuns.filter((run) => run.status === "running");
+    for (const run of runningRuns) {
+      await cancelRunInternal(run.id, reason, options);
+    }
+
+    return {
+      cancelledRunIds: targetRuns.map((run) => run.id),
+      cancelledWakeupIds: pendingWakeups.map((wake) => wake.id),
+    };
+  }
   async function cancelActiveForAgentInternal(agentId: string, reason = "Cancelled due to agent pause", errorCode = "cancelled") {
     const agent = await getAgent(agentId);
     const runs = await db
@@ -19054,6 +19311,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     },
 
     cancelRun: (runId: string, reason?: string, options?: CancelRunOptions) => cancelRunInternal(runId, reason, options),
+
+    cancelIssueInvocations: (
+      companyId: string,
+      issueId: string,
+      reason: string,
+      options?: CancelRunOptions,
+    ) => cancelIssueInvocationsInternal(companyId, issueId, reason, options),
 
     /**
      * Pause-only. Emits errorCode "agent_paused" unconditionally; its sole caller is the

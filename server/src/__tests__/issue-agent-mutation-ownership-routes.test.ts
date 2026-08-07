@@ -239,6 +239,7 @@ function registerRouteMocks() {
     routineService: () => ({
       syncRunStatusForIssue: vi.fn(async () => undefined),
     }),
+    resolveWorkProductHandoff: vi.fn(() => null),
     workProductService: () => mockWorkProductService,
   }));
 }
@@ -279,6 +280,7 @@ function createRunContextDb(
   contextSnapshot: Record<string, unknown> = {},
   runAgentOrRows: string | Record<string, unknown>[] = ownerAgentId,
   runId: string = ownerRunId,
+  skillTestRows: Record<string, unknown>[] | null = null,
 ) {
   const runRows = Array.isArray(runAgentOrRows)
     ? runAgentOrRows
@@ -295,6 +297,7 @@ function createRunContextDb(
   const rowsForSelection = (selection: Record<string, unknown>) => {
     const keys = Object.keys(selection);
     if (keys.includes("entityId")) return [];
+    if (skillTestRows && keys.includes("supersededAt")) return skillTestRows;
     if (keys.includes("contextSnapshot")) return runRows;
     if (keys.includes("agentCompanyId")) return runRows;
     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
@@ -1013,6 +1016,46 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
   });
 
+  it("rejects stale skill-test scoped document and status mutations after cancellation", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "cancelled",
+      harnessKind: "skill_test",
+      workMode: "skill_test",
+    }));
+    const actor = {
+      ...ownerActor(),
+      keyScope: { kind: "skill_test", issueId },
+    };
+    const app = await createApp(
+      actor,
+      createRunContextDb({}, ownerAgentId, ownerRunId, [{
+        id: "88888888-8888-4888-8888-888888888888",
+        status: "cancelled",
+        deletedAt: null,
+        supersededAt: null,
+      }]),
+    );
+
+    const documentMutation = await request(app)
+      .put("/api/issues/" + issueId + "/documents/output")
+      .send({ format: "markdown", body: "# stale output" });
+    const statusMutation = await request(app)
+      .patch("/api/issues/" + issueId)
+      .send({ status: "done" });
+
+    for (const response of [documentMutation, statusMutation]) {
+      expect(response.status, JSON.stringify(response.body)).toBe(409);
+      expect(response.body.details).toMatchObject({
+        code: "skill_test_terminal",
+        issueId,
+        issueStatus: "cancelled",
+        testRunStatus: "cancelled",
+      });
+    }
+    expect(mockDocumentService.upsertIssueDocument).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("allows the checked-out owner with the matching run id to patch and update documents", async () => {
     const app = await createApp(ownerActor());
 
@@ -1038,11 +1081,12 @@ describe("agent issue mutation checkout ownership", () => {
   it("stores the authenticated agent run id when creating work products", async () => {
     const app = await createApp(ownerActor());
 
-    await request(app).post(`/api/issues/${issueId}/work-products`).send({
+    const response = await request(app).post(`/api/issues/${issueId}/work-products`).send({
       type: "artifact",
       provider: "test",
       title: "Artifact",
-    }).expect(201);
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
 
     expect(mockWorkProductService.createForIssue).toHaveBeenCalledWith(
       issueId,

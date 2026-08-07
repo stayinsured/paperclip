@@ -7497,6 +7497,18 @@ export function issueService(db: Db) {
         actorUserId,
         ...issueData
       } = data;
+      if (
+        existing.harnessKind === "skill_test" &&
+        existing.status === "cancelled" &&
+        issueData.status === "done"
+      ) {
+        throw conflict("Cancelled Skill Studio harnesses cannot transition to done", {
+          code: "skill_test_terminal",
+          issueId: existing.id,
+          currentStatus: existing.status,
+          requestedStatus: issueData.status,
+        });
+      }
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
