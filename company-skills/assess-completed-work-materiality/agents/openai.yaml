@@ -1,0 +1,4 @@
+interface:
+  display_name: "Completed Work Materiality"
+  short_description: "Classify durable completed-work documentation"
+  default_prompt: "Use $assess-completed-work-materiality to classify this completed work and draft safe Outline-ready documentation only when material."
