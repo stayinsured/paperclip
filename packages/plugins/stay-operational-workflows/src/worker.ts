@@ -68,6 +68,8 @@ const plugin = definePlugin({
       const audit = auditFromApi(input);
       if (input.routeKey === "config.upsert") {
         const config = parseModuleConfig({ ...body, companyId: input.companyId });
+        const project = await ctx.projects.get(config.projectId, input.companyId);
+        if (!project) throw new Error("Project not found in the authorized company");
         await repository.upsertConfig(config, audit);
         await ctx.activity.log({
           companyId: input.companyId,

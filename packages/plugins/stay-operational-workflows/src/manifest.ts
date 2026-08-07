@@ -17,7 +17,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "database.namespace.write",
     "events.subscribe",
     "jobs.schedule",
-    "metrics.write"
+    "metrics.write",
+    "projects.read"
   ],
   entrypoints: {
     worker: "./dist/worker.js"
