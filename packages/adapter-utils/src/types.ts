@@ -189,6 +189,7 @@ export interface AdapterExecutionContext {
   onRuntimeProgress?: RuntimeStatusSink;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
   authToken?: string;
+  executionProfile?: AdapterExecutionProfile;
   /**
    * The injected OpenTelemetry startup trace context (tracer + root
    * parent-context helper). The server passes the real, endpoint-gated
@@ -197,6 +198,13 @@ export interface AdapterExecutionContext {
    * top-level dependency on the timing helper.
    */
   startupTraceContext?: import("./acpx-engine/startup-timing.js").StartupTraceContext;
+}
+
+export interface AdapterExecutionProfile {
+  kind: "skill_test_output_only";
+  testRunId: string;
+  issueId: string;
+  outputDocumentKey: "output";
 }
 
 export interface AdapterModel {
@@ -419,6 +427,7 @@ export interface AcpTargetDescriptor {
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
+  supportedExecutionProfiles?: AdapterExecutionProfile["kind"][];
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;
   acp?: AcpTargetDescriptor;
   listSkills?: (ctx: AdapterSkillContext) => Promise<AdapterSkillSnapshot>;

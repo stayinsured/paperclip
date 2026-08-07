@@ -33,6 +33,7 @@ export function parseCodexJsonl(stdout: string) {
   let errorMessage: string | null = null;
   let sawProtocolEvent = false;
   let sawProtocolTerminalEvent = false;
+  const toolCallStarts: string[] = [];
   const usage = {
     inputTokens: 0,
     cachedInputTokens: 0,
@@ -53,6 +54,15 @@ export function parseCodexJsonl(stdout: string) {
     }
     if (type === "thread.started") {
       sessionId = asString(event.thread_id, sessionId ?? "") || sessionId;
+      continue;
+    }
+
+    if (type === "item.started") {
+      const item = parseObject(event.item);
+      const itemType = asString(item.type, "");
+      if (itemType && itemType !== "agent_message" && itemType !== "reasoning") {
+        toolCallStarts.push(itemType);
+      }
       continue;
     }
 
@@ -94,6 +104,7 @@ export function parseCodexJsonl(stdout: string) {
     errorMessage,
     sawProtocolEvent,
     sawProtocolTerminalEvent,
+    toolCallStarts,
   };
 }
 

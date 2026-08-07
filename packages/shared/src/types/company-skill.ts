@@ -542,6 +542,7 @@ export interface CompanySkillTestRun {
   renderedTemplateBody: string | null;
   harnessIssueDescription: string;
   status: CompanySkillTestRunStatus;
+  executionProfile: CompanySkillTestExecutionProfile;
   outputDocumentKey: string;
   outputSnapshot: string;
   error: string | null;
@@ -554,6 +555,8 @@ export interface CompanySkillTestRun {
   cost: CompanySkillTestRunCostSummary;
   taskExpired: boolean;
 }
+
+export type CompanySkillTestExecutionProfile = "standard" | "output_only";
 
 export interface CompanySkillTestRunCreateRequest {
   inputId?: string | null;
@@ -574,6 +577,8 @@ export interface CompanySkillTestRunCreateRequest {
    * Re-run to reproduce the viewed run's `skillVersionId` snapshot.
    */
   skillVersionId?: string | null;
+  /** Restricts adapter capabilities for this persisted run. */
+  executionProfile?: CompanySkillTestExecutionProfile;
 }
 
 export interface CompanySkillTestRunListQuery {

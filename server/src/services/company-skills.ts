@@ -2014,6 +2014,7 @@ function toCompanySkillTestRun(
     renderedTemplateBody: row.renderedTemplateBody ?? null,
     harnessIssueDescription: row.harnessIssueDescription || row.inputSnapshot,
     status: normalizeTestRunStatus(row.status),
+    executionProfile: row.executionProfile === "output_only" ? "output_only" : "standard",
     outputDocumentKey: row.outputDocumentKey || "output",
     outputSnapshot: row.outputSnapshot ?? "",
     error: row.error ?? null,
@@ -6474,6 +6475,7 @@ export function companySkillService(db: Db) {
           renderedTemplateBody,
           harnessIssueDescription,
           status: "queued",
+          executionProfile: input.executionProfile === "output_only" ? "output_only" : "standard",
           outputDocumentKey,
         })
         .returning()

@@ -1056,6 +1056,56 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  it("allowlists only output write and harness completion for active output-only scopes", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      harnessKind: "skill_test",
+      workMode: "skill_test",
+    }));
+    const actor = {
+      ...ownerActor(),
+      keyScope: { kind: "skill_test", issueId },
+    };
+    const app = await createApp(
+      actor,
+      createRunContextDb({}, ownerAgentId, ownerRunId, [{
+        id: "88888888-8888-4888-8888-888888888888",
+        status: "running",
+        executionProfile: "output_only",
+        outputDocumentKey: "output",
+        deletedAt: null,
+        supersededAt: null,
+      }]),
+    );
+
+    await request(app)
+      .put("/api/issues/" + issueId + "/documents/output")
+      .send({ format: "markdown", body: "sealed output" })
+      .expect(200);
+    const deniedDocument = await request(app)
+      .put("/api/issues/" + issueId + "/documents/plan")
+      .send({ format: "markdown", body: "disallowed" });
+    const deniedPatch = await request(app)
+      .patch("/api/issues/" + issueId)
+      .send({ title: "disallowed" });
+    const deniedComment = await request(app)
+      .post("/api/issues/" + issueId + "/comments")
+      .send({ body: "disallowed" });
+    await request(app)
+      .patch("/api/issues/" + issueId)
+      .send({ status: "done" })
+      .expect(200);
+
+    for (const response of [deniedDocument, deniedPatch, deniedComment]) {
+      expect(response.status, JSON.stringify(response.body)).toBe(403);
+      expect(response.body.details.code).toBe("skill_test_output_only_scope");
+    }
+    expect(mockDocumentService.upsertIssueDocument).toHaveBeenCalledTimes(1);
+    expect(mockDocumentService.upsertIssueDocument).toHaveBeenCalledWith(expect.objectContaining({ key: "output", lockedDocumentStrategy: "conflict" }));
+    expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+    expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "done" }));
+  });
+
   it("allows the checked-out owner with the matching run id to patch and update documents", async () => {
     const app = await createApp(ownerActor());
 

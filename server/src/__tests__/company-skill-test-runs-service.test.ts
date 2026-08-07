@@ -171,6 +171,7 @@ describeEmbeddedPostgres("companySkillService skill test runs", () => {
     );
 
     expect(run.inputSnapshot).toBe("test this skill");
+    expect(run.executionProfile).toBe("standard");
     expect(run.templateId).toBe("built-in:default-test-template");
     expect(run.templateName).toBe("Default test template");
     expect(run.templateBody).toContain("{{skillName}}");
@@ -185,6 +186,24 @@ describeEmbeddedPostgres("companySkillService skill test runs", () => {
       .where(eq(issues.id, run.issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.description).toBe(run.harnessIssueDescription);
+  });
+
+  it("persists an explicit output-only execution profile", async () => {
+    const { companyId, skillId, agentId } = await seedSkillAndAgent();
+    const run = await svc.createTestRun(
+      companyId,
+      skillId,
+      { content: "sealed output run", agentId, executionProfile: "output_only" },
+      { type: "user", userId: "local-board" },
+      runDeps(companyId),
+    );
+
+    expect(run.executionProfile).toBe("output_only");
+    const persisted = await db.select({ executionProfile: companySkillTestRuns.executionProfile })
+      .from(companySkillTestRuns)
+      .where(eq(companySkillTestRuns.id, run.id))
+      .then((rows) => rows[0]);
+    expect(persisted?.executionProfile).toBe("output_only");
   });
 
   it("honors No template without weakening the clean run snapshot", async () => {

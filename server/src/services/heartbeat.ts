@@ -44,6 +44,7 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   documentRevisions,
+  documents,
   issueDocuments,
   executionWorkspaces,
   heartbeatRunEvents,
@@ -459,6 +460,17 @@ export class WorkspaceValidationFailure extends Error {
 // Pre-dispatch gate outcome: required secret/env bindings are missing, so the
 // run must not be dispatched. Surfaced as a configuration-incomplete blocker
 // routed to a human owner instead of N opaque dispatched-then-failed runs.
+export class UnsupportedExecutionProfileFailure extends Error {
+  code = "skill_test_output_only_unsupported_adapter";
+  resultJson: Record<string, unknown>;
+
+  constructor(message: string, resultJson: Record<string, unknown>) {
+    super(message);
+    this.name = "UnsupportedExecutionProfileFailure";
+    this.resultJson = resultJson;
+  }
+}
+
 export class ConfigurationIncompleteFailure extends Error {
   code = CONFIGURATION_INCOMPLETE_FAILURE_CODE;
   resultJson: Record<string, unknown>;
@@ -1798,6 +1810,10 @@ function fingerprintFinalizeWorkspaceBranchValidation(input: {
 
 function isConfigurationIncompleteFailure(error: unknown): error is ConfigurationIncompleteFailure {
   return error instanceof ConfigurationIncompleteFailure;
+}
+
+function isUnsupportedExecutionProfileFailure(error: unknown): error is UnsupportedExecutionProfileFailure {
+  return error instanceof UnsupportedExecutionProfileFailure;
 }
 
 export function isConfigurationIncompleteFailedRun(
@@ -6083,6 +6099,7 @@ export function buildPaperclipTaskMarkdown(input: {
     revisionNumber: number;
     label: string | null;
     outputDocumentKey: string;
+    executionProfile: "standard" | "output_only";
     fileInventory: Array<{ path: string; kind: string; content: string }>;
   } | null;
   // false builds the compact variant used for resume deltas, where the session
@@ -6145,7 +6162,9 @@ export function buildPaperclipTaskMarkdown(input: {
         `- Work mode: ${quoteTaskScalar("skill_test")}`,
         "",
         "Skill test mode directive:",
-        "You are testing a pinned skill revision. Make no durable changes outside this issue. Do not push, publish, send external messages, or mutate other issues. Write your final output as issue document `output`, then finish by marking this issue done.",
+        input.skillTest?.executionProfile === "output_only"
+          ? "Return only the final response. The adapter exposes no tools, and the control plane will write document `output` and mark this harness done."
+          : "You are testing a pinned skill revision. Make no durable changes outside this issue. Do not push, publish, send external messages, or mutate other issues. Write your final output as issue document `output`, then finish by marking this issue done.",
       );
     } else if (acceptedPlanContinuation) {
       lines.push(
@@ -6892,6 +6911,121 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
+  async function finalizeOutputOnlySkillTestRun(input: {
+    companyId: string;
+    issueId: string;
+    testRunId: string;
+    agentId: string;
+    heartbeatRunId: string;
+    output: string;
+  }): Promise<"completed" | "terminal"> {
+    const output = input.output.trim();
+    if (!output) throw new Error("Output-only Skill Studio execution returned no final output.");
+
+    const completed = await db.transaction(async (tx) => {
+      const testRun = await tx
+        .select({ id: companySkillTestRuns.id, status: companySkillTestRuns.status })
+        .from(companySkillTestRuns)
+        .where(and(
+          eq(companySkillTestRuns.companyId, input.companyId),
+          eq(companySkillTestRuns.id, input.testRunId),
+          eq(companySkillTestRuns.issueId, input.issueId),
+          eq(companySkillTestRuns.executionProfile, "output_only"),
+          eq(companySkillTestRuns.outputDocumentKey, "output"),
+          isNull(companySkillTestRuns.deletedAt),
+          isNull(companySkillTestRuns.supersededAt),
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (!testRun || (testRun.status !== "queued" && testRun.status !== "running")) return false;
+
+      const existingOutput = await tx
+        .select({ id: documents.id })
+        .from(issueDocuments)
+        .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
+        .where(and(
+          eq(issueDocuments.companyId, input.companyId),
+          eq(issueDocuments.issueId, input.issueId),
+          eq(issueDocuments.key, "output"),
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (existingOutput) throw conflict("Output-only Skill Studio output already exists", { issueId: input.issueId });
+
+      const now = new Date();
+      const updatedRun = await tx
+        .update(companySkillTestRuns)
+        .set({ status: "succeeded", outputSnapshot: output, error: null, updatedAt: now })
+        .where(and(
+          eq(companySkillTestRuns.id, input.testRunId),
+          inArray(companySkillTestRuns.status, ["queued", "running"]),
+          isNull(companySkillTestRuns.deletedAt),
+          isNull(companySkillTestRuns.supersededAt),
+        ))
+        .returning({ id: companySkillTestRuns.id })
+        .then((rows) => rows[0] ?? null);
+      if (!updatedRun) return false;
+
+      const updatedIssue = await tx
+        .update(issues)
+        .set({ status: "done", completedAt: now, updatedAt: now })
+        .where(and(
+          eq(issues.companyId, input.companyId),
+          eq(issues.id, input.issueId),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ))
+        .returning({ id: issues.id })
+        .then((rows) => rows[0] ?? null);
+      if (!updatedIssue) throw conflict("Output-only Skill Studio harness became terminal", { issueId: input.issueId });
+
+      const document = await tx.insert(documents).values({
+        companyId: input.companyId,
+        title: "Output",
+        format: "markdown",
+        latestBody: output,
+        latestRevisionNumber: 1,
+        createdByAgentId: input.agentId,
+        updatedByAgentId: input.agentId,
+        createdAt: now,
+        updatedAt: now,
+      }).returning({ id: documents.id }).then((rows) => rows[0]!);
+      const revision = await tx.insert(documentRevisions).values({
+        companyId: input.companyId,
+        documentId: document.id,
+        revisionNumber: 1,
+        title: "Output",
+        format: "markdown",
+        body: output,
+        changeSummary: "Output-only Skill Studio result",
+        createdByAgentId: input.agentId,
+        createdByRunId: input.heartbeatRunId,
+        createdAt: now,
+      }).returning({ id: documentRevisions.id }).then((rows) => rows[0]!);
+      await tx.update(documents).set({ latestRevisionId: revision.id }).where(eq(documents.id, document.id));
+      await tx.insert(issueDocuments).values({
+        companyId: input.companyId,
+        issueId: input.issueId,
+        documentId: document.id,
+        key: "output",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await tx.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: "agent",
+        actorId: input.agentId,
+        agentId: input.agentId,
+        runId: input.heartbeatRunId,
+        action: "company.skill_test_output_finalized",
+        entityType: "company_skill_test_run",
+        entityId: input.testRunId,
+        details: { issueId: input.issueId, executionProfile: "output_only", outputDocumentKey: "output" },
+        createdAt: now,
+      });
+      return true;
+    });
+    if (!completed) return "terminal";
+    return "completed";
+  }
+
   async function completeSkillTestRunForHeartbeatOutcome(input: {
     run: typeof heartbeatRuns.$inferSelect;
     issueId: string | null;
@@ -7134,6 +7268,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         inputId: companySkillTestRuns.inputId,
         skillVersionId: companySkillTestRuns.skillVersionId,
         outputDocumentKey: companySkillTestRuns.outputDocumentKey,
+        executionProfile: companySkillTestRuns.executionProfile,
         fileInventory: companySkillVersions.fileInventory,
         revisionNumber: companySkillVersions.revisionNumber,
         label: companySkillVersions.label,
@@ -7170,6 +7305,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       revisionNumber: row.revisionNumber,
       label: row.label ?? null,
       outputDocumentKey: row.outputDocumentKey,
+      executionProfile: row.executionProfile === "output_only" ? "output_only" as const : "standard" as const,
       fileInventory,
     };
   }
@@ -7182,6 +7318,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         workMode: issues.workMode,
         testRunId: companySkillTestRuns.id,
         testRunStatus: companySkillTestRuns.status,
+        executionProfile: companySkillTestRuns.executionProfile,
+        outputDocumentKey: companySkillTestRuns.outputDocumentKey,
         testRunDeletedAt: companySkillTestRuns.deletedAt,
         testRunSupersededAt: companySkillTestRuns.supersededAt,
       })
@@ -13944,10 +14082,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (pinnedSkillTestContext) {
       context.paperclipSkillTest = {
         ...pinnedSkillTestContext,
-        directive: "Use this pinned file inventory as the exact skill revision under test, regardless of synced runtime skills.",
+        directive: pinnedSkillTestContext.executionProfile === "output_only"
+          ? "Return only the final output. The control plane will persist it and terminally close the linked harness; no tools are available."
+          : "Use this pinned file inventory as the exact skill revision under test, regardless of synced runtime skills.",
       };
+      if (pinnedSkillTestContext.executionProfile === "output_only") {
+        context.paperclipExecutionProfile = {
+          kind: "skill_test_output_only",
+          testRunId: pinnedSkillTestContext.testRunId,
+          issueId: issueRef!.id,
+          outputDocumentKey: pinnedSkillTestContext.outputDocumentKey,
+        };
+        context.skipIssueComment = true;
+      } else {
+        delete context.paperclipExecutionProfile;
+      }
     } else {
       delete context.paperclipSkillTest;
+      delete context.paperclipExecutionProfile;
     }
     const paperclipWakePayload = await buildPaperclipWakePayload({
       db,
@@ -15648,14 +15800,37 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           );
           return;
         }
+        if (
+          skillTestDispatchState?.executionProfile === "output_only"
+          && skillTestDispatchState.outputDocumentKey !== "output"
+        ) {
+          throw new UnsupportedExecutionProfileFailure(
+            "Output-only Skill Studio runs require output document key `output`.",
+            { testRunId: skillTestDispatchState.testRunId, adapterType: agent.adapterType },
+          );
+        }
+        const executionProfile = skillTestDispatchState?.executionProfile === "output_only"
+          ? {
+              kind: "skill_test_output_only" as const,
+              testRunId: skillTestDispatchState.testRunId!,
+              issueId: issueId!,
+              outputDocumentKey: "output" as const,
+            }
+          : undefined;
+        if (executionProfile && !adapter.supportedExecutionProfiles?.includes(executionProfile.kind)) {
+          throw new UnsupportedExecutionProfileFailure(
+            "Adapter " + agent.adapterType + " does not support " + executionProfile.kind + ".",
+            { executionProfile, adapterType: agent.adapterType },
+          );
+        }
         const adapterContext = { ...context };
-        const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
+        const runtimeMcpServers = executionProfile ? [] : await buildPaperclipRuntimeMcpServers({
           db,
           agent,
           runId: run.id,
         });
         const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
-        const managedMcpConfig = await createManagedMcpRunConfig({
+        const managedMcpConfig = executionProfile ? null : await createManagedMcpRunConfig({
           db,
           agent,
           runId: run.id,
@@ -15699,8 +15874,42 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               startedAt: meta.startedAt,
             });
           },
-          authToken: authToken ?? undefined,
+          authToken: executionProfile ? undefined : authToken ?? undefined,
+          executionProfile,
         });
+        if (
+          executionProfile
+          && !adapterResult.timedOut
+          && (adapterResult.exitCode ?? 0) === 0
+          && !adapterResult.errorMessage
+        ) {
+          if (!adapterResult.summary?.trim()) {
+            adapterResult = {
+              ...adapterResult,
+              exitCode: 1,
+              errorCode: "skill_test_output_only_missing_output",
+              errorMessage: "Output-only Skill Studio execution returned no final output.",
+            };
+          } else {
+            const finalization = await finalizeOutputOnlySkillTestRun({
+              companyId: run.companyId,
+              issueId: executionProfile.issueId,
+              testRunId: executionProfile.testRunId,
+              agentId: agent.id,
+              heartbeatRunId: run.id,
+              output: adapterResult.summary,
+            });
+            if (finalization === "terminal") {
+              await recordWorkspaceFinalize("succeeded");
+              await cancelRunInternal(
+                run.id,
+                "Cancelled after adapter return because the Skill Studio test became terminal",
+                { errorCode: "skill_test_terminal" },
+              );
+              return;
+            }
+          }
+        }
         // Adapter returned cleanly, which means its workspace-restore finally
         // block also ran without throwing. Record the workspace_finalize
         // barrier so dependents that share this executionWorkspace can wake.
@@ -16145,11 +16354,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
       const workspaceValidationFailure = isWorkspaceValidationFailure(err) ? err : null;
       const configurationIncompleteFailure = isConfigurationIncompleteFailure(err) ? err : null;
+      const unsupportedExecutionProfileFailure = isUnsupportedExecutionProfileFailure(err) ? err : null;
       const recordedResponsibleUserDenialCode =
         normalizeResponsibleUserDenialCode((await getRun(run.id).catch(() => null))?.errorCode);
       const failureErrorCode =
         workspaceValidationFailure?.code
         ?? configurationIncompleteFailure?.code
+        ?? unsupportedExecutionProfileFailure?.code
         ?? recordedResponsibleUserDenialCode
         ?? "adapter_failed";
       logger.error({ err, runId }, "heartbeat execution failed");
@@ -16177,7 +16388,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
           errorCode: failureErrorCode,
           errorMessage: message,
-          resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? null,
+          resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? unsupportedExecutionProfileFailure?.resultJson ?? null,
         }),
         stdoutExcerpt,
         stderrExcerpt,
@@ -16289,11 +16500,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // recovery path routes it to a human owner instead of looping retries.
           const workspaceValidationSetupFailure = isWorkspaceValidationFailure(outerErr) ? outerErr : null;
           const configurationIncompleteSetupFailure = isConfigurationIncompleteFailure(outerErr) ? outerErr : null;
+          const unsupportedExecutionProfileSetupFailure = isUnsupportedExecutionProfileFailure(outerErr) ? outerErr : null;
           const recordedResponsibleUserDenialCode =
             normalizeResponsibleUserDenialCode((await getRun(runId).catch(() => null))?.errorCode);
           const setupFailureErrorCode =
             workspaceValidationSetupFailure?.code ??
             configurationIncompleteSetupFailure?.code ??
+            unsupportedExecutionProfileSetupFailure?.code ??
             recordedResponsibleUserDenialCode ??
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
@@ -16307,7 +16520,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 errorCode: setupFailureErrorCode,
                 errorMessage: message,
                 resultJson:
-                  workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? null,
+                  workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? unsupportedExecutionProfileSetupFailure?.resultJson ?? null,
               }),
             } : {}),
           }).catch(() => ({ run: null, updated: false as const }));

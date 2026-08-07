@@ -539,7 +539,10 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
+  const outputOnly = ctx.executionProfile?.kind === "skill_test_output_only";
+  const engineSelection = outputOnly
+    ? { engine: "cli" as const, explicit: true, fallbackReason: null }
+    : await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {
       return await executeCodexAcp(ctx);
@@ -562,7 +565,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     config.promptTemplate,
     DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   );
-  const command = asString(config.command, "codex");
+  const command = outputOnly ? "codex" : asString(config.command, "codex");
   const model = asString(config.model, "");
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
@@ -608,8 +611,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
-  const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
-  const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
+  const codexSkillEntries = outputOnly ? [] : await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+  const desiredSkillNames = outputOnly ? [] : resolveCodexDesiredSkillNames(config, codexSkillEntries);
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   }
@@ -708,15 +711,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       endpointPath: server.url,
       bearerToken: server.token,
     }));
-    const managedMcpGateways = mergeManagedCodexMcpGateways(
+    const managedMcpGateways = outputOnly ? [] : mergeManagedCodexMcpGateways(
       runtimeMcpGateways,
       managedMcpGatewaysFromContext(context),
     );
-    const managedMcp = await writeManagedCodexMcpConfig({
-      codexHome: effectiveCodexHome,
-      apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
-      gateways: managedMcpGateways,
-    });
+    const managedMcp = outputOnly
+      ? { configPath: "(disabled)", warnings: [] as string[] }
+      : await writeManagedCodexMcpConfig({
+          codexHome: effectiveCodexHome,
+          apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
+          gateways: managedMcpGateways,
+        });
     if (managedMcpGateways.length > 0) {
       await onLog(
         "stdout",
@@ -729,14 +734,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // Inject skills into the same CODEX_HOME that Codex will actually run with
     // (managed home in the default case, or an explicit override from adapter config).
     const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
-    await ensureCodexSkillsInjected(
-      onLog,
-      {
-        skillsHome: codexSkillsDir,
-        skillsEntries: codexSkillEntries,
-        desiredSkillNames,
-      },
-    );
+    if (!outputOnly) {
+      await ensureCodexSkillsInjected(
+        onLog,
+        {
+          skillsHome: codexSkillsDir,
+          skillsEntries: codexSkillEntries,
+          desiredSkillNames,
+        },
+      );
+    }
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
       asNumber(config.timeoutSec, 0),
@@ -924,7 +931,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (authToken) {
       env.PAPERCLIP_API_KEY = authToken;
     }
-    if (executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
+    if (!outputOnly && executionTargetIsRemote && adapterExecutionTargetUsesPaperclipBridge(runtimeExecutionTarget)) {
       paperclipBridge = await startAdapterExecutionTargetPaperclipBridge({
         runId,
         target: runtimeExecutionTarget,
@@ -938,8 +945,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         Object.assign(env, paperclipBridge.env);
       }
     }
+    if (outputOnly) {
+      for (const key of Object.keys(env)) {
+        if (key.startsWith("PAPERCLIP_")) delete env[key];
+      }
+    }
+    const inheritedEnv = outputOnly
+      ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PAPERCLIP_")))
+      : process.env;
     const effectiveEnv = Object.fromEntries(
-      Object.entries({ ...process.env, ...env }).filter(
+      Object.entries({ ...inheritedEnv, ...env }).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
@@ -1017,6 +1032,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
     const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
     const canResumeSession =
+      !outputOnly &&
       runtimeSessionId.length > 0 &&
       (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(effectiveExecutionCwd)) &&
       adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
@@ -1035,7 +1051,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[paperclip] Codex session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${effectiveExecutionCwd}".\n`,
       );
     }
-    const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+    const instructionsFilePath = outputOnly ? "" : asString(config.instructionsFilePath, "").trim();
     const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
     let instructionsPrefix = "";
     let instructionsChars = 0;
@@ -1055,8 +1071,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         );
       }
     }
-    const repoAgentsNote =
-      "Codex exec automatically applies repo-scoped AGENTS.md instructions from the current workspace; Paperclip does not currently suppress that discovery.";
+    const repoAgentsNote = outputOnly
+      ? "Disabled user and repository instructions for output-only execution."
+      : "Codex exec automatically applies repo-scoped AGENTS.md instructions from the current workspace; Paperclip does not currently suppress that discovery.";
     const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
     const templateData = {
       agentId: agent.id,
@@ -1171,6 +1188,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         {
           resumeSessionId,
           skipGitRepoCheck: executionTargetIsSandbox,
+          outputOnly,
         },
       );
       const args = execArgs.args;
@@ -1329,6 +1347,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       clearSessionOnMissingSession = false,
       isRetry = false,
     ): AdapterExecutionResult => {
+      if (outputOnly && attempt.parsed.toolCallStarts.length > 0) {
+        return {
+          exitCode: 1,
+          signal: attempt.proc.signal,
+          timedOut: false,
+          errorMessage: "Output-only execution attempted disallowed tool calls: " + attempt.parsed.toolCallStarts.join(", "),
+          errorCode: "skill_test_output_only_tool_violation",
+          usage: attempt.parsed.usage,
+          usageBasis: attempt.parsed.usageBasis,
+          resultJson: { toolCallStarts: attempt.parsed.toolCallStarts },
+          summary: null,
+          clearSession: true,
+        };
+      }
       if (attempt.monitor?.fired) {
         const errorMessage = formatOutputInactivityMonitorErrorMessage(attempt.monitor.elapsedMsSinceLastEvent);
         return {
@@ -1373,8 +1405,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       const canFallbackToRuntimeSession = !isRetry && !forceFreshSession;
-      const resolvedSessionId =
-        attempt.parsed.sessionId ??
+      const resolvedSessionId = outputOnly
+        ? null
+        : attempt.parsed.sessionId ??
         (canFallbackToRuntimeSession ? (runtimeSessionId ?? runtime.sessionId ?? null) : null);
       const resolvedSessionParams = resolvedSessionId
         ? ({

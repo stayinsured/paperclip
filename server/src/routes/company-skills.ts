@@ -622,7 +622,11 @@ export function companySkillRoutes(db: Db) {
           payload: { issueId, skillId },
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
-          contextSnapshot: { issueId, source: "company.skill_test_run" },
+          contextSnapshot: {
+            issueId,
+            source: "company.skill_test_run",
+            ...(req.body.executionProfile === "output_only" ? { skipIssueComment: true } : {}),
+          },
         }),
         cleanupHarnessIssue: async (issueId) => {
           const issue = await issues.getById(issueId);

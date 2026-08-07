@@ -213,6 +213,7 @@ export const companySkillTestRuns = pgTable(
     renderedTemplateBody: text("rendered_template_body"),
     harnessIssueDescription: text("harness_issue_description").notNull().default(""),
     status: text("status").notNull().default("queued"),
+    executionProfile: text("execution_profile").notNull().default("standard"),
     outputDocumentKey: text("output_document_key").notNull().default("output"),
     outputSnapshot: text("output_snapshot").notNull().default(""),
     error: text("error"),

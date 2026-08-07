@@ -36,6 +36,7 @@ describe("parseCodexJsonl", () => {
       errorMessage: "resume failed",
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
+      toolCallStarts: [],
     });
   });
 
@@ -72,7 +73,18 @@ describe("parseCodexJsonl", () => {
       errorMessage: null,
       sawProtocolEvent: true,
       sawProtocolTerminalEvent: true,
+      toolCallStarts: [],
     });
+  });
+
+  it("records every non-message item start as a tool call", () => {
+    const parsed = parseCodexJsonl([
+      JSON.stringify({ type: "item.started", item: { type: "command_execution" } }),
+      JSON.stringify({ type: "item.started", item: { type: "mcp_tool_call" } }),
+      JSON.stringify({ type: "item.started", item: { type: "reasoning" } }),
+    ].join("\n"));
+
+    expect(parsed.toolCallStarts).toEqual(["command_execution", "mcp_tool_call"]);
   });
 });
 

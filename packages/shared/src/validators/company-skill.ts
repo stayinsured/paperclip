@@ -470,6 +470,8 @@ export const companySkillTestRunCostSummarySchema = z.object({
   outputTokens: z.number().int().nonnegative(),
 });
 
+export const companySkillTestExecutionProfileSchema = z.enum(["standard", "output_only"]);
+
 export const companySkillTestRunSchema = z.object({
   id: z.string().uuid(),
   companyId: z.string().uuid(),
@@ -486,6 +488,7 @@ export const companySkillTestRunSchema = z.object({
   renderedTemplateBody: z.string().nullable(),
   harnessIssueDescription: z.string(),
   status: companySkillTestRunStatusSchema,
+  executionProfile: companySkillTestExecutionProfileSchema,
   outputDocumentKey: z.string().min(1),
   outputSnapshot: z.string(),
   error: z.string().nullable(),
@@ -508,6 +511,7 @@ export const companySkillTestRunCreateSchema = z.object({
   // Re-run pins the viewed run's skill version instead of the live head, so the
   // new run reproduces the same snapshots (golden-path step 5).
   skillVersionId: z.string().uuid().nullable().optional(),
+  executionProfile: companySkillTestExecutionProfileSchema.optional().default("standard"),
 }).refine((value) => Boolean(value.inputId) || Boolean(value.content?.trim()), {
   message: "inputId or content is required",
 });

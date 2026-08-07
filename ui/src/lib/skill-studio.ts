@@ -449,6 +449,7 @@ export function buildReRunRequest(
     | "inputId"
     | "inputSnapshot"
     | "skillVersionId"
+    | "executionProfile"
     | "templateId"
     | "templateName"
     | "templateBody"
@@ -459,6 +460,7 @@ export function buildReRunRequest(
     inputId: detail.inputId ?? undefined,
     content: detail.inputId ? undefined : detail.inputSnapshot,
     skillVersionId: detail.skillVersionId,
+    executionProfile: detail.executionProfile,
     templateSnapshot: {
       templateId: detail.templateId,
       templateName: detail.templateName,

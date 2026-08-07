@@ -197,4 +197,39 @@ describe("buildCodexExecArgs", () => {
 
     expect(result.args.filter((arg) => arg === "--skip-git-repo-check")).toHaveLength(1);
   });
+
+  it("builds a sealed output-only inventory and ignores escape-prone config", () => {
+    const result = buildCodexExecArgs(
+      {
+        search: true,
+        dangerouslyBypassApprovalsAndSandbox: true,
+        extraArgs: ["--enable", "shell_tool", "resume", "old-thread"],
+      },
+      { resumeSessionId: "persisted-thread", outputOnly: true },
+    );
+
+    expect(result.args).not.toContain("--search");
+    expect(result.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(result.args).not.toContain("resume");
+    expect(result.args).toContain("--ignore-user-config");
+    expect(result.args).toContain("--ignore-rules");
+    expect(result.args).toContain("--ephemeral");
+    expect(result.args).toContain("mcp_servers={}");
+    for (const feature of [
+      "shell_tool",
+      "unified_exec",
+      "view_image",
+      "browser_use",
+      "computer_use",
+      "apps",
+      "multi_agent",
+      "goals",
+      "skill_search",
+    ]) {
+      const index = result.args.indexOf(feature);
+      expect(index).toBeGreaterThan(0);
+      expect(result.args[index - 1]).toBe("--disable");
+    }
+    expect(result.args.at(-1)).toBe("-");
+  });
 });

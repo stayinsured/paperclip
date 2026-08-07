@@ -3706,12 +3706,15 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: { id: string; companyId: string; status: string },
+    action?: { kind: "write_output"; key: string } | { kind: "complete_harness"; body: Record<string, unknown> },
   ) {
     if (!isSkillTestScopedActor(req)) return true;
     const testRun = await db
       .select({
         id: companySkillTestRuns.id,
         status: companySkillTestRuns.status,
+        executionProfile: companySkillTestRuns.executionProfile,
+        outputDocumentKey: companySkillTestRuns.outputDocumentKey,
         deletedAt: companySkillTestRuns.deletedAt,
         supersededAt: companySkillTestRuns.supersededAt,
       })
@@ -3727,7 +3730,19 @@ export function issueRoutes(
       (testRun?.status === "queued" || testRun?.status === "running") &&
       testRun.deletedAt === null &&
       testRun.supersededAt === null;
-    if (active) return true;
+    if (active) {
+      if (testRun?.executionProfile !== "output_only") return true;
+      const outputWriteAllowed = action?.kind === "write_output" && action.key === "output" && testRun.outputDocumentKey === "output";
+      const terminalTransitionAllowed = action?.kind === "complete_harness"
+        && Object.keys(action.body).length === 1
+        && action.body.status === "done";
+      if (outputWriteAllowed || terminalTransitionAllowed) return "output_only" as const;
+      res.status(403).json({
+        error: "Output-only Skill Studio scope permits only output document write and linked-harness completion",
+        details: { issueId: issue.id, testRunId: testRun.id, code: "skill_test_output_only_scope" },
+      });
+      return false;
+    }
     res.status(409).json({
       error: "Skill Studio test run is terminal; scoped mutations are no longer allowed",
       details: {
@@ -3917,6 +3932,7 @@ export function issueRoutes(
       }
       return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
     }
+    if (!(await assertActiveSkillTestScopedMutation(req, res, issue))) return false;
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
       return denyIssueWrite(req, res, issue, issueWriteDenialCodeForDecision(boundaryDecision));
@@ -3985,7 +4001,10 @@ export function issueRoutes(
       /** Used only to name the task in denial copy (plan §6). */
       identifier?: string | null;
     },
-    options: { allowVisibleIssueWrite?: boolean } = {},
+    options: {
+      allowVisibleIssueWrite?: boolean;
+      skillTestAction?: { kind: "write_output"; key: string } | { kind: "complete_harness"; body: Record<string, unknown> };
+    } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -3993,7 +4012,8 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
-    if (!(await assertActiveSkillTestScopedMutation(req, res, issue))) return false;
+    const skillTestMutationAccess = await assertActiveSkillTestScopedMutation(req, res, issue, options.skillTestAction);
+    if (!skillTestMutationAccess) return false;
     // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
     // watched subtree. This must be evaluated before the base assignee-ownership
     // boundary below: that boundary denies an agent mutating an issue owned by a
@@ -4022,11 +4042,11 @@ export function issueRoutes(
       return denyIssueWrite(req, res, issue, issueWriteDenialCodeForDecision(boundaryDecision));
     }
     if (issue.assigneeAgentId === null) {
-      return true;
+      return skillTestMutationAccess;
     }
     if (issue.assigneeAgentId !== actorAgentId) {
       if (await hasActiveCheckoutManagementOverride(actorAgentId, issue.companyId, issue.assigneeAgentId)) {
-        return true;
+        return skillTestMutationAccess;
       }
       if (issue.status === "in_progress") {
         // Run/checkout ownership stays assignee-scoped even though writes are
@@ -4052,10 +4072,10 @@ export function issueRoutes(
         });
         return false;
       }
-      return true;
+      return skillTestMutationAccess;
     }
     if (issue.status !== "in_progress") {
-      return true;
+      return skillTestMutationAccess;
     }
     const runId = requireAgentRunId(req, res);
     if (!runId) return false;
@@ -4079,7 +4099,7 @@ export function issueRoutes(
         },
       });
     }
-    return true;
+    return skillTestMutationAccess;
   }
 
   async function assertFreshTaskWatchdogSourceMutation(
@@ -6689,13 +6709,16 @@ export function issueRoutes(
     const id = req.params.id as string;
     const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!issue) return;
-    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
-    if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
       return;
     }
+    const issueMutationAccess = await assertAgentIssueMutationAllowed(req, res, issue, {
+      skillTestAction: { kind: "write_output", key: keyParsed.data },
+    });
+    if (!issueMutationAccess) return;
+    if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
     const actor = getActorInfo(req);
     const sourceTrust = await sourceTrustForActorWrite(issue, actor);
@@ -6712,7 +6735,10 @@ export function issueRoutes(
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       createdByRunId: actor.runId ?? null,
       sourceTrust,
-      lockedDocumentStrategy: req.actor.type === "agent" ? "create_new_document" : "conflict",
+      lockedDocumentStrategy:
+        issueMutationAccess === "output_only"
+          ? "conflict"
+          : req.actor.type === "agent" ? "create_new_document" : "conflict",
     });
     const doc = result.document;
     const redirectedFromLockedDocument =
@@ -8483,7 +8509,10 @@ export function issueRoutes(
       req,
       res,
       existing,
-      { allowVisibleIssueWrite: true },
+      {
+        allowVisibleIssueWrite: true,
+        skillTestAction: { kind: "complete_harness", body: req.body },
+      },
     );
     if (!issueMutationAccess) return;
     const issueMutationAuthorizationReason = req.actor.type === "agent"
