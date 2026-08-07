@@ -1,4 +1,5 @@
 export * from "./api.js";
+export * from "./assessment.js";
 export * from "./authorization.js";
 export * from "./identity.js";
 export * from "./materiality.js";

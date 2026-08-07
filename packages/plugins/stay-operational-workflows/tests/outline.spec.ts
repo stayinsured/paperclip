@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   OutlineAmbiguousWriteError,
+  OutlineAssessmentCoordinator,
+  type OutlineAssessmentRecord,
+  type OutlineAssessmentRepository,
   deterministicOutlineDocumentId,
   outlineConfigurationFingerprint,
   publishOutlinePreview,
@@ -326,3 +329,77 @@ describe("Outline idempotent upsert", () => {
   });
 });
 
+class MemoryAssessmentRepository implements OutlineAssessmentRepository {
+  record: OutlineAssessmentRecord | null = null;
+  leaseToken: string | null = null;
+  async acquire(input: Parameters<OutlineAssessmentRepository["acquire"]>[0]) {
+    if (!this.record) this.record = { id: "assessment-1", companyId: input.companyId, projectId: input.projectId, sourceIssueId: input.sourceIssueId, policyVersion: input.policyVersion, assessmentKey: input.assessmentKey, status: "pending", assessment: null, preview: null, attempt: 0, observationCount: 0, requestedAt: "2026-08-07T10:00:00.000Z", assessedAt: null };
+    this.record.observationCount += 1;
+    if (this.record.status !== "pending" || this.leaseToken) return { record: { ...this.record }, acquired: false };
+    this.leaseToken = input.leaseToken;
+    this.record.attempt += 1;
+    return { record: { ...this.record }, acquired: true };
+  }
+  async complete(input: Parameters<OutlineAssessmentRepository["complete"]>[0]) {
+    if (!this.record || this.leaseToken !== input.leaseToken) return false;
+    Object.assign(this.record, { status: input.status, assessment: input.assessment, preview: input.preview, assessedAt: "2026-08-07T11:00:00.000Z" });
+    this.leaseToken = null;
+    return true;
+  }
+  async release(input: Parameters<OutlineAssessmentRepository["release"]>[0]) {
+    if (!this.record || this.leaseToken !== input.leaseToken) return false;
+    this.leaseToken = null;
+    return true;
+  }
+  async get(companyId: string, sourceIssueId: string, policyVersion: string) {
+    if (!this.record || this.record.companyId !== companyId || this.record.sourceIssueId !== sourceIssueId || this.record.policyVersion !== policyVersion) return null;
+    return { ...this.record };
+  }
+  async getOldestUnassessedAgeMs() { return this.record?.status === "pending" ? 3_600_000 : null; }
+}
+
+describe("Outline assessment coordination", () => {
+  const audit = { actorType: "system" as const, actorId: null, runId: "run-1" };
+
+  it("assesses event and reconciliation observations once per policy", async () => {
+    const repository = new MemoryAssessmentRepository();
+    let calls = 0;
+    const coordinator = new OutlineAssessmentCoordinator(repository, { async assess() { calls += 1; return assessment(); } }, () => new Date("2026-08-07T11:00:00.000Z"));
+    const first = await coordinator.assessCompletion({ projectId: "project-1", source, destination, policyVersion: "materiality-v1", trigger: "event", audit });
+    const replay = await coordinator.assessCompletion({ projectId: "project-1", source, destination, policyVersion: "materiality-v1", trigger: "schedule", audit });
+    expect(calls).toBe(1);
+    expect(first).toMatchObject({ outcome: "assessed", record: { status: "material" } });
+    expect(first.record.preview).toMatchObject({ mode: "shadow", wouldPublish: false });
+    expect(JSON.stringify(first.record.assessment)).not.toContain("ops@example.com");
+    expect(JSON.stringify(first.record.assessment)).not.toContain("super-secret");
+    expect(replay).toMatchObject({ outcome: "already_assessed" });
+    expect(replay.record.observationCount).toBe(2);
+  });
+
+  it("coalesces overlapping assessment attempts before invoking the skill twice", async () => {
+    const repository = new MemoryAssessmentRepository();
+    let resolveAssessment!: (value: OutlineMaterialityAssessment) => void;
+    let calls = 0;
+    const coordinator = new OutlineAssessmentCoordinator(repository, { assess: () => { calls += 1; return new Promise((resolve) => { resolveAssessment = resolve; }); } });
+    const first = coordinator.assessCompletion({ projectId: "project-1", source, destination, policyVersion: "materiality-v1", trigger: "event", audit });
+    await Promise.resolve();
+    const overlapping = await coordinator.assessCompletion({ projectId: "project-1", source, destination, policyVersion: "materiality-v1", trigger: "schedule", audit });
+    resolveAssessment(assessment());
+    await first;
+    expect(calls).toBe(1);
+    expect(overlapping.outcome).toBe("coalesced");
+  });
+
+  it("persists non-material assessments without a document preview", async () => {
+    const repository = new MemoryAssessmentRepository();
+    const notMaterial = assessment();
+    notMaterial.classification = "not_material";
+    notMaterial.reasonCodes = ["routine_completion"];
+    notMaterial.targetClass = "none";
+    notMaterial.canonicalIdentity = { assessmentKey: "v1:paperclip:STA-42:materiality-v1", documentKey: null, proposedAction: "none", existingDocumentRef: null };
+    notMaterial.safeDraft = null;
+    const coordinator = new OutlineAssessmentCoordinator(repository, { assess: async () => notMaterial });
+    const result = await coordinator.assessCompletion({ projectId: "project-1", source, destination, policyVersion: "materiality-v1", trigger: "event", audit });
+    expect(result).toMatchObject({ outcome: "assessed", record: { status: "not_material", preview: null } });
+  });
+});

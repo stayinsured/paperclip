@@ -93,6 +93,9 @@ export function assertOutlineMaterialityAssessment(input: {
     if (!assessment.canonicalIdentity.documentKey.startsWith(`v1:${target}:`)) {
       throw new Error("outline_materiality_document_key_target_mismatch");
     }
+    if (!/^v1:(architecture|reports|processes):[a-z0-9]+(?:-[a-z0-9]+)*$/.test(assessment.canonicalIdentity.documentKey)) {
+      throw new Error("outline_materiality_document_key_invalid");
+    }
     if (assessment.safeDraft.template !== TEMPLATES[assessment.targetClass]) {
       throw new Error("outline_materiality_template_target_mismatch");
     }

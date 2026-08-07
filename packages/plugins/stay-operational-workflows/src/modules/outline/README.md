@@ -13,6 +13,8 @@ The completion materiality skill is the only classification source. Its exact st
 
 Preview bodies are sanitized again at the integration boundary. Obvious credentials, bearer values, email addresses, URL credentials, query strings, and fragments are removed. A preview records its target, deterministic Outline UUID, content hash, policy version, and `wouldPublish: false`.
 
+Event and scheduled reconciliation share a durable assessment coordinator. It claims the stable company + source issue + policy key before invoking the materiality port, so overlapping observations coalesce and a completed assessment is never rerun under the same policy. The validated skill result and optional shadow preview are stored together for inspection; negative and review results persist with no preview. A lost lease or classifier failure leaves the assessment pending for a bounded later attempt and never mutates the source issue.
+
 ## Publishing gate
 
 The current plugin release is structurally shadow-only. The publishing service is deliberately unwired until a later activation revision satisfies every gate below:
