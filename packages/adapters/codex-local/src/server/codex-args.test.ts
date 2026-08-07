@@ -198,18 +198,26 @@ describe("buildCodexExecArgs", () => {
     expect(result.args.filter((arg) => arg === "--skip-git-repo-check")).toHaveLength(1);
   });
 
-  it("builds a sealed output-only inventory and ignores escape-prone config", () => {
+  it("builds a sealed output-only inventory for a local non-repository cwd", () => {
     const result = buildCodexExecArgs(
       {
         search: true,
         dangerouslyBypassApprovalsAndSandbox: true,
-        extraArgs: ["--enable", "shell_tool", "resume", "old-thread"],
+        extraArgs: [
+          "--skip-git-repo-check",
+          "--enable",
+          "shell_tool",
+          "resume",
+          "old-thread",
+        ],
       },
       { resumeSessionId: "persisted-thread", outputOnly: true },
     );
 
+    expect(result.args.filter((arg) => arg === "--skip-git-repo-check")).toHaveLength(1);
     expect(result.args).not.toContain("--search");
     expect(result.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(result.args).not.toContain("--enable");
     expect(result.args).not.toContain("resume");
     expect(result.args).toContain("--ignore-user-config");
     expect(result.args).toContain("--ignore-rules");

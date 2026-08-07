@@ -84,11 +84,10 @@ export function buildCodexExecArgs(
 
   const args = ["exec", "--json"];
   // Codex rejects a repeated `--skip-git-repo-check` ("cannot be used multiple
-  // times"). The adapter injects this flag for sandbox execution, so when an
-  // operator's extraArgs already carry it the injection would abort the run
-  // with exit code 2. Skip the injection in that case and let the operator's
-  // copy stand.
-  if (options.skipGitRepoCheck && (outputOnly || !extraArgs.includes(SKIP_GIT_REPO_CHECK_FLAG))) {
+  // times"). Output-only runs always receive one adapter-owned copy because
+  // their fallback cwd can deliberately be a non-repository and operator args
+  // are excluded. Ordinary sandbox runs keep an operator copy when present.
+  if (outputOnly || (options.skipGitRepoCheck && !extraArgs.includes(SKIP_GIT_REPO_CHECK_FLAG))) {
     args.push(SKIP_GIT_REPO_CHECK_FLAG);
   }
   if (search) args.unshift("--search");

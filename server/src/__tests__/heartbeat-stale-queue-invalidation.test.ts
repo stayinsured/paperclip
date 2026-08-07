@@ -301,6 +301,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       assigneeAgentId: input.agentId,
       harnessKind: "skill_test",
       workMode: "skill_test",
+      originKind: "skill_test",
+      originId: testRunId,
+      originFingerprint: `skill_test:${testRunId}`,
     });
     await db.insert(companySkillTestRuns).values({
       id: testRunId,
@@ -2071,7 +2074,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, harness.issueId))).toHaveLength(0);
   }, 20_000);
 
-  it("fails a persisted output-only run before invoking an unsupported adapter", async () => {
+  it("terminally fails the exact output-only harness before invoking an unsupported adapter", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const harness = await seedSkillTestHarness({ companyId, agentId, executionProfile: "output_only" });
 
@@ -2084,13 +2087,151 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await heartbeat.waitForRunExecutionDrain(harness.runId);
 
     expect(countExecuteCallsForRun(harness.runId)).toBe(0);
-    const [run] = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
-      .from(heartbeatRuns).where(eq(heartbeatRuns.id, harness.runId));
-    expect(run).toEqual({ status: "failed", errorCode: "skill_test_output_only_unsupported_adapter" });
-    const [testRun] = await db.select({ status: companySkillTestRuns.status })
-      .from(companySkillTestRuns).where(eq(companySkillTestRuns.id, harness.testRunId));
-    expect(testRun?.status).toBe("failed");
+    const [run] = await db.select({
+      status: heartbeatRuns.status,
+      error: heartbeatRuns.error,
+      errorCode: heartbeatRuns.errorCode,
+    }).from(heartbeatRuns).where(eq(heartbeatRuns.id, harness.runId));
+    expect(run).toEqual({
+      status: "failed",
+      error: "Adapter codex_local does not support skill_test_output_only.",
+      errorCode: "skill_test_output_only_unsupported_adapter",
+    });
+    const [testRun] = await db.select({
+      status: companySkillTestRuns.status,
+      error: companySkillTestRuns.error,
+    }).from(companySkillTestRuns).where(eq(companySkillTestRuns.id, harness.testRunId));
+    expect(testRun).toEqual({ status: "failed", error: run?.error });
+    const [issue] = await db.select({ status: issues.status })
+      .from(issues).where(eq(issues.id, harness.issueId));
+    expect(issue?.status).toBe("done");
     expect(await db.select().from(issueDocuments).where(eq(issueDocuments.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
+    const auditRows = await db.select({ action: activityLog.action, details: activityLog.details })
+      .from(activityLog).where(eq(activityLog.entityId, harness.testRunId));
+    expect(auditRows).toEqual(expect.arrayContaining([expect.objectContaining({
+      action: "company.skill_test_output_failed",
+      details: expect.objectContaining({
+        issueId: harness.issueId,
+        status: "failed",
+        error: run?.error,
+        errorCode: run?.errorCode,
+      }),
+    })]));
+  }, 20_000);
+
+  it("terminally reconciles a returned output-only adapter failure without output, retry, or unrelated mutation", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const harness = await seedSkillTestHarness({ companyId, agentId, executionProfile: "output_only" });
+    const unrelatedIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: unrelatedIssueId,
+      companyId,
+      title: "Unrelated issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+    mockSupportedExecutionProfiles.push("skill_test_output_only");
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: "Codex exited before opening the output window.",
+      errorCode: "codex_startup_failed",
+      summary: null,
+      provider: "test",
+      model: "test-model",
+    }));
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => {
+      const [run] = await db.select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, harness.runId));
+      return run?.status === "failed";
+    }, 10_000);
+    await heartbeat.waitForRunExecutionDrain(harness.runId);
+
+    const [run] = await db.select({
+      status: heartbeatRuns.status,
+      error: heartbeatRuns.error,
+      errorCode: heartbeatRuns.errorCode,
+    }).from(heartbeatRuns).where(eq(heartbeatRuns.id, harness.runId));
+    expect(run).toEqual({
+      status: "failed",
+      error: "Codex exited before opening the output window.",
+      errorCode: "codex_startup_failed",
+    });
+    const [testRun] = await db.select({
+      status: companySkillTestRuns.status,
+      error: companySkillTestRuns.error,
+      output: companySkillTestRuns.outputSnapshot,
+    }).from(companySkillTestRuns).where(eq(companySkillTestRuns.id, harness.testRunId));
+    expect(testRun).toEqual({ status: "failed", error: run?.error, output: "" });
+    const issueRows = await db.select({ id: issues.id, status: issues.status })
+      .from(issues).where(eq(issues.companyId, companyId));
+    expect(issueRows).toEqual(expect.arrayContaining([
+      { id: harness.issueId, status: "done" },
+      { id: unrelatedIssueId, status: "todo" },
+    ]));
+    expect(await db.select().from(issueDocuments).where(eq(issueDocuments.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
+  }, 20_000);
+
+  it("keeps cancellation authoritative when a late output-only adapter failure returns", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const harness = await seedSkillTestHarness({ companyId, agentId, executionProfile: "output_only" });
+    mockSupportedExecutionProfiles.push("skill_test_output_only");
+    let releaseAdapter = () => {};
+    mockAdapterExecute.mockImplementationOnce(async () => new Promise((resolve) => {
+      releaseAdapter = () => resolve({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "Late adapter failure",
+        errorCode: "late_adapter_failure",
+        summary: null,
+        provider: "test",
+        model: "test-model",
+      });
+    }));
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => countExecuteCallsForRun(harness.runId) === 1, 10_000);
+    const cancelledAt = new Date();
+    await db.transaction(async (tx) => {
+      await tx.update(companySkillTestRuns).set({
+        status: "cancelled",
+        error: "Cancelled by operator",
+        updatedAt: cancelledAt,
+      }).where(eq(companySkillTestRuns.id, harness.testRunId));
+      await tx.update(issues).set({
+        status: "cancelled",
+        cancelledAt,
+        updatedAt: cancelledAt,
+      }).where(eq(issues.id, harness.issueId));
+    });
+    await heartbeat.cancelRun(harness.runId, "Cancelled by operator");
+    releaseAdapter();
+    await heartbeat.waitForRunExecutionDrain(harness.runId);
+
+    const [run] = await db.select({ status: heartbeatRuns.status, error: heartbeatRuns.error })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, harness.runId));
+    expect(run).toEqual({ status: "cancelled", error: "Cancelled by operator" });
+    const [testRun] = await db.select({ status: companySkillTestRuns.status, error: companySkillTestRuns.error })
+      .from(companySkillTestRuns).where(eq(companySkillTestRuns.id, harness.testRunId));
+    expect(testRun).toEqual({ status: "cancelled", error: "Cancelled by operator" });
+    const [issue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, harness.issueId));
+    expect(issue?.status).toBe("cancelled");
+    expect(await db.select().from(issueDocuments).where(eq(issueDocuments.issueId, harness.issueId))).toHaveLength(0);
+    const failureAudits = await db.select({ action: activityLog.action })
+      .from(activityLog).where(eq(activityLog.entityId, harness.testRunId));
+    expect(failureAudits.some((row) => row.action === "company.skill_test_output_failed")).toBe(false);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
   }, 20_000);
 
 });
