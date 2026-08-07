@@ -204,6 +204,53 @@ describe.sequential("plugin scoped API routes", () => {
     expect(res.headers.location).toBeUndefined();
   });
 
+  it.each([
+    [422, "invalid_workflow_config", "Workflow configuration validation failed"],
+    [404, "project_not_found", "Project not found"],
+    [404, "operation_not_found", "Operation not found"],
+  ])("preserves a plugin's redacted %i response instead of converting it to 502", async (
+    status,
+    code,
+    error,
+  ) => {
+    const apiRoutes = manifest([
+      {
+        routeKey: "workflow.request",
+        method: "POST",
+        path: "/workflow",
+        auth: "board",
+        capability: "api.routes.register",
+        companyResolution: { from: "body", key: "companyId" },
+      },
+    ]);
+    const { app } = await createApp({
+      actor: {
+        type: "board",
+        userId: "user-1",
+        source: "local_implicit",
+        isInstanceAdmin: true,
+      },
+      plugin: {
+        id: pluginId,
+        pluginKey: apiRoutes.id,
+        status: "ready",
+        manifestJson: apiRoutes,
+      },
+      workerResult: {
+        status,
+        body: { error, code },
+      },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/api/workflow`)
+      .send({ companyId, secret: "must-not-echo" });
+
+    expect(res.status).toBe(status);
+    expect(res.body).toEqual({ error, code });
+    expect(JSON.stringify(res.body)).not.toContain("must-not-echo");
+  });
+
   it("enforces agent checkout ownership before dispatching issue-scoped POST routes", async () => {
     const apiRoutes = manifest([
       {

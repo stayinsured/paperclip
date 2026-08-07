@@ -74,29 +74,60 @@ export interface AttemptFailure {
   httpStatus?: number;
 }
 
+export type WorkflowRequestErrorCode =
+  | "invalid_workflow_config"
+  | "project_not_found"
+  | "operation_not_found";
+
+export class WorkflowRequestError extends Error {
+  override readonly name = "WorkflowRequestError";
+
+  constructor(
+    readonly status: 404 | 422,
+    readonly code: WorkflowRequestErrorCode,
+    message: string,
+    readonly publicMessage: string,
+  ) {
+    super(message);
+  }
+}
+
+function invalidWorkflowConfig(message: string): WorkflowRequestError {
+  return new WorkflowRequestError(
+    422,
+    "invalid_workflow_config",
+    message,
+    "Workflow configuration validation failed",
+  );
+}
+
 const SAFE_VERSION = /^[a-zA-Z0-9._:-]{1,120}$/;
 const SAFE_DESTINATION = /^[a-zA-Z0-9._:/-]{1,200}$/;
 
 function requiredString(value: unknown, field: string, pattern?: RegExp): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${field} is required`);
+    throw invalidWorkflowConfig(`${field} is required`);
   }
   const normalized = value.trim();
-  if (pattern && !pattern.test(normalized)) throw new Error(`${field} contains unsupported characters`);
+  if (pattern && !pattern.test(normalized)) {
+    throw invalidWorkflowConfig(`${field} contains unsupported characters`);
+  }
   return normalized;
 }
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number, field: string): number {
   const parsed = value === undefined ? fallback : value;
   if (!Number.isInteger(parsed) || Number(parsed) < min || Number(parsed) > max) {
-    throw new Error(`${field} must be an integer between ${min} and ${max}`);
+    throw invalidWorkflowConfig(`${field} must be an integer between ${min} and ${max}`);
   }
   return Number(parsed);
 }
 
 export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig {
   const module = requiredString(input.module, "module") as WorkflowModule;
-  if (!WORKFLOW_MODULES.includes(module)) throw new Error(`Unsupported module: ${module}`);
+  if (!WORKFLOW_MODULES.includes(module)) {
+    throw invalidWorkflowConfig(`Unsupported module: ${module}`);
+  }
 
   const config: ModuleConfig = {
     companyId: requiredString(input.companyId, "companyId"),
@@ -117,13 +148,17 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
     batchSize: boundedInteger(input.batchSize, 200, 1, 1_000, "batchSize"),
   };
   assertShadowOnly(config);
-  if (config.maxDelayMs < config.baseDelayMs) throw new Error("maxDelayMs must be at least baseDelayMs");
+  if (config.maxDelayMs < config.baseDelayMs) {
+    throw invalidWorkflowConfig("maxDelayMs must be at least baseDelayMs");
+  }
   return config;
 }
 
 export function assertShadowOnly(config: Pick<ModuleConfig, "readOnly" | "destinationEnabled">): void {
   if (!config.readOnly || config.destinationEnabled) {
-    throw new Error("This plugin release is shadow-only: readOnly must be true and destinationEnabled must be false");
+    throw invalidWorkflowConfig(
+      "This plugin release is shadow-only: readOnly must be true and destinationEnabled must be false",
+    );
   }
 }
 

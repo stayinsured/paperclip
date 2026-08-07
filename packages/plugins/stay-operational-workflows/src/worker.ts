@@ -5,7 +5,11 @@ import {
   type PluginEvent,
   type PluginJobContext,
 } from "@paperclipai/plugin-sdk";
-import { parseModuleConfig, type AuditIdentity } from "./contracts.js";
+import {
+  parseModuleConfig,
+  WorkflowRequestError,
+  type AuditIdentity,
+} from "./contracts.js";
 import { ShadowReconciler } from "./reconciler.js";
 import { PostgresWorkflowRepository } from "./repository.js";
 
@@ -69,7 +73,14 @@ const plugin = definePlugin({
       if (input.routeKey === "config.upsert") {
         const config = parseModuleConfig({ ...body, companyId: input.companyId });
         const project = await ctx.projects.get(config.projectId, input.companyId);
-        if (!project) throw new Error("Project not found in the authorized company");
+        if (!project) {
+          throw new WorkflowRequestError(
+            404,
+            "project_not_found",
+            "Project not found in the authorized company",
+            "Project not found",
+          );
+        }
         await repository.upsertConfig(config, audit);
         await ctx.activity.log({
           companyId: input.companyId,
@@ -133,7 +144,20 @@ const plugin = definePlugin({
 
   async onApiRequest(input) {
     if (!apiHandler) throw new Error("Plugin API handler is not ready");
-    return apiHandler(input);
+    try {
+      return await apiHandler(input);
+    } catch (error) {
+      if (error instanceof WorkflowRequestError) {
+        return {
+          status: error.status,
+          body: {
+            error: error.publicMessage,
+            code: error.code,
+          },
+        };
+      }
+      throw error;
+    }
   },
 
   async onValidateConfig() {

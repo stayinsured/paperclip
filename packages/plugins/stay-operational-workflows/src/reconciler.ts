@@ -9,6 +9,7 @@ import {
   type AuditIdentity,
   type ModuleConfig,
   type SourceCandidate,
+  WorkflowRequestError,
 } from "./contracts.js";
 import type {
   OperationRecord,
@@ -123,7 +124,14 @@ export class ShadowReconciler {
     audit: AuditIdentity;
   }): Promise<ReconcileResult> {
     const operation = await this.repository.getOperation(input.companyId, input.operationId);
-    if (!operation) throw new Error("Operation not found in the authorized company");
+    if (!operation) {
+      throw new WorkflowRequestError(
+        404,
+        "operation_not_found",
+        "Operation not found in the authorized company",
+        "Operation not found",
+      );
+    }
     const configs = await this.repository.listConfigs(input.companyId);
     const config = configs.find((candidate) =>
       candidate.projectId === operation.projectId && candidate.module === operation.module);
@@ -178,7 +186,14 @@ export class ShadowReconciler {
     audit: AuditIdentity;
   }): Promise<void> {
     const operation = await this.repository.getOperation(input.companyId, input.operationId);
-    if (!operation) throw new Error("Operation not found in the authorized company");
+    if (!operation) {
+      throw new WorkflowRequestError(
+        404,
+        "operation_not_found",
+        "Operation not found in the authorized company",
+        "Operation not found",
+      );
+    }
     const configs = await this.repository.listConfigs(input.companyId);
     const config = configs.find((candidate) =>
       candidate.projectId === operation.projectId && candidate.module === operation.module);

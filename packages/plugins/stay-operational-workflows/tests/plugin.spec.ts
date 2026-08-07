@@ -153,9 +153,15 @@ describe("stay operational workflows plugin", () => {
       [COMPANY_B_ID, PROJECT_B_ID],
     ]);
 
-    await expect(plugin.definition.onApiRequest?.(
+    const foreignProject = await plugin.definition.onApiRequest?.(
       apiRequest("config.upsert", COMPANY_A_ID, configBody(PROJECT_B_ID)),
-    )).rejects.toThrow(/authorized company/);
+    );
+    expect(foreignProject).toEqual({
+      status: 404,
+      body: { error: "Project not found", code: "project_not_found" },
+    });
+    expect(JSON.stringify(foreignProject)).not.toContain(PROJECT_B_ID);
+    expect(JSON.stringify(foreignProject)).not.toContain(COMPANY_B_ID);
     expect(harness.dbExecutes.filter((entry) => entry.sql.includes("project_configs"))).toHaveLength(2);
     expect(harness.activity).toHaveLength(2);
 
@@ -181,40 +187,46 @@ describe("stay operational workflows plugin", () => {
       .toBe(true);
 
     const operationBId = "33333333-3333-4333-8333-333333333333";
-    await expect(plugin.definition.onApiRequest?.(
+    const foreignReplay = await plugin.definition.onApiRequest?.(
       apiRequest("operation.replay", COMPANY_A_ID, {}, { operationId: operationBId }),
-    )).rejects.toThrow(/authorized company/);
+    );
+    expect(foreignReplay).toEqual({
+      status: 404,
+      body: { error: "Operation not found", code: "operation_not_found" },
+    });
+    expect(JSON.stringify(foreignReplay)).not.toContain(operationBId);
+    expect(JSON.stringify(foreignReplay)).not.toContain(COMPANY_B_ID);
     expect(harness.dbQueries.at(-1)?.params).toEqual([COMPANY_A_ID, operationBId]);
     expect(harness.activity).toHaveLength(3);
   });
 
-  it("rejects provider-write configuration before persistence", async () => {
+  it.each([
+    ["readOnly=false", { readOnly: false }],
+    ["destinationEnabled=true", { destinationEnabled: true }],
+    ["an invalid module", { module: "invalid" }],
+    ["batchSize=0", { batchSize: 0 }],
+  ])("returns a redacted 422 for %s before persistence", async (_case, override) => {
     const harness = createTestHarness({ manifest });
+    harness.seed({ projects: [PROJECT_A] });
     await plugin.definition.setup(harness.ctx);
-    await expect(plugin.definition.onApiRequest?.({
-      routeKey: "config.upsert",
-      method: "POST",
-      path: "/config",
-      params: {},
-      query: {},
+    const response = await plugin.definition.onApiRequest?.(
+      apiRequest("config.upsert", COMPANY_A_ID, {
+        ...configBody(PROJECT_A_ID),
+        ...override,
+        secret: "must-not-echo",
+      }),
+    );
+
+    expect(response).toEqual({
+      status: 422,
       body: {
-        projectId: "00000000-0000-4000-8000-000000000001",
-        module: "clickup",
-        enabled: true,
-        readOnly: true,
-        destinationEnabled: true,
+        error: "Workflow configuration validation failed",
+        code: "invalid_workflow_config",
       },
-      actor: {
-        actorType: "user",
-        actorId: "board-user",
-        userId: "board-user",
-        agentId: null,
-        runId: null,
-      },
-      companyId: "company-a",
-      headers: {},
-    })).rejects.toThrow(/shadow-only/);
+    });
+    expect(JSON.stringify(response)).not.toContain("must-not-echo");
     expect(harness.dbExecutes).toHaveLength(0);
+    expect(harness.activity).toHaveLength(0);
   });
 
   it("locks the migration to zero external writes and redacted storage columns", async () => {
