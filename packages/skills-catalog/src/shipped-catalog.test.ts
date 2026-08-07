@@ -23,6 +23,7 @@ const EXPECTED_OPTIONAL_KEYS = [
   "paperclipai/optional/content/simplified-english",
   "paperclipai/optional/finance/ramp",
   "paperclipai/optional/product/design-critique",
+  "paperclipai/optional/quality/sentry-triage-proposal",
   "paperclipai/optional/research/last30days",
 ];
 
@@ -190,5 +191,52 @@ describe("shipped skills catalog", () => {
     const remoteExecPattern = /\b(?:curl|wget)\b[\s\S]{0,160}\|\s*(?:sh|bash)|\b(?:bash|sh)\s+-c\b|\beval\b|\bpython\s+-c\b|\bnode\s+-e\b/i;
 
     expect(remoteExecPattern.test(rampSkill)).toBe(false);
+  });
+
+  it("ships the Sentry triage proposal as privacy-safe and non-executing", () => {
+    const skill = readFileSync(
+      new URL("../catalog/optional/quality/sentry-triage-proposal/SKILL.md", import.meta.url),
+      "utf8",
+    );
+    const fixtures = readFileSync(
+      new URL(
+        "../catalog/optional/quality/sentry-triage-proposal/examples/representative-fixtures.md",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    for (const field of [
+      "severity:",
+      "affected_component:",
+      "probable_root_cause:",
+      "customer_impact:",
+      "diagnostic_next_step:",
+      "fix_options:",
+      "no_fix_boundary:",
+      "approval_gate:",
+    ]) {
+      expect(skill).toContain(field);
+    }
+    expect(skill).toContain("Source field allowlist");
+    expect(skill).toContain("Unsupported claims must use `unknown`");
+    expect(skill).toContain("this skill still cannot create work or remediate");
+    expect(skill).toContain("execution_allowed: false");
+
+    for (const fixture of [
+      "recurring production failure",
+      "noisy client event",
+      "low context",
+      "cross-system timeout",
+      "sensitive data present in the source",
+      "confirmed high-severity regression",
+    ]) {
+      expect(fixtures).toContain(fixture);
+    }
+    expect(fixtures.match(/execution_allowed: false/g)).toHaveLength(6);
+    expect(fixtures.match(/raw_detail_copied: false/g)).toHaveLength(6);
+    expect(fixtures).not.toMatch(
+      /\b(?:authorization|cookie|password|token|email|stack_locals|request_body)\s*:/i,
+    );
   });
 });

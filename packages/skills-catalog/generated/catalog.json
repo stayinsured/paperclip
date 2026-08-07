@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "packageName": "@paperclipai/skills-catalog",
   "packageVersion": "0.3.1",
-  "generatedAt": "2026-07-28T22:35:25.645Z",
+  "generatedAt": "2026-08-07T11:44:50.792Z",
   "skills": [
     {
       "id": "paperclipai:bundled:docs:doc-maintenance",
@@ -592,6 +592,54 @@
         }
       ],
       "contentHash": "sha256:429f94df398a0697042b5bbe4755b1ff1a230aa5f41d99118ad37493ac65d21c"
+    },
+    {
+      "id": "paperclipai:optional:quality:sentry-triage-proposal",
+      "key": "paperclipai/optional/quality/sentry-triage-proposal",
+      "kind": "optional",
+      "category": "quality",
+      "slug": "sentry-triage-proposal",
+      "name": "sentry-triage-proposal",
+      "description": "Produce a read-only, privacy-safe triage and remediation proposal for one configured Sentry issue. Use for evidence-qualified diagnosis and options; do not use to mutate Sentry, create work, approve a proposal, change code, or execute remediation.",
+      "path": "catalog/optional/quality/sentry-triage-proposal",
+      "entrypoint": "SKILL.md",
+      "trustLevel": "markdown_only",
+      "compatibility": "compatible",
+      "defaultInstall": false,
+      "recommendedForRoles": [
+        "engineer",
+        "sre",
+        "support"
+      ],
+      "requires": [],
+      "tags": [
+        "sentry",
+        "triage",
+        "incident-response",
+        "privacy",
+        "remediation-proposal"
+      ],
+      "files": [
+        {
+          "path": "SKILL.md",
+          "kind": "skill",
+          "sizeBytes": 10957,
+          "sha256": "c59bf13dcf150d0545626942749c8c70535a4ff1e68e9b7bb66cccd7fe92f5d2"
+        },
+        {
+          "path": "examples/recurrent-backend-error.md",
+          "kind": "markdown",
+          "sizeBytes": 4496,
+          "sha256": "21667acb9ef4ce4cbf65cb3c3087806088054ed1195d0ac296f90a42b7fbaa54"
+        },
+        {
+          "path": "examples/representative-fixtures.md",
+          "kind": "markdown",
+          "sizeBytes": 3795,
+          "sha256": "c173d6a15ddc0976b4d7edf89e020f47dfadb84255580dce9ba32a5d8c615dd0"
+        }
+      ],
+      "contentHash": "sha256:5a7281380fdafe500f2bbac336a4f59059be3e5c74e8552c2f8a39672f1bbc06"
     },
     {
       "id": "paperclipai:optional:research:last30days",
