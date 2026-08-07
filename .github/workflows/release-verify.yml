@@ -7,8 +7,21 @@ on:
         description: Commit SHA, branch, or tag to verify
         required: true
         type: string
+      enable_browser_gate:
+        description: Board-gated activation switch; ref must be an exact 40-character SHA when enabled
+        required: false
+        default: false
+        type: boolean
 
 jobs:
+  browser_gate:
+    if: inputs.enable_browser_gate
+    uses: ./.github/workflows/browser-release-gate.yml
+    with:
+      candidate_sha: ${{ inputs.ref }}
+    permissions:
+      contents: read
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest

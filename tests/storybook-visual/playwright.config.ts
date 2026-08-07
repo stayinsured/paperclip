@@ -1,6 +1,6 @@
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "@playwright/test";
+import { defineConfig, type ReporterDescription } from "@playwright/test";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const snapshotDir = process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR
@@ -8,6 +8,13 @@ const snapshotDir = process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR
     ? process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR
     : resolve(testDir, "..", "..", process.env.STORYBOOK_VISUAL_SNAPSHOT_DIR)
   : join(testDir, ".snapshots");
+const reporters: ReporterDescription[] = [
+  ["list"],
+  ["html", { open: "never", outputFolder: "playwright-report" }],
+];
+if (process.env.PAPERCLIP_BROWSER_GATE_RESULTS_JSON) {
+  reporters.push(["json", { outputFile: process.env.PAPERCLIP_BROWSER_GATE_RESULTS_JSON }]);
+}
 
 // Visual snapshot suite for the design-token extraction run: screenshots every
 // built Storybook story in both themes and compares against the external Phase
@@ -19,7 +26,7 @@ export default defineConfig({
   retries: 1,
   workers: 4,
   fullyParallel: true,
-  reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
+  reporter: reporters,
   expect: {
     toHaveScreenshot: {
       animations: "disabled",

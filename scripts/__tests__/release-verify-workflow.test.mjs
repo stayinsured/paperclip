@@ -50,3 +50,21 @@ test("release verify workflow covers the same split test surface as stable PR ve
   assert.match(verifyWorkflow, /pnpm test:run:general -- --group/);
   assert.match(verifyWorkflow, /pnpm test:run:serialized -- --shard-index/);
 });
+
+test("browser verification is reusable, exact-SHA bound, and not production-activated", () => {
+  const releaseWorkflow = readWorkflow("release.yml");
+  const verifyWorkflow = readWorkflow("release-verify.yml");
+  const gateWorkflow = readWorkflow("browser-release-gate.yml");
+  const devWorkflow = readWorkflow("dev-browser-gate.yml");
+
+  assert.match(verifyWorkflow, /enable_browser_gate:[\s\S]*?default: false/);
+  assert.match(
+    verifyWorkflow,
+    /browser_gate:[\s\S]*?if: inputs\.enable_browser_gate[\s\S]*?candidate_sha: \$\{\{ inputs\.ref \}\}/,
+  );
+  assert.doesNotMatch(releaseWorkflow, /enable_browser_gate:\s*true/);
+  assert.match(devWorkflow, /branches:[\s\S]*?- dev[\s\S]*?candidate_sha: \$\{\{ github\.sha \}\}/);
+  assert.match(gateWorkflow, /verify-sha[\s\S]*?--expected "\$\{\{ inputs\.candidate_sha \}\}"/);
+  assert.match(gateWorkflow, /retention-days: \$\{\{ steps\.evidence\.outputs\.conclusion == 'pass' && 7 \|\| 30 \}\}/);
+  assert.match(gateWorkflow, /environment: browser-release-gate-emergency-waiver/);
+});

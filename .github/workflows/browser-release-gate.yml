@@ -1,0 +1,270 @@
+name: Browser Release Gate
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character candidate commit SHA
+        required: true
+        type: string
+      waiver_expires_at:
+        description: Optional ISO-8601 expiry, at most 24 hours away
+        required: false
+        default: ""
+        type: string
+      waiver_issue:
+        description: Paperclip issue path authorizing the emergency waiver
+        required: false
+        default: ""
+        type: string
+      waiver_reason:
+        description: Audited reason for the emergency waiver
+        required: false
+        default: ""
+        type: string
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character candidate commit SHA
+        required: true
+        type: string
+      waiver_expires_at:
+        description: Optional ISO-8601 expiry, at most 24 hours away
+        required: false
+        type: string
+      waiver_issue:
+        description: Paperclip issue path authorizing the emergency waiver
+        required: false
+        type: string
+      waiver_reason:
+        description: Audited reason for the emergency waiver
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  authorize_emergency_waiver:
+    name: Authorize emergency waiver
+    if: inputs.waiver_expires_at != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: browser-release-gate-emergency-waiver
+    outputs:
+      authorized: ${{ steps.authorize.outputs.authorized }}
+      candidate_sha: ${{ inputs.candidate_sha }}
+      expires_at: ${{ inputs.waiver_expires_at }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+
+      - id: authorize
+        name: Validate board actor, exact scope, and expiry
+        env:
+          BOARD_ACTORS: ${{ vars.BROWSER_GATE_BOARD_ACTORS }}
+        run: |
+          node scripts/browser-release-gate.mjs authorize-waiver \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --actor "${{ github.triggering_actor }}" \
+            --allowed-actors "$BOARD_ACTORS" \
+            --expires-at "${{ inputs.waiver_expires_at }}" \
+            --issue "${{ inputs.waiver_issue }}" \
+            --reason "${{ inputs.waiver_reason }}" \
+            --out "$RUNNER_TEMP/browser-gate-waiver.json"
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: browser-gate-waiver-${{ inputs.candidate_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browser-gate-waiver.json
+          retention-days: 30
+          if-no-files-found: error
+
+  e2e:
+    name: Exact-SHA e2e
+    needs: authorize_emergency_waiver
+    if: always() && (needs.authorize_emergency_waiver.result == 'success' || needs.authorize_emergency_waiver.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - id: checkout_sha
+        name: Verify exact candidate checkout
+        run: |
+          observed_sha="$(git rev-parse HEAD)"
+          echo "sha=$observed_sha" >> "$GITHUB_OUTPUT"
+          node scripts/browser-release-gate.mjs verify-sha \
+            --expected "${{ inputs.candidate_sha }}" --actual "$observed_sha"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - id: browser
+        name: Run synthetic e2e suite
+        continue-on-error: true
+        env:
+          PAPERCLIP_E2E_SKIP_LLM: "true"
+          PAPERCLIP_PLAYWRIGHT_CHANNEL: chrome
+          PAPERCLIP_BROWSER_GATE_RESULTS_JSON: ${{ runner.temp }}/e2e-results.json
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          echo "BROWSER_GATE_BROWSER_VERSION=$(google-chrome --version)" >> "$GITHUB_ENV"
+          echo "BROWSER_GATE_PLAYWRIGHT_VERSION=$(npx playwright --version)" >> "$GITHUB_ENV"
+          pnpm test:e2e
+
+      - id: evidence
+        name: Classify SHA-bound e2e evidence
+        if: always()
+        env:
+          RUN_OUTCOME: ${{ steps.browser.outcome }}
+        run: |
+          node scripts/browser-release-gate.mjs evaluate \
+            --suite e2e \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --observed-sha "${{ steps.checkout_sha.outputs.sha }}" \
+            --run-outcome "${RUN_OUTCOME:-failure}" \
+            --results "$RUNNER_TEMP/e2e-results.json" \
+            --out "$RUNNER_TEMP/e2e-evidence.json"
+          conclusion="$(node -e 'console.log(require(process.argv[1]).conclusion)' "$RUNNER_TEMP/e2e-evidence.json")"
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+
+      - name: Upload e2e evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-gate-e2e-${{ inputs.candidate_sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/e2e-evidence.json
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: ${{ steps.evidence.outputs.conclusion == 'pass' && 7 || 30 }}
+          if-no-files-found: warn
+
+      - name: Enforce e2e result
+        if: always()
+        env:
+          WAIVER_AUTHORIZED: ${{ needs.authorize_emergency_waiver.outputs.authorized }}
+          WAIVER_SHA: ${{ needs.authorize_emergency_waiver.outputs.candidate_sha }}
+          WAIVER_EXPIRES_AT: ${{ needs.authorize_emergency_waiver.outputs.expires_at }}
+        run: |
+          args=(enforce --evidence "$RUNNER_TEMP/e2e-evidence.json")
+          if [[ "$WAIVER_AUTHORIZED" == "true" ]]; then
+            args+=(--waiver-authorized true --waiver-candidate-sha "$WAIVER_SHA" --waiver-expires-at "$WAIVER_EXPIRES_AT")
+          fi
+          node scripts/browser-release-gate.mjs "${args[@]}"
+
+  visual:
+    name: Exact-SHA visual
+    needs: authorize_emergency_waiver
+    if: always() && (needs.authorize_emergency_waiver.result == 'success' || needs.authorize_emergency_waiver.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - id: checkout_sha
+        name: Verify exact candidate checkout
+        run: |
+          observed_sha="$(git rev-parse HEAD)"
+          echo "sha=$observed_sha" >> "$GITHUB_OUTPUT"
+          node scripts/browser-release-gate.mjs verify-sha \
+            --expected "${{ inputs.candidate_sha }}" --actual "$observed_sha"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - id: browser
+        name: Run governed visual suite
+        continue-on-error: true
+        env:
+          PAPERCLIP_BROWSER_GATE_RESULTS_JSON: ${{ runner.temp }}/visual-results.json
+        run: |
+          pnpm install --frozen-lockfile
+          npx playwright install --with-deps chromium
+          echo "BROWSER_GATE_BROWSER_VERSION=$(npx playwright --version) chromium" >> "$GITHUB_ENV"
+          echo "BROWSER_GATE_PLAYWRIGHT_VERSION=$(npx playwright --version)" >> "$GITHUB_ENV"
+          echo "BROWSER_GATE_BASELINE_ID=$(node -p 'require("./tests/storybook-visual/baseline-manifest.json").baselineId')" >> "$GITHUB_ENV"
+          node scripts/browser-release-gate.mjs verify-baseline \
+            --candidate-sha "${{ inputs.candidate_sha }}"
+          pnpm storybook-visual:baseline download
+          pnpm storybook-visual:baseline verify
+          pnpm build-storybook
+          npx playwright test --config tests/storybook-visual/playwright.config.ts
+
+      - id: evidence
+        name: Classify SHA-bound visual evidence
+        if: always()
+        env:
+          RUN_OUTCOME: ${{ steps.browser.outcome }}
+        run: |
+          node scripts/browser-release-gate.mjs evaluate \
+            --suite visual \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --observed-sha "${{ steps.checkout_sha.outputs.sha }}" \
+            --run-outcome "${RUN_OUTCOME:-failure}" \
+            --results "$RUNNER_TEMP/visual-results.json" \
+            --out "$RUNNER_TEMP/visual-evidence.json"
+          conclusion="$(node -e 'console.log(require(process.argv[1]).conclusion)' "$RUNNER_TEMP/visual-evidence.json")"
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-gate-visual-${{ inputs.candidate_sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/visual-evidence.json
+            tests/storybook-visual/playwright-report/
+            tests/storybook-visual/test-results/
+          retention-days: ${{ steps.evidence.outputs.conclusion == 'pass' && 7 || 30 }}
+          if-no-files-found: warn
+
+      - name: Enforce visual result
+        if: always()
+        env:
+          WAIVER_AUTHORIZED: ${{ needs.authorize_emergency_waiver.outputs.authorized }}
+          WAIVER_SHA: ${{ needs.authorize_emergency_waiver.outputs.candidate_sha }}
+          WAIVER_EXPIRES_AT: ${{ needs.authorize_emergency_waiver.outputs.expires_at }}
+        run: |
+          args=(enforce --evidence "$RUNNER_TEMP/visual-evidence.json")
+          if [[ "$WAIVER_AUTHORIZED" == "true" ]]; then
+            args+=(--waiver-authorized true --waiver-candidate-sha "$WAIVER_SHA" --waiver-expires-at "$WAIVER_EXPIRES_AT")
+          fi
+          node scripts/browser-release-gate.mjs "${args[@]}"
+
+  browser_gate:
+    name: Browser release gate
+    if: always()
+    needs: [authorize_emergency_waiver, e2e, visual]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both exact-SHA suites
+        env:
+          E2E_RESULT: ${{ needs.e2e.result }}
+          VISUAL_RESULT: ${{ needs.visual.result }}
+        run: |
+          test "$E2E_RESULT" = "success"
+          test "$VISUAL_RESULT" = "success"

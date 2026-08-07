@@ -64,6 +64,9 @@ jobs:
       - name: Test release verify workflow wiring
         run: node --test ./scripts/__tests__/release-verify-workflow.test.mjs
 
+      - name: Test browser release gate policy
+        run: node --test ./scripts/__tests__/browser-release-gate.test.mjs
+
       - name: Test standalone package build concurrency
         run: node --test ./scripts/__tests__/build-standalone-concurrency.test.mjs
 

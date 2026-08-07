@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "suites": {
+    "e2e": {
+      "rules": [{ "pattern": ".*", "classification": "critical" }]
+    },
+    "visual": {
+      "rules": [{ "pattern": ".*", "classification": "critical" }]
+    }
+  }
+}
