@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -2569,6 +2569,147 @@ describe("realizeExecutionWorkspace", () => {
         },
       },
     });
+  }, 15_000);
+
+  it("reuses a detached exact-SHA worktree registered in the recorded bare repository", async () => {
+    const sourceRepo = await createTempRepo();
+    const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-persisted-owner-registry-"));
+    const bareOrigin = path.join(fixtureRoot, "project-origin.git");
+    const primaryCheckout = path.join(fixtureRoot, "project-primary");
+    const worktreePath = path.join(fixtureRoot, "persisted-exact-sha");
+    await execFileAsync("git", ["clone", "--bare", sourceRepo, bareOrigin]);
+    await execFileAsync("git", ["clone", bareOrigin, primaryCheckout]);
+    await runGit(bareOrigin, ["worktree", "add", "--detach", worktreePath, "HEAD"]);
+    await runGit(worktreePath, ["config", "user.email", "paperclip@example.com"]);
+    await runGit(worktreePath, ["config", "user.name", "Paperclip Test"]);
+    await fs.writeFile(path.join(worktreePath, "adopted.txt"), "exact owner-only commit\n", "utf8");
+    await runGit(worktreePath, ["add", "adopted.txt"]);
+    await runGit(worktreePath, ["commit", "-m", "Add exact owner-only commit"]);
+    const headSha = await readGit(worktreePath, ["rev-parse", "HEAD"]);
+    const treeSha = await readGit(worktreePath, ["rev-parse", "HEAD^{tree}"]);
+    const repoUrl = pathToFileURL(bareOrigin).href;
+
+    const reused = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: primaryCheckout,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl,
+        repoRef: "main",
+      },
+      workspace: {
+        id: "execution-workspace-bare-owner",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl,
+        baseRef: headSha,
+        branchName: null,
+        metadata: {
+          source: "git_worktree",
+          createdByRuntime: true,
+          exactCommit: headSha,
+          exactTree: treeSha,
+        },
+      },
+      issue: {
+        id: "issue-bare-owner",
+        identifier: "STA-2007",
+        title: "Reuse exact-SHA worktree from recorded bare registry",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Backend Engineer",
+        companyId: "company-1",
+      },
+    });
+
+    expect(reused).toMatchObject({
+      cwd: worktreePath,
+      worktreePath,
+      branchName: null,
+      baseRefSha: headSha,
+      created: false,
+    });
+    await expect(readGit(worktreePath, ["branch", "--show-current"])).resolves.toBe("");
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD"])).resolves.toBe(headSha);
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD^{tree}"])).resolves.toBe(treeSha);
+    await expect(readGit(worktreePath, ["status", "--porcelain", "--untracked-files=all"])).resolves.toBe("");
+  }, 15_000);
+
+  it("rejects a same-commit persisted worktree owned by an unrelated Git registry", async () => {
+    const sourceRepo = await createTempRepo();
+    const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-persisted-wrong-registry-"));
+    const projectOrigin = path.join(fixtureRoot, "project-origin.git");
+    const unrelatedRegistry = path.join(fixtureRoot, "unrelated-origin.git");
+    const primaryCheckout = path.join(fixtureRoot, "project-primary");
+    const worktreePath = path.join(fixtureRoot, "same-commit-unrelated-worktree");
+    await execFileAsync("git", ["clone", "--bare", sourceRepo, projectOrigin]);
+    await execFileAsync("git", ["clone", "--bare", sourceRepo, unrelatedRegistry]);
+    await execFileAsync("git", ["clone", projectOrigin, primaryCheckout]);
+    await runGit(unrelatedRegistry, ["worktree", "add", "--detach", worktreePath, "HEAD"]);
+    const headSha = await readGit(worktreePath, ["rev-parse", "HEAD"]);
+    const treeSha = await readGit(worktreePath, ["rev-parse", "HEAD^{tree}"]);
+    const repoUrl = pathToFileURL(projectOrigin).href;
+
+    await expect(ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: primaryCheckout,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl,
+        repoRef: "main",
+      },
+      workspace: {
+        id: "execution-workspace-wrong-owner",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl,
+        baseRef: headSha,
+        branchName: null,
+        metadata: {
+          source: "git_worktree",
+          createdByRuntime: true,
+          exactCommit: headSha,
+          exactTree: treeSha,
+        },
+      },
+      issue: {
+        id: "issue-wrong-owner",
+        identifier: "STA-2007",
+        title: "Reject unrelated exact-SHA registry",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Backend Engineer",
+        companyId: "company-1",
+      },
+    })).rejects.toMatchObject({
+      code: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: {
+          reason: "git_worktree_repository_identity_mismatch",
+          reasonCode: "owner_registry_mismatch",
+          worktreePath,
+          executionWorkspaceId: "execution-workspace-wrong-owner",
+          ownerCommonDir: unrelatedRegistry,
+          expectedRegistryPaths: expect.arrayContaining([projectOrigin]),
+        },
+      },
+    });
+    await expect(readGit(worktreePath, ["branch", "--show-current"])).resolves.toBe("");
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD"])).resolves.toBe(headSha);
+    await expect(readGit(worktreePath, ["rev-parse", "HEAD^{tree}"])).resolves.toBe(treeSha);
+    await expect(readGit(worktreePath, ["status", "--porcelain", "--untracked-files=all"])).resolves.toBe("");
   }, 15_000);
 
   it("adopts an existing persisted git worktree when the checked-out branch is forward of the recorded branch", async () => {

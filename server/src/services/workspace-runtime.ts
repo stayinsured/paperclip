@@ -5,6 +5,7 @@ import net from "node:net";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
@@ -2255,6 +2256,197 @@ async function resolvePathForWorktreeComparison(value: string): Promise<string> 
   return fs.realpath(resolved).then((realPath) => path.resolve(realPath)).catch(() => resolved);
 }
 
+const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+
+async function resolveGitCommonDir(cwd: string): Promise<string> {
+  const rawCommonDir = await runGit(["rev-parse", "--git-common-dir"], cwd);
+  const commonDir = path.isAbsolute(rawCommonDir)
+    ? rawCommonDir
+    : path.resolve(cwd, rawCommonDir);
+  return resolvePathForWorktreeComparison(commonDir);
+}
+
+function resolveLocalGitRepoPath(repoUrl: string | null | undefined, baseCwd: string): string | null {
+  const value = repoUrl?.trim();
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "file:" ? fileURLToPath(parsed) : null;
+  } catch {
+    return path.isAbsolute(value) ? value : path.resolve(baseCwd, value);
+  }
+}
+
+async function resolvePersistedWorktreeRegistry(input: {
+  projectRepoRoot: string;
+  worktreePath: string;
+  recordedRepoUrl: string | null | undefined;
+  executionWorkspaceId: string | null;
+}): Promise<string> {
+  const projectRegistryValidation = await validateLinkedGitWorktree({
+    repoRoot: input.projectRepoRoot,
+    worktreePath: input.worktreePath,
+    expectedBranchName: null,
+  });
+  if (projectRegistryValidation.valid) return input.projectRepoRoot;
+  if (projectRegistryValidation.reasonCode !== "not_registered") {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Persisted git worktree "${input.worktreePath}" is not reusable (${projectRegistryValidation.reason}).`,
+      {
+        workspaceValidation: {
+          reason: "git_worktree_not_reusable",
+          reasonCode: projectRegistryValidation.reasonCode,
+          worktreePath: input.worktreePath,
+          executionWorkspaceId: input.executionWorkspaceId,
+        },
+      },
+    );
+  }
+
+  const recordedRepoUrl = input.recordedRepoUrl?.trim() ?? "";
+  const recordedRepoPath = resolveLocalGitRepoPath(recordedRepoUrl, input.projectRepoRoot);
+  if (!recordedRepoUrl) {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Persisted git worktree "${input.worktreePath}" is not reusable (${projectRegistryValidation.reason}).`,
+      {
+        workspaceValidation: {
+          reason: "git_worktree_not_reusable",
+          reasonCode: projectRegistryValidation.reasonCode,
+          worktreePath: input.worktreePath,
+          executionWorkspaceId: input.executionWorkspaceId,
+        },
+      },
+    );
+  }
+
+  const [ownerCommonDir, projectCommonDir, recordedCommonDir] = await Promise.all([
+    resolveGitCommonDir(input.worktreePath).catch(() => null),
+    resolveGitCommonDir(input.projectRepoRoot).catch(() => null),
+    recordedRepoPath ? resolveGitCommonDir(recordedRepoPath).catch(() => null) : Promise.resolve(null),
+  ]);
+  const expectedRegistryPaths = [...new Set(
+    [projectCommonDir, recordedCommonDir].filter((value): value is string => Boolean(value)),
+  )].slice(0, 4);
+
+  if (!ownerCommonDir || !recordedCommonDir || ownerCommonDir !== recordedCommonDir) {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Persisted git worktree "${input.worktreePath}" belongs to a Git registry that does not match the recorded project repository.`,
+      {
+        workspaceValidation: {
+          reason: "git_worktree_repository_identity_mismatch",
+          reasonCode: "owner_registry_mismatch",
+          worktreePath: input.worktreePath,
+          executionWorkspaceId: input.executionWorkspaceId,
+          ownerCommonDir,
+          expectedRegistryPaths,
+        },
+      },
+    );
+  }
+
+  const ownerRegistryValidation = await validateLinkedGitWorktree({
+    repoRoot: input.worktreePath,
+    worktreePath: input.worktreePath,
+    expectedBranchName: null,
+  });
+  if (!ownerRegistryValidation.valid) {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Persisted git worktree "${input.worktreePath}" is not reusable (${ownerRegistryValidation.reason}).`,
+      {
+        workspaceValidation: {
+          reason: "git_worktree_not_reusable",
+          reasonCode: ownerRegistryValidation.reasonCode,
+          worktreePath: input.worktreePath,
+          executionWorkspaceId: input.executionWorkspaceId,
+        },
+      },
+    );
+  }
+
+  return input.worktreePath;
+}
+
+async function validatePersistedExactGitWorktree(input: {
+  worktreePath: string;
+  baseRef: string | null;
+  branchName: string | null;
+  metadata: Record<string, unknown> | null | undefined;
+  executionWorkspaceId: string | null;
+}): Promise<string | null> {
+  const exactCommit = asString(input.metadata?.exactCommit, "").trim().toLowerCase();
+  const exactTree = asString(input.metadata?.exactTree, "").trim().toLowerCase();
+  if (!exactCommit && !exactTree) return null;
+
+  const fail = (
+    reasonCode: string,
+    details: Record<string, unknown> = {},
+  ): never => {
+    throw new WorkspaceRuntimeValidationFailure(
+      `Persisted exact-SHA git worktree "${input.worktreePath}" failed identity validation (${reasonCode}).`,
+      {
+        workspaceValidation: {
+          reason: "git_worktree_exact_identity_mismatch",
+          reasonCode,
+          worktreePath: input.worktreePath,
+          executionWorkspaceId: input.executionWorkspaceId,
+          ...details,
+        },
+      },
+    );
+  };
+
+  if (!FULL_GIT_SHA_PATTERN.test(exactCommit)) {
+    fail("recorded_commit_invalid");
+  }
+  if (exactTree && !FULL_GIT_SHA_PATTERN.test(exactTree)) {
+    fail("recorded_tree_invalid");
+  }
+  const baseRef = input.baseRef?.trim().toLowerCase() ?? null;
+  if (baseRef !== exactCommit) {
+    fail("base_ref_mismatch", { expectedHeadSha: exactCommit, recordedBaseRef: baseRef });
+  }
+
+  const actualBranchName = await runGit(
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    input.worktreePath,
+  ).catch(() => null);
+  if (actualBranchName !== input.branchName) {
+    fail("branch_mismatch", {
+      expectedBranchName: input.branchName,
+      actualBranchName,
+    });
+  }
+
+  const status = await runGit(
+    ["status", "--porcelain", "--untracked-files=all"],
+    input.worktreePath,
+  ).catch(() => null);
+  if (status === null) {
+    fail("cleanliness_unknown");
+  }
+  const statusEntryCount = (status ?? "").split(/\r?\n/).filter(Boolean).length;
+  if (statusEntryCount > 0) {
+    fail("worktree_dirty", { statusEntryCount });
+  }
+
+  const actualHeadSha = await runGit(
+    ["rev-parse", "--verify", "HEAD^{commit}"],
+    input.worktreePath,
+  ).then((value) => value.toLowerCase()).catch(() => null);
+  if (actualHeadSha !== exactCommit) {
+    fail("head_mismatch", { expectedHeadSha: exactCommit, actualHeadSha });
+  }
+  const actualTreeSha = await runGit(
+    ["rev-parse", "--verify", "HEAD^{tree}"],
+    input.worktreePath,
+  ).then((value) => value.toLowerCase()).catch(() => null);
+  if (exactTree && actualTreeSha !== exactTree) {
+    fail("tree_mismatch", { expectedTreeSha: exactTree, actualTreeSha });
+  }
+
+  return exactCommit;
+}
+
 async function validateLinkedGitWorktree(input: {
   repoRoot: string;
   worktreePath: string;
@@ -2923,15 +3115,29 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   if (await directoryExists(cwd)) {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
     const reuseWorktreePath = realized.worktreePath ?? cwd;
+    const executionWorkspaceId = input.workspace.id ?? null;
+    const registryRepoRoot = await resolvePersistedWorktreeRegistry({
+      projectRepoRoot: repoRoot,
+      worktreePath: reuseWorktreePath,
+      recordedRepoUrl: input.workspace.repoUrl ?? input.base.repoUrl,
+      executionWorkspaceId,
+    });
+    const exactCommit = await validatePersistedExactGitWorktree({
+      worktreePath: reuseWorktreePath,
+      baseRef: input.workspace.baseRef ?? null,
+      branchName: realized.branchName,
+      metadata: input.workspace.metadata,
+      executionWorkspaceId,
+    });
     const repairWarnings: string[] = [];
     if (await isGitCheckout(reuseWorktreePath)) {
       const coherence = await ensureGitWorktreeBranchCoherent({
         db: input.db ?? null,
-        repoRoot,
+        repoRoot: registryRepoRoot,
         worktreePath: reuseWorktreePath,
         expectedBranchName: realized.branchName,
         sourceIssue: input.issue,
-        executionWorkspaceId: input.workspace.id ?? null,
+        executionWorkspaceId,
         heartbeatRunId: input.heartbeatRunId ?? null,
         enableWorkspaceBranchReconcileForward: input.enableWorkspaceBranchReconcileForward === true,
         enableWorkspaceDirtyQuarantineRepair: input.enableWorkspaceDirtyQuarantineRepair === true,
@@ -2948,7 +3154,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       repairWarnings.push(...coherence.warnings);
     }
     const validation = await validateLinkedGitWorktree({
-      repoRoot,
+      repoRoot: registryRepoRoot,
       worktreePath: reuseWorktreePath,
       expectedBranchName: realized.branchName,
     });
@@ -2960,7 +3166,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
             reason: "git_worktree_not_reusable",
             reasonCode: validation.reasonCode,
             worktreePath: reuseWorktreePath,
-            executionWorkspaceId: input.workspace.id ?? null,
+            executionWorkspaceId,
           },
         },
       );
@@ -2988,7 +3194,11 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       skipRefresh: true,
     });
     realized.warnings = [...repairWarnings, ...baseRefreshWarnings, ...baseDrift.warnings];
-    realized.baseRefSha = refresh.baseRefSha ?? recordedBaseRefSha ?? baseDrift.branchBaseRefSha ?? baseDrift.currentBaseRefSha;
+    realized.baseRefSha = exactCommit
+      ?? refresh.baseRefSha
+      ?? recordedBaseRefSha
+      ?? baseDrift.branchBaseRefSha
+      ?? baseDrift.currentBaseRefSha;
     if (provisionCommand) {
       await provisionExecutionWorktree({
         strategy: {
