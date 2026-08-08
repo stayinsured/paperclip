@@ -6955,11 +6955,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     testRunId: string;
     agentId: string;
     heartbeatRunId: string;
+    output: string;
     heartbeatPatch: Partial<typeof heartbeatRuns.$inferInsert>;
   }): Promise<{
     run: typeof heartbeatRuns.$inferSelect | null;
     updated: boolean;
   }> {
+    const output = input.output.trim();
+    if (!output) throw new Error("Output-only Skill Studio execution returned no final output.");
+
     return db.transaction(async (tx) => {
       const testRun = await tx
         .select({
@@ -6972,15 +6976,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(and(
           eq(companySkillTestRuns.companyId, input.companyId),
           eq(companySkillTestRuns.id, input.testRunId),
-    output: string;
           eq(companySkillTestRuns.issueId, input.issueId),
           eq(companySkillTestRuns.agentId, input.agentId),
           eq(companySkillTestRuns.executionProfile, "output_only"),
           eq(companySkillTestRuns.outputDocumentKey, "output"),
           isNull(companySkillTestRuns.deletedAt),
-    const output = input.output.trim();
-    if (!output) throw new Error("Output-only Skill Studio execution returned no final output.");
-
           isNull(companySkillTestRuns.supersededAt),
         ))
         .for("update")
@@ -14345,6 +14345,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           testRunId: snapshot.testRunId,
           agentId: agent.id,
           heartbeatRunId: run.id,
+          output: result.summary,
           heartbeatPatch,
         });
         if (!finalized.updated) return;
@@ -14383,7 +14384,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await finalizeAgentStatus(agent.id, succeeded ? "succeeded" : result.timedOut ? "timed_out" : "failed", errorMessage, {
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       });
-          output: result.summary,
     } catch (error) {
       if (handle) await runLogStore.finalize(handle).catch(() => undefined);
       handle = null;
@@ -16818,6 +16818,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             testRunId: linkedOutputOnlySuccess.testRunId,
             agentId: agent.id,
             heartbeatRunId: run.id,
+            output: adapterResult.summary!,
             heartbeatPatch,
           })
         : await setRunStatusIfRunning(run.id, status, heartbeatPatch);
@@ -16910,7 +16911,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               eventType: "lifecycle",
               stream: "system",
               level: "warn",
-            output: adapterResult.summary!,
               message: "Max-turn continuation suppressed because the policy is disabled",
               payload: {
                 retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
