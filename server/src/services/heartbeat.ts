@@ -6554,7 +6554,7 @@ export interface HeartbeatServiceOptions {
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
   testHooks?: {
-    afterOutputOnlySkillTestOutputStaged?: (input: {
+    beforeOutputOnlySkillTestSuccessFinalize?: (input: {
       companyId: string;
       issueId: string;
       testRunId: string;
@@ -6926,175 +6926,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const taskWatchdogs = taskWatchdogService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
-  async function stageOutputOnlySkillTestRun(input: {
+  async function prepareOutputOnlySkillTestRunSuccess(input: {
     companyId: string;
     issueId: string;
     testRunId: string;
     agentId: string;
     heartbeatRunId: string;
     output: string;
-  }): Promise<"staged" | "terminal"> {
-    const output = input.output.trim();
-    if (!output) throw new Error("Output-only Skill Studio execution returned no final output.");
+  }): Promise<void> {
+    if (!input.output.trim()) {
+      throw new Error("Output-only Skill Studio execution returned no final output.");
+    }
 
-    const staged = await db.transaction(async (tx) => {
-      const testRun = await tx
-        .select({
-          id: companySkillTestRuns.id,
-          status: companySkillTestRuns.status,
-          outputSnapshot: companySkillTestRuns.outputSnapshot,
-        })
-        .from(companySkillTestRuns)
-        .where(and(
-          eq(companySkillTestRuns.companyId, input.companyId),
-          eq(companySkillTestRuns.id, input.testRunId),
-          eq(companySkillTestRuns.issueId, input.issueId),
-          eq(companySkillTestRuns.agentId, input.agentId),
-          eq(companySkillTestRuns.executionProfile, "output_only"),
-          eq(companySkillTestRuns.outputDocumentKey, "output"),
-          isNull(companySkillTestRuns.deletedAt),
-          isNull(companySkillTestRuns.supersededAt),
-        ))
-        .for("update")
-        .then((rows) => rows[0] ?? null);
-      if (!testRun || (testRun.status !== "queued" && testRun.status !== "running")) return false;
-
-      const harness = await tx
-        .select({
-          status: issues.status,
-          harnessKind: issues.harnessKind,
-          workMode: issues.workMode,
-          originKind: issues.originKind,
-          originId: issues.originId,
-        })
-        .from(issues)
-        .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)))
-        .for("update")
-        .then((rows) => rows[0] ?? null);
-      if (
-        !harness
-        || harness.harnessKind !== "skill_test"
-        || harness.workMode !== "skill_test"
-        || harness.originKind !== "skill_test"
-        || harness.originId !== input.testRunId
-        || harness.status === "done"
-        || harness.status === "cancelled"
-      ) {
-        return false;
-      }
-
-      const heartbeatRun = await tx
-        .select({
-          status: heartbeatRuns.status,
-          contextSnapshot: heartbeatRuns.contextSnapshot,
-        })
-        .from(heartbeatRuns)
-        .where(and(
-          eq(heartbeatRuns.companyId, input.companyId),
-          eq(heartbeatRuns.id, input.heartbeatRunId),
-          eq(heartbeatRuns.agentId, input.agentId),
-        ))
-        .for("update")
-        .then((rows) => rows[0] ?? null);
-      if (
-        !heartbeatRun
-        || heartbeatRun.status !== "running"
-        || readNonEmptyString(parseObject(heartbeatRun.contextSnapshot).issueId) !== input.issueId
-      ) {
-        return false;
-      }
-
-      const existingOutput = await tx
-        .select({ id: documents.id, body: documents.latestBody })
-        .from(issueDocuments)
-        .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
-        .where(and(
-          eq(issueDocuments.companyId, input.companyId),
-          eq(issueDocuments.issueId, input.issueId),
-          eq(issueDocuments.key, "output"),
-        ))
-        .then((rows) => rows[0] ?? null);
-      if (existingOutput) {
-        if (existingOutput.body === output && testRun.outputSnapshot === output) return true;
-        throw conflict("Output-only Skill Studio output already exists", { issueId: input.issueId });
-      }
-
-      const now = new Date();
-      const updatedRun = await tx
-        .update(companySkillTestRuns)
-        .set({ outputSnapshot: output, error: null, updatedAt: now })
-        .where(and(
-          eq(companySkillTestRuns.companyId, input.companyId),
-          eq(companySkillTestRuns.id, input.testRunId),
-          eq(companySkillTestRuns.issueId, input.issueId),
-          eq(companySkillTestRuns.agentId, input.agentId),
-          eq(companySkillTestRuns.executionProfile, "output_only"),
-          eq(companySkillTestRuns.outputDocumentKey, "output"),
-          inArray(companySkillTestRuns.status, ["queued", "running"]),
-          isNull(companySkillTestRuns.deletedAt),
-          isNull(companySkillTestRuns.supersededAt),
-        ))
-        .returning({ id: companySkillTestRuns.id })
-        .then((rows) => rows[0] ?? null);
-      if (!updatedRun) return false;
-
-      const document = await tx.insert(documents).values({
-        companyId: input.companyId,
-        title: "Output",
-        format: "markdown",
-        latestBody: output,
-        latestRevisionNumber: 1,
-        createdByAgentId: input.agentId,
-        updatedByAgentId: input.agentId,
-        createdAt: now,
-        updatedAt: now,
-      }).returning({ id: documents.id }).then((rows) => rows[0]!);
-      const revision = await tx.insert(documentRevisions).values({
-        companyId: input.companyId,
-        documentId: document.id,
-        revisionNumber: 1,
-        title: "Output",
-        format: "markdown",
-        body: output,
-        changeSummary: "Output-only Skill Studio result",
-        createdByAgentId: input.agentId,
-        createdByRunId: input.heartbeatRunId,
-        createdAt: now,
-      }).returning({ id: documentRevisions.id }).then((rows) => rows[0]!);
-      await tx.update(documents).set({ latestRevisionId: revision.id }).where(eq(documents.id, document.id));
-      await tx.insert(issueDocuments).values({
-        companyId: input.companyId,
-        issueId: input.issueId,
-        documentId: document.id,
-        key: "output",
-        createdAt: now,
-        updatedAt: now,
-      });
-      await tx.insert(activityLog).values({
-        companyId: input.companyId,
-        actorType: "agent",
-        actorId: input.agentId,
-        agentId: input.agentId,
-        runId: input.heartbeatRunId,
-        action: "company.skill_test_output_staged",
-        entityType: "company_skill_test_run",
-        entityId: input.testRunId,
-        details: {
-          issueId: input.issueId,
-          executionMode: "response_only",
-          executionProfile: "output_only",
-          outputDocumentKey: "output",
-          status: "staged",
-        },
-        createdAt: now,
-      });
-      return true;
+    // The adapter result is available, but nothing derived from it is durable
+    // yet. Tests pause here to deterministically let cancellation claim the
+    // terminal state before success starts its atomic commit.
+    await options.testHooks?.beforeOutputOnlySkillTestSuccessFinalize?.({
+      companyId: input.companyId,
+      issueId: input.issueId,
+      testRunId: input.testRunId,
+      heartbeatRunId: input.heartbeatRunId,
     });
-    if (!staged) return "terminal";
-    return "staged";
   }
 
-  async function finalizeStagedOutputOnlySkillTestRun(input: {
+  async function finalizeOutputOnlySkillTestRun(input: {
     companyId: string;
     issueId: string;
     testRunId: string;
@@ -7117,21 +6972,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(and(
           eq(companySkillTestRuns.companyId, input.companyId),
           eq(companySkillTestRuns.id, input.testRunId),
+    output: string;
           eq(companySkillTestRuns.issueId, input.issueId),
           eq(companySkillTestRuns.agentId, input.agentId),
           eq(companySkillTestRuns.executionProfile, "output_only"),
           eq(companySkillTestRuns.outputDocumentKey, "output"),
           isNull(companySkillTestRuns.deletedAt),
+    const output = input.output.trim();
+    if (!output) throw new Error("Output-only Skill Studio execution returned no final output.");
+
           isNull(companySkillTestRuns.supersededAt),
         ))
         .for("update")
         .then((rows) => rows[0] ?? null);
-      if (
-        !testRun
-        || !testRun.outputSnapshot.trim()
-      ) {
-        return { run: null, updated: false };
-      }
+      if (!testRun) return { run: null, updated: false };
 
       const harness = await tx
         .select({
@@ -7194,7 +7048,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         outcome: "succeeded",
       });
 
-      const outputDocument = await tx
+      const existingOutput = await tx
         .select({ body: documents.latestBody })
         .from(issueDocuments)
         .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
@@ -7204,14 +7058,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           eq(issueDocuments.key, "output"),
         ))
         .then((rows) => rows[0] ?? null);
-      if (!outputDocument || outputDocument.body !== testRun.outputSnapshot) {
-        return { run: heartbeatRun, updated: false };
+      if (existingOutput) {
+        if (existingOutput.body !== output || testRun.outputSnapshot !== output) {
+          throw conflict("Output-only Skill Studio output already exists", { issueId: input.issueId });
+        }
+      } else if (testRun.outputSnapshot) {
+        throw conflict("Output-only Skill Studio output snapshot has no linked document", { issueId: input.issueId });
       }
 
       const now = new Date();
       const updatedRun = await tx
         .update(companySkillTestRuns)
-        .set({ status: "succeeded", error: null, updatedAt: now })
+        .set({ status: "succeeded", outputSnapshot: output, error: null, updatedAt: now })
         .where(and(
           eq(companySkillTestRuns.companyId, input.companyId),
           eq(companySkillTestRuns.id, input.testRunId),
@@ -7243,6 +7101,59 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (!updatedHarness) {
         throw conflict("Output-only Skill Studio harness became terminal", { issueId: input.issueId });
       }
+      if (!existingOutput) {
+        const document = await tx.insert(documents).values({
+          companyId: input.companyId,
+          title: "Output",
+          format: "markdown",
+          latestBody: output,
+          latestRevisionNumber: 1,
+          createdByAgentId: input.agentId,
+          updatedByAgentId: input.agentId,
+          createdAt: now,
+          updatedAt: now,
+        }).returning({ id: documents.id }).then((rows) => rows[0]!);
+        const revision = await tx.insert(documentRevisions).values({
+          companyId: input.companyId,
+          documentId: document.id,
+          revisionNumber: 1,
+          title: "Output",
+          format: "markdown",
+          body: output,
+          changeSummary: "Output-only Skill Studio result",
+          createdByAgentId: input.agentId,
+          createdByRunId: input.heartbeatRunId,
+          createdAt: now,
+        }).returning({ id: documentRevisions.id }).then((rows) => rows[0]!);
+        await tx.update(documents).set({ latestRevisionId: revision.id }).where(eq(documents.id, document.id));
+        await tx.insert(issueDocuments).values({
+          companyId: input.companyId,
+          issueId: input.issueId,
+          documentId: document.id,
+          key: "output",
+          createdAt: now,
+          updatedAt: now,
+        });
+        await tx.insert(activityLog).values({
+          companyId: input.companyId,
+          actorType: "agent",
+          actorId: input.agentId,
+          agentId: input.agentId,
+          runId: input.heartbeatRunId,
+          action: "company.skill_test_output_staged",
+          entityType: "company_skill_test_run",
+          entityId: input.testRunId,
+          details: {
+            issueId: input.issueId,
+            executionMode: "response_only",
+            executionProfile: "output_only",
+            outputDocumentKey: "output",
+            status: "succeeded",
+          },
+          createdAt: now,
+        });
+      }
+
 
       const updatedHeartbeat = await tx
         .update(heartbeatRuns)
@@ -14420,7 +14331,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let finalizedRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (succeeded && result.summary?.trim()) {
-        const staged = await stageOutputOnlySkillTestRun({
+        await prepareOutputOnlySkillTestRunSuccess({
           companyId: run.companyId,
           issueId,
           testRunId: snapshot.testRunId,
@@ -14428,14 +14339,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           heartbeatRunId: run.id,
           output: result.summary,
         });
-        if (staged === "terminal") return;
-        await options.testHooks?.afterOutputOnlySkillTestOutputStaged?.({
-          companyId: run.companyId,
-          issueId,
-          testRunId: snapshot.testRunId,
-          heartbeatRunId: run.id,
-        });
-        const finalized = await finalizeStagedOutputOnlySkillTestRun({
+        const finalized = await finalizeOutputOnlySkillTestRun({
           companyId: run.companyId,
           issueId,
           testRunId: snapshot.testRunId,
@@ -14479,6 +14383,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await finalizeAgentStatus(agent.id, succeeded ? "succeeded" : result.timedOut ? "timed_out" : "failed", errorMessage, {
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       });
+          output: result.summary,
     } catch (error) {
       if (handle) await runLogStore.finalize(handle).catch(() => undefined);
       handle = null;
@@ -16636,7 +16541,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               errorMessage: "Output-only Skill Studio execution returned no final output.",
             };
           } else {
-            const finalization = await stageOutputOnlySkillTestRun({
+            await prepareOutputOnlySkillTestRunSuccess({
               companyId: run.companyId,
               issueId: executionProfile.issueId,
               testRunId: executionProfile.testRunId,
@@ -16644,23 +16549,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               heartbeatRunId: run.id,
               output: adapterResult.summary,
             });
-            if (finalization === "staged") {
-              await options.testHooks?.afterOutputOnlySkillTestOutputStaged?.({
-                companyId: run.companyId,
-                issueId: executionProfile.issueId,
-                testRunId: executionProfile.testRunId,
-                heartbeatRunId: run.id,
-              });
-            }
-            if (finalization === "terminal") {
-              await recordWorkspaceFinalize("succeeded");
-              await cancelRunInternal(
-                run.id,
-                "Cancelled after adapter return because the Skill Studio test became terminal",
-                { errorCode: "skill_test_terminal" },
-              );
-              return;
-            }
           }
         }
         // Adapter returned cleanly, which means its workspace-restore finally
@@ -16924,7 +16812,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
       const linkedOutputOnlySuccess = status === "succeeded" ? outputOnlySkillTestIdentity : null;
       const persistedRunWrite = linkedOutputOnlySuccess
-        ? await finalizeStagedOutputOnlySkillTestRun({
+        ? await finalizeOutputOnlySkillTestRun({
             companyId: run.companyId,
             issueId: linkedOutputOnlySuccess.issueId,
             testRunId: linkedOutputOnlySuccess.testRunId,
@@ -17022,6 +16910,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               eventType: "lifecycle",
               stream: "system",
               level: "warn",
+            output: adapterResult.summary!,
               message: "Max-turn continuation suppressed because the policy is disabled",
               payload: {
                 retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
