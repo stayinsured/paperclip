@@ -27,6 +27,7 @@ import type {
   Agent,
   CompanySkillDetail,
   CompanySkillListItem,
+  CompanySkillTestExecutionMode,
   CompanySkillTestInput,
   CompanySkillTestRun,
   CompanySkillTestRunDetail,
@@ -50,6 +51,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useOptionalToastActions } from "../context/ToastContext";
 import { classifySkillDenial } from "@/lib/skill-policy-denial";
 import { agentsApi } from "@/api/agents";
+import { ApiError } from "@/api/client";
 import { companySkillsApi } from "@/api/companySkills";
 import { issuesApi } from "@/api/issues";
 import { queryKeys } from "@/lib/queryKeys";
@@ -86,6 +88,13 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -158,6 +167,7 @@ import {
   parseRunTemplateSelection,
   routeInteraction,
   runBadgeStatus,
+  runExecutionModeLabel,
   runHarnessUnavailableCopy,
   runOutputMode,
   runShortId,
@@ -203,6 +213,67 @@ function useMutationErrorToast() {
       toast?.pushToast({ tone: "error", title, body });
     },
     [toast],
+  );
+}
+
+type SkillTestMutationOperation = "create" | "cancel";
+
+function skillTestApiErrorCode(error: unknown): string | null {
+  if (
+    !(error instanceof ApiError)
+    || !error.body
+    || typeof error.body !== "object"
+  ) {
+    return null;
+  }
+  const body = error.body as Record<string, unknown>;
+  if (typeof body.code === "string") return body.code;
+  const details = body.details && typeof body.details === "object"
+    ? body.details as Record<string, unknown>
+    : null;
+  return typeof details?.code === "string" ? details.code : null;
+}
+
+export function skillTestMutationErrorCopy(
+  error: unknown,
+  operation: SkillTestMutationOperation,
+): { title: string; body: string } {
+  const message = error instanceof Error && error.message
+    ? error.message
+    : operation === "cancel"
+      ? "The run could not be cancelled."
+      : "The run could not be started.";
+  if (skillTestApiErrorCode(error) === "skill_test_response_only_unsupported_adapter") {
+    return {
+      title: "Response-only unavailable",
+      body: message + " Switch to Agentic or choose an agent with response-only support.",
+    };
+  }
+  return {
+    title: operation === "cancel" ? "Cancellation failed" : "Run could not start",
+    body: message,
+  };
+}
+
+function SkillTestMutationErrorNotice({
+  error,
+  operation,
+}: {
+  error: unknown;
+  operation: SkillTestMutationOperation;
+}) {
+  const copy = skillTestMutationErrorCopy(error, operation);
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs"
+    >
+      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+      <div className="min-w-0 space-y-1">
+        <p className="font-medium text-foreground">{copy.title}</p>
+        <p className="text-muted-foreground">{copy.body}</p>
+      </div>
+    </div>
   );
 }
 
@@ -2318,6 +2389,9 @@ function RunsPane({
   const onError = useMutationErrorToast();
   const toast = useOptionalToastActions();
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [executionMode, setExecutionMode] = useState<CompanySkillTestExecutionMode>(
+    "agentic",
+  );
   const [selectedTemplateId, setSelectedTemplateId] = useState<RunTemplateSelection>(
     () => loadRunTemplateSelection(companyId),
   );
@@ -2333,7 +2407,8 @@ function RunsPane({
 
   useEffect(() => {
     setSelectedTemplateId(loadRunTemplateSelection(companyId));
-  }, [companyId]);
+    setExecutionMode("agentic");
+  }, [companyId, skillId]);
 
   const updateTemplateSelection = useCallback((selection: RunTemplateSelection) => {
     setSelectedTemplateId(selection);
@@ -2473,6 +2548,7 @@ function RunsPane({
         inputId: adHocMode ? null : selectedInput?.id ?? null,
         content: adHocMode ? adHocContent : selectedInput ? null : adHocContent,
         templateId: resolution.selection,
+        executionMode,
       }));
     },
     onSuccess: (run) => {
@@ -2505,7 +2581,10 @@ function RunsPane({
           <AgentPicker
             agents={agents}
             selectedAgent={selectedAgent}
-            onSelect={onSelectAgent}
+            onSelect={(agentId) => {
+              createRunMutation.reset();
+              onSelectAgent(agentId);
+            }}
           />
           <Tooltip>
             <TooltipTrigger asChild>
@@ -2526,6 +2605,16 @@ function RunsPane({
       }
     >
       <div className="flex min-h-0 flex-1 flex-col">
+        <RunModeSelector
+          value={executionMode}
+          onChange={(mode) => {
+            createRunMutation.reset();
+            setExecutionMode(mode);
+          }}
+        />
+        {createRunMutation.isError ? (
+          <SkillTestMutationErrorNotice error={createRunMutation.error} operation="create" />
+        ) : null}
         <RunTemplateAdvancedPanel
           open={advancedOpen}
           onOpenChange={setAdvancedOpen}
@@ -2598,6 +2687,43 @@ function RunsPane({
         }}
       />
     </PaneScaffold>
+  );
+}
+
+export function RunModeSelector({
+  value,
+  onChange,
+}: {
+  value: CompanySkillTestExecutionMode;
+  onChange: (mode: CompanySkillTestExecutionMode) => void;
+}) {
+  const description = value === "response_only"
+    ? "Evaluates the displayed pinned data without tools. Paperclip writes the final response to this run."
+    : "Uses the selected agent’s normal tools and execution context.";
+  return (
+    <div className="flex items-start gap-3 border-b border-border px-3 py-3">
+      <div className="min-w-0 flex-1 space-y-1">
+        <Label htmlFor="skill-test-run-mode">Run mode</Label>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+      <Select
+        value={value}
+        onValueChange={(mode) => onChange(mode as CompanySkillTestExecutionMode)}
+      >
+        <SelectTrigger
+          id="skill-test-run-mode"
+          size="sm"
+          className="w-40"
+          aria-label="Run mode"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent align="end">
+          <SelectItem value="agentic">Agentic</SelectItem>
+          <SelectItem value="response_only">Response-only</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -2929,7 +3055,7 @@ function RunHistoryRow({
       leading={<StatusBadge status={runBadgeStatus(run.status)} />}
       identifier={runShortId(run)}
       title={removed ? `${name} (removed)` : name}
-      subtitle={relativeTime(run.createdAt)}
+      subtitle={relativeTime(run.createdAt) + " · " + runExecutionModeLabel(run.executionMode)}
       trailing={
         <span className="font-mono text-xs text-muted-foreground">
           {formatCents(run.cost.costCents)}
@@ -3115,6 +3241,7 @@ function RunDetailView({
       <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={runBadgeStatus(detail.status)} />
+          <Badge variant="outline">{runExecutionModeLabel(detail.executionMode)}</Badge>
           <Identity name={agentName} size="xs" />
           {removed && <Badge variant="secondary">removed</Badge>}
           <span className="font-mono text-xs text-muted-foreground">
@@ -3129,6 +3256,7 @@ function RunDetailView({
         <div className="rounded-md border border-border text-xs">
           <PropRow label="Input" value={detail.inputId ? "saved input" : "ad-hoc paste"} />
           <PropRow label="Template" value={detail.templateName ?? "No template"} />
+          <PropRow label="Run mode" value={runExecutionModeLabel(detail.executionMode)} />
           <PropRow label="Skill version" value={`v${detail.skillVersion.revisionNumber}`} />
           <PropRow label="Created" value={relativeTime(detail.createdAt)} />
         </div>
@@ -3208,6 +3336,10 @@ function RunDetailView({
             })
           }
         />
+
+        {cancelMutation.isError ? (
+          <SkillTestMutationErrorNotice error={cancelMutation.error} operation="cancel" />
+        ) : null}
 
         {/* Actions */}
         <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">

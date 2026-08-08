@@ -10,7 +10,8 @@ import type {
   CompanySkillListItem,
 } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SkillStudio } from "./SkillStudio";
+import { ApiError } from "@/api/client";
+import { SkillStudio, skillTestMutationErrorCopy } from "./SkillStudio";
 
 const routeState = vi.hoisted(() => ({
   pathname: "/skills/studio/new",
@@ -138,6 +139,14 @@ vi.mock("./CompanySkills", () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+if (!globalThis.PointerEvent) {
+  (globalThis as any).PointerEvent = MouseEvent;
+}
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+  Element.prototype.releasePointerCapture = () => {};
+}
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -672,5 +681,120 @@ describe("SkillStudio editor frontmatter", () => {
       link.getAttribute("href")?.includes("/skills/studio/new?forkFrom"),
     );
     expect(staleForkLink).toBeUndefined();
+  });
+});
+
+describe("SkillStudio run modes", () => {
+  beforeEach(() => {
+    routeState.pathname = "/skills/studio/source-skill";
+    routeState.search = "";
+    routeState.skillId = "source-skill";
+  });
+
+  it("surfaces deterministic capability and cancellation errors", () => {
+    const capability = skillTestMutationErrorCopy(new ApiError(
+      "Adapter process does not support response-only Skill Studio execution.",
+      422,
+      { code: "skill_test_response_only_unsupported_adapter" },
+    ), "create");
+    expect(capability).toEqual({
+      title: "Response-only unavailable",
+      body: "Adapter process does not support response-only Skill Studio execution. Switch to Agentic or choose an agent with response-only support.",
+    });
+
+    expect(skillTestMutationErrorCopy(new ApiError("Run already finished", 409, null), "cancel")).toEqual({
+      title: "Cancellation failed",
+      body: "Run already finished",
+    });
+  });
+
+  it("defaults to Agentic and shows a persisted Response-only mode in history and detail", async () => {
+    const run = {
+      id: "11111111-1111-4111-8111-111111111111",
+      companyId: "company-1",
+      skillId: "source-skill",
+      inputId: null,
+      inputSnapshot: "Pinned input",
+      skillVersionId: "22222222-2222-4222-8222-222222222222",
+      agentId: "agent-1",
+      agentConfigSnapshot: { name: "Test Agent" },
+      issueId: "33333333-3333-4333-8333-333333333333",
+      templateId: null,
+      templateName: null,
+      templateBody: null,
+      renderedTemplateBody: null,
+      harnessIssueDescription: "Test harness",
+      status: "succeeded",
+      executionMode: "response_only",
+      executionProfile: "output_only",
+      outputDocumentKey: "output",
+      outputSnapshot: "Pinned result",
+      error: null,
+      deletedAt: null,
+      supersededAt: null,
+      harnessIssueExpiresAt: null,
+      harnessIssueDeletedAt: null,
+      createdAt: new Date("2026-08-08T12:00:00Z"),
+      updatedAt: new Date("2026-08-08T12:01:00Z"),
+      cost: { costCents: 0, inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 },
+      taskExpired: false,
+    };
+    mockAgentsApi.list.mockResolvedValueOnce([{
+      id: "agent-1",
+      companyId: "company-1",
+      name: "Test Agent",
+      status: "idle",
+      adapterType: "codex_local",
+    }]);
+    mockCompanySkillsApi.testRuns.mockResolvedValueOnce([run]);
+    mockCompanySkillsApi.testRunDetail.mockResolvedValueOnce({
+      ...run,
+      skillVersion: { revisionNumber: 3 },
+      outputBody: "Pinned result",
+      harnessContent: {
+        available: true,
+        unavailableReason: null,
+        documents: [],
+        attachments: [],
+        workProducts: [],
+      },
+      harnessIssue: null,
+      interactions: [],
+    });
+
+    const node = await renderStudio();
+
+    await waitFor(() => expect(node.textContent).toContain("Uses the selected agent’s normal tools"));
+    const modeTrigger = node.querySelector<HTMLElement>("[aria-label=\"Run mode\"]");
+    expect(modeTrigger?.textContent).toContain("Agentic");
+    await act(async () => {
+      modeTrigger!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+      modeTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+    const responseOnlyOption = Array.from(document.body.querySelectorAll<HTMLElement>("[role=\"option\"]")).find(
+      (option) => option.textContent?.trim() === "Response-only",
+    );
+    expect(responseOnlyOption).toBeTruthy();
+    await act(async () => {
+      responseOnlyOption!.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0 }));
+      responseOnlyOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await waitFor(() => expect(node.textContent).toContain("Evaluates the displayed pinned data without tools"));
+    await waitFor(() => expect(node.textContent).toContain("Response-only"));
+
+    const historyRow = Array.from(node.querySelectorAll<HTMLElement>("div")).find(
+      (element) => element.className.includes("cursor-pointer") && element.textContent?.includes("Test Agent"),
+    );
+    expect(historyRow).toBeTruthy();
+    await act(async () => {
+      historyRow!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    await waitFor(() => expect(node.textContent).toContain("Output snapshot"));
+    const modeRow = Array.from(node.querySelectorAll<HTMLElement>("div")).find(
+      (element) => element.firstElementChild?.textContent === "Run mode",
+    );
+    expect(modeRow?.lastElementChild?.textContent).toBe("Response-only");
   });
 });

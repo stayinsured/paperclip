@@ -31,6 +31,7 @@ import {
   runBadgeStatus,
   runOutputMode,
   runHarnessUnavailableCopy,
+  runExecutionModeLabel,
   runShortId,
   parseRunTemplateSelection,
   resolveRunTemplateSelection,
@@ -487,7 +488,7 @@ describe("agent picker + run labels", () => {
         inputId: "input-3",
         inputSnapshot: "snapshotted text",
         skillVersionId: "ver-7",
-        executionProfile: "output_only",
+        executionMode: "response_only",
         templateId: "template-1",
         templateName: "Focused smoke",
         templateBody: "Original {{skillName}}",
@@ -497,7 +498,7 @@ describe("agent picker + run labels", () => {
         inputId: "input-3",
         content: undefined,
         skillVersionId: "ver-7",
-        executionProfile: "output_only",
+        executionMode: "response_only",
         templateSnapshot: {
           templateId: "template-1",
           templateName: "Focused smoke",
@@ -512,7 +513,7 @@ describe("agent picker + run labels", () => {
         inputId: null,
         inputSnapshot: "ad-hoc paste body",
         skillVersionId: "ver-2",
-        executionProfile: "standard",
+        executionMode: "agentic",
         templateId: null,
         templateName: null,
         templateBody: null,
@@ -534,7 +535,7 @@ describe("agent picker + run labels", () => {
         inputId: null,
         inputSnapshot: "x",
         skillVersionId: "v",
-        executionProfile: "standard",
+        executionMode: "agentic",
         templateId: "built-in:default-test-template",
         templateName: "Default test template",
         templateBody: "Default",
@@ -548,7 +549,7 @@ describe("agent picker + run labels", () => {
         inputId: null,
         inputSnapshot: "x",
         skillVersionId: "v",
-        executionProfile: "standard",
+        executionMode: "agentic",
         templateId: "template-old",
         templateName: "Old template name",
         templateBody: "Old body {{skillName}}",
@@ -624,12 +625,14 @@ describe("advanced run template helpers", () => {
         inputId: "input-1",
         content: null,
         templateId: customTemplate.id,
+        executionMode: "response_only",
       }),
     ).toEqual({
       agentId: "agent-1",
       inputId: "input-1",
       content: null,
       templateId: "template-1",
+      executionMode: "response_only",
     });
 
     expect(
@@ -638,8 +641,14 @@ describe("advanced run template helpers", () => {
         inputId: null,
         content: "ad-hoc",
         templateId: null,
+        executionMode: "agentic",
       }).templateId,
     ).toBeNull();
+  });
+
+  it("labels canonical execution modes for operator-facing history", () => {
+    expect(runExecutionModeLabel("agentic")).toBe("Agentic");
+    expect(runExecutionModeLabel("response_only")).toBe("Response-only");
   });
 });
 

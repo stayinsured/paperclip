@@ -1,6 +1,7 @@
 import type {
   CompanySkillLastEditor,
   CompanySkillListItem,
+  CompanySkillTestExecutionMode,
   CompanySkillTestInput,
   CompanySkillTestRun,
   CompanySkillTestRunCreateRequest,
@@ -326,13 +327,19 @@ export function buildCreateRunRequest(input: {
   inputId: string | null;
   content: string | null;
   templateId: RunTemplateSelection;
+  executionMode: CompanySkillTestExecutionMode;
 }): CompanySkillTestRunCreateRequest {
   return {
     agentId: input.agentId,
     inputId: input.inputId,
     content: input.content,
     templateId: input.templateId,
+    executionMode: input.executionMode,
   };
+}
+
+export function runExecutionModeLabel(mode: CompanySkillTestExecutionMode): string {
+  return mode === "response_only" ? "Response-only" : "Agentic";
 }
 
 /** The output document, if the run detail carries one under its output key. */
@@ -449,7 +456,7 @@ export function buildReRunRequest(
     | "inputId"
     | "inputSnapshot"
     | "skillVersionId"
-    | "executionProfile"
+    | "executionMode"
     | "templateId"
     | "templateName"
     | "templateBody"
@@ -460,7 +467,7 @@ export function buildReRunRequest(
     inputId: detail.inputId ?? undefined,
     content: detail.inputId ? undefined : detail.inputSnapshot,
     skillVersionId: detail.skillVersionId,
-    executionProfile: detail.executionProfile,
+    executionMode: detail.executionMode,
     templateSnapshot: {
       templateId: detail.templateId,
       templateName: detail.templateName,
