@@ -143,6 +143,18 @@ describe("AuditFeed", () => {
     expect(container.textContent, `waiting for "${text}"`).toContain(text);
   }
 
+  /** Poll until `text` is absent, for asynchronous access-tier transitions. */
+  async function waitForTextToDisappear(text: string, timeoutMs: number) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!container.textContent?.includes(text)) return;
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 25));
+      });
+    }
+    expect(container.textContent, `waiting for "${text}" to disappear`).not.toContain(text);
+  }
+
   function clickButton(text: string) {
     const btn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes(text));
     expect(btn, `button "${text}"`).toBeTruthy();
@@ -231,6 +243,7 @@ describe("AuditFeed", () => {
       fromDate!.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await flushReact();
+    await waitForTextToDisappear("All agents", 5_000);
 
     expect(listAgentActionsMock.mock.calls.some(([, filters]) => filters.from)).toBe(true);
     expect(listAgentActionsMock.mock.calls.at(-1)?.[1]).toEqual(
