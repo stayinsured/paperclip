@@ -9,9 +9,12 @@ import {
   companies,
   createDb,
   heartbeatRuns,
+  executionWorkspaces,
   issueComments,
   issueRelations,
   issues,
+  projects,
+  projectWorkspaces,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -46,6 +49,9 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     await db.delete(activityLog);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -353,6 +359,9 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
     const contenderRunId = randomUUID();
     const issueId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
     await db.insert(heartbeatRuns).values({
       id: contenderRunId,
       companyId,
@@ -361,9 +370,27 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       invocationSource: "assignment",
       startedAt: new Date(),
     });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Exact-SHA runtime validation",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "paperclip-control-plane",
+      sourceType: "git_repo",
+      cwd: "/workspace/paperclip-control-plane",
+      repoRef: "dev",
+      isPrimary: true,
+    });
     await db.insert(issues).values({
       id: issueId,
       companyId,
+      projectId,
+      projectWorkspaceId,
       title: "Live checkout race",
       status: "in_progress",
       priority: "high",
@@ -372,7 +399,34 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       executionRunId: currentRunId,
       executionAgentNameKey: "codexcoder",
       executionLockedAt: new Date(),
+      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: {
+          type: "git_worktree",
+          baseRef: "91eccdf110b5b28b7960adf014f0b4eaf23dae4e",
+        },
+      },
     });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      sourceIssueId: issueId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "sta-1975-skill-studio-exact-91eccdf",
+      status: "active",
+      cwd: "/workspace/_worktrees/sta-1975-skill-studio-exact-91eccdf",
+      repoUrl: "file:///workspace/paperclip-control-plane-origin.git",
+      baseRef: "91eccdf110b5b28b7960adf014f0b4eaf23dae4e",
+      providerType: "git_worktree",
+      providerRef: "/workspace/_worktrees/sta-1975-skill-studio-exact-91eccdf",
+    });
+    await db.update(issues)
+      .set({ executionWorkspaceId })
+      .where(eq(issues.id, issueId));
 
     const res = await request(createApp(agentActor(companyId, agentId, contenderRunId)))
       .post(`/api/issues/${issueId}/checkout`)
@@ -392,6 +446,9 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
         assigneeAgentId: issues.assigneeAgentId,
         checkoutRunId: issues.checkoutRunId,
         executionRunId: issues.executionRunId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        executionWorkspaceSettings: issues.executionWorkspaceSettings,
       })
       .from(issues)
       .where(eq(issues.id, issueId))
@@ -401,6 +458,15 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       assigneeAgentId: agentId,
       checkoutRunId: currentRunId,
       executionRunId: currentRunId,
+      executionWorkspaceId,
+      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: {
+          type: "git_worktree",
+          baseRef: "91eccdf110b5b28b7960adf014f0b4eaf23dae4e",
+        },
+      },
     });
 
     const checkoutActivity = await db

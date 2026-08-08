@@ -21,6 +21,10 @@ const mockAccessService = vi.hoisted(() => ({
   hasPermission: vi.fn(),
 }));
 
+const mockExecutionWorkspaceService = vi.hoisted(() => ({
+  getById: vi.fn(),
+}));
+
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
@@ -141,7 +145,7 @@ vi.mock("../services/index.js", () => ({
   }),
   documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
   documentService: () => ({}),
-  executionWorkspaceService: () => ({}),
+  executionWorkspaceService: () => mockExecutionWorkspaceService,
   feedbackService: () => mockFeedbackService,
   goalService: () => ({}),
   heartbeatService: () => mockHeartbeatService,
@@ -274,6 +278,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockAccessService.canUser.mockReset();
     mockAccessService.decide.mockReset();
     mockAccessService.hasPermission.mockReset();
+    mockExecutionWorkspaceService.getById.mockReset();
     mockHeartbeatService.wakeup.mockReset();
     mockHeartbeatService.reportRunActivity.mockReset();
     mockHeartbeatService.getRun.mockReset();
@@ -313,6 +318,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
+    mockExecutionWorkspaceService.getById.mockResolvedValue(null);
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
     mockHeartbeatService.getRun.mockResolvedValue(null);
@@ -1750,6 +1756,76 @@ describe.sequential("issue comment reopen routes", () => {
           reopenedFrom: "done",
           resumeIntent: true,
           followUpRequested: true,
+        }),
+      }),
+    );
+  });
+
+  it("preserves an explicit exact-SHA isolated workspace across a structured blocked-issue resume", async () => {
+    const executionWorkspaceId = "d4446c7e-8746-4664-bf50-20a0677c04d3";
+    const issue = {
+      ...makeIssue("blocked"),
+      executionWorkspaceId,
+      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: {
+          type: "git_worktree",
+          baseRef: "91eccdf110b5b28b7960adf014f0b4eaf23dae4e",
+        },
+      },
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      makeIssueUpdateReceipt(issue, patch));
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      id: executionWorkspaceId,
+      mode: "isolated_workspace",
+      name: "sta-1975-skill-studio-exact-91eccdf",
+      status: "active",
+      closedAt: null,
+    });
+
+    const res = await request(await installActor(createApp(), agentActor()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Resume in the approved exact-SHA workspace.", resume: true });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      { status: "todo" },
+    );
+    const updated = await mockIssueService.update.mock.results[0]?.value;
+    expect(updated).toMatchObject({
+      executionWorkspaceId,
+      executionWorkspacePreference: "isolated_workspace",
+      executionWorkspaceSettings: expect.objectContaining({
+        workspaceStrategy: expect.objectContaining({
+          baseRef: "91eccdf110b5b28b7960adf014f0b4eaf23dae4e",
+        }),
+      }),
+    });
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorType: "agent",
+        actorId: "22222222-2222-4222-8222-222222222222",
+        agentId: "22222222-2222-4222-8222-222222222222",
+        runId: "run-1",
+        action: "issue.comment_added",
+        details: expect.objectContaining({
+          resumeIntent: true,
+          followUpRequested: true,
+        }),
+      }),
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_reopened_via_comment",
+        payload: expect.objectContaining({
+          reopenedFrom: "blocked",
+          resumeIntent: true,
         }),
       }),
     );

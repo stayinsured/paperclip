@@ -1636,14 +1636,35 @@ describe("effective run execution workspace config freshness", () => {
     expect(realizeWorkspace).not.toHaveBeenCalled();
   });
 
+  it("preserves an explicit exact-SHA isolated workspace binding without reuse_existing preference", () => {
+    const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: "d4446c7e-8746-4664-bf50-20a0677c04d3",
+      issueExecutionWorkspacePreference: "isolated_workspace",
+      existingExecutionWorkspaceStatus: "active",
+      existingExecutionWorkspaceClosedAt: null,
+      existingExecutionWorkspaceAccessible: true,
+    });
+
+    expect(reuseRequest).toEqual({
+      requestedExecutionWorkspaceId: "d4446c7e-8746-4664-bf50-20a0677c04d3",
+      requestedShouldReuseExisting: true,
+      existingExecutionWorkspaceAvailable: true,
+    });
+  });
+
   it.each([
-    { name: "missing", status: null },
-    { name: "archived", status: "archived" },
-  ])("fails loudly when the inherited workspace row is $name", async ({ status }) => {
+    { name: "missing", status: null, closedAt: null, accessible: true },
+    { name: "archived", status: "archived", closedAt: new Date(), accessible: true },
+    { name: "cleanup failed", status: "cleanup_failed", closedAt: new Date(), accessible: true },
+    { name: "closed despite an active status", status: "active", closedAt: new Date(), accessible: true },
+    { name: "inaccessible", status: "active", closedAt: null, accessible: false },
+  ])("fails loudly when the explicit workspace row is $name", async ({ status, closedAt, accessible }) => {
     const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: "workspace-old",
-      issueExecutionWorkspacePreference: "reuse_existing",
+      issueExecutionWorkspacePreference: "isolated_workspace",
       existingExecutionWorkspaceStatus: status,
+      existingExecutionWorkspaceClosedAt: closedAt,
+      existingExecutionWorkspaceAccessible: accessible,
     });
 
     expect(reuseRequest).toEqual({

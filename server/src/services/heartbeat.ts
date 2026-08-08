@@ -4336,19 +4336,28 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   issueExecutionWorkspaceId?: string | null;
   issueExecutionWorkspacePreference?: string | null;
   existingExecutionWorkspaceStatus?: string | null;
+  existingExecutionWorkspaceClosedAt?: Date | string | null;
+  existingExecutionWorkspaceAccessible?: boolean;
 }): ExecutionWorkspaceReuseRequestForIssue {
   const requestedExecutionWorkspaceId = readNonEmptyString(input.issueExecutionWorkspaceId);
-  const requestedShouldReuseExisting =
-    input.issueExecutionWorkspacePreference === "reuse_existing" && requestedExecutionWorkspaceId !== null;
+  // An issue-level executionWorkspaceId is an explicit binding, regardless of
+  // which mode originally selected it. Treating only `reuse_existing` as
+  // binding allowed a structured resume wake to realize the project-primary
+  // default and silently replace an operator-selected isolated worktree.
+  const requestedShouldReuseExisting = requestedExecutionWorkspaceId !== null;
+  const existingExecutionWorkspaceOpen =
+    input.existingExecutionWorkspaceStatus === "active" ||
+    input.existingExecutionWorkspaceStatus === "idle" ||
+    input.existingExecutionWorkspaceStatus === "in_review";
 
   return {
     requestedExecutionWorkspaceId,
     requestedShouldReuseExisting,
     existingExecutionWorkspaceAvailable:
       requestedShouldReuseExisting &&
-      input.existingExecutionWorkspaceStatus !== null &&
-      input.existingExecutionWorkspaceStatus !== undefined &&
-      input.existingExecutionWorkspaceStatus !== "archived",
+      input.existingExecutionWorkspaceAccessible !== false &&
+      input.existingExecutionWorkspaceClosedAt == null &&
+      existingExecutionWorkspaceOpen,
   };
 }
 
@@ -14862,6 +14871,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
       issueExecutionWorkspacePreference: issueRef?.executionWorkspacePreference ?? null,
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
+      existingExecutionWorkspaceClosedAt: existingExecutionWorkspace?.closedAt ?? null,
+      existingExecutionWorkspaceAccessible:
+        existingExecutionWorkspace == null || existingExecutionWorkspace.companyId === agent.companyId,
     });
     const requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
     const reusableExistingExecutionWorkspace = workspaceReuseRequest.existingExecutionWorkspaceAvailable
@@ -18923,20 +18935,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             legacyUseProjectWorkspace: null,
           });
           const resolvedStrategy = resolveEffectiveWorkspaceStrategyType(resolvedMode, workspaceManagedConfig);
-          const existingExecutionWorkspaceStatus = issue.executionWorkspaceId
+          const existingExecutionWorkspace = issue.executionWorkspaceId
             ? await tx
-              .select({ status: executionWorkspaces.status })
+              .select({
+                companyId: executionWorkspaces.companyId,
+                status: executionWorkspaces.status,
+                closedAt: executionWorkspaces.closedAt,
+              })
               .from(executionWorkspaces)
               .where(and(
                 eq(executionWorkspaces.id, issue.executionWorkspaceId),
                 eq(executionWorkspaces.companyId, issue.companyId),
               ))
-              .then((rows) => rows[0]?.status ?? null)
+              .then((rows) => rows[0] ?? null)
             : null;
           const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
             issueExecutionWorkspaceId: issue.executionWorkspaceId,
             issueExecutionWorkspacePreference: issue.executionWorkspacePreference,
-            existingExecutionWorkspaceStatus,
+            existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
+            existingExecutionWorkspaceClosedAt: existingExecutionWorkspace?.closedAt ?? null,
+            existingExecutionWorkspaceAccessible:
+              existingExecutionWorkspace == null || existingExecutionWorkspace.companyId === issue.companyId,
           });
           const hasResolvablePriorSessionWorkspace = await resolveHasResolvablePriorSessionWorkspace();
 
