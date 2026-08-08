@@ -628,6 +628,102 @@ export async function seedManagedCodexHome(
   }
 }
 
+export const CODEX_OUTPUT_ONLY_CREDENTIAL_ERROR_CODE =
+  "skill_test_output_only_credential_unavailable";
+
+export class CodexOutputOnlyCredentialError extends Error {
+  code = CODEX_OUTPUT_ONLY_CREDENTIAL_ERROR_CODE;
+  resultJson: Record<string, unknown>;
+
+  constructor(message: string, resultJson: Record<string, unknown>) {
+    super(message);
+    this.name = "CodexOutputOnlyCredentialError";
+    this.resultJson = resultJson;
+  }
+}
+
+export interface PrepareOutputOnlyCodexHomeInput {
+  env: NodeJS.ProcessEnv;
+  companyId: string;
+  configuredCodexHome: string | null;
+  configuredApiKey: string | null;
+  onLog: AdapterExecutionContext["onLog"];
+}
+
+/**
+ * Creates a fresh, private Codex home for an output-only run and materializes
+ * only its selected provider credential. In particular, this path never
+ * enumerates or probes shared config, instructions, skills, sessions, MCP
+ * state, or any other non-credential entry.
+ *
+ * The returned directory is always under the Paperclip-managed company tree.
+ * The caller owns removing it after the run.
+ */
+export async function prepareOutputOnlyCodexHome(
+  input: PrepareOutputOnlyCodexHomeInput,
+): Promise<string> {
+  const configuredCodexHome = nonEmpty(input.configuredCodexHome ?? undefined);
+  const configuredApiKey = nonEmpty(input.configuredApiKey ?? undefined);
+  const configuredHomeIsManaged =
+    configuredCodexHome != null &&
+    isManagedCodexHomePath(input.env, input.companyId, configuredCodexHome);
+  const managedHomeAnchor = configuredHomeIsManaged
+    ? path.resolve(configuredCodexHome)
+    : resolveManagedCodexHomeDir(input.env, input.companyId);
+  const outputOnlyHomeParent = path.dirname(managedHomeAnchor);
+  let outputOnlyHome: string | null = null;
+
+  try {
+    await fs.mkdir(outputOnlyHomeParent, { recursive: true });
+    outputOnlyHome = await fs.mkdtemp(
+      path.join(outputOnlyHomeParent, ".codex-output-only-"),
+    );
+    await fs.chmod(outputOnlyHome, 0o700);
+
+    if (configuredApiKey) {
+      await writeApiKeyAuthJson(outputOnlyHome, configuredApiKey);
+    } else {
+      // A genuine external CODEX_HOME selects its own auth.json identity. A
+      // managed configured home is only an isolation target, so its credential
+      // source remains the shared host identity that ordinary seeding uses.
+      const credentialSourceHome = configuredCodexHome && !configuredHomeIsManaged
+        ? path.resolve(configuredCodexHome)
+        : resolveSharedCodexHomeDir(input.env);
+      if (!(await codexHomeHasUsableAuth(credentialSourceHome))) {
+        throw new CodexOutputOnlyCredentialError(
+          "Codex output-only credential bootstrap failed: the selected subscription credential is missing, unreadable, invalid, or unusable.",
+          {
+            authMode: "subscription",
+            failure: "missing_unreadable_or_unusable",
+          },
+        );
+      }
+      await ensureSymlink(
+        path.join(outputOnlyHome, "auth.json"),
+        path.join(credentialSourceHome, "auth.json"),
+      );
+    }
+
+    await input.onLog(
+      "stdout",
+      "[paperclip] Prepared a credential-only Codex home for output-only execution.\n",
+    );
+    return outputOnlyHome;
+  } catch (error) {
+    if (outputOnlyHome) {
+      await fs.rm(outputOnlyHome, { recursive: true, force: true }).catch(() => {});
+    }
+    if (error instanceof CodexOutputOnlyCredentialError) throw error;
+    throw new CodexOutputOnlyCredentialError(
+      "Codex output-only credential bootstrap failed while materializing the selected credential.",
+      {
+        authMode: configuredApiKey ? "api" : "subscription",
+        failure: "materialization_failed",
+      },
+    );
+  }
+}
+
 export async function prepareManagedCodexHome(
   env: NodeJS.ProcessEnv,
   onLog: AdapterExecutionContext["onLog"],

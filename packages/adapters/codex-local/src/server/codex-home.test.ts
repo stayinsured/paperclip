@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CODEX_OUTPUT_ONLY_CREDENTIAL_ERROR_CODE,
   CODEX_SYNC_ALLOWLIST,
   codexHomeHasUsableAuth,
   ensureSymlink,
@@ -10,6 +11,7 @@ import {
   mergeManagedCodexMcpGateways,
   isManagedCodexHomePath,
   prepareManagedCodexHome,
+  prepareOutputOnlyCodexHome,
   reconcileManagedCodexHome,
   seedManagedCodexHome,
   stageCodexHomeForSync,
@@ -354,6 +356,136 @@ describe("codexHomeHasUsableAuth", () => {
   });
 });
 
+describe("prepareOutputOnlyCodexHome", () => {
+  async function makeFixture() {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-output-home-"));
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    const managedAgentHome = path.join(
+      paperclipHome,
+      "instances",
+      "default",
+      "companies",
+      "company-1",
+      "agents",
+      "agent-1",
+      "codex-home",
+    );
+    const env: NodeJS.ProcessEnv = {
+      CODEX_HOME: sharedCodexHome,
+      PAPERCLIP_HOME: paperclipHome,
+      PAPERCLIP_INSTANCE_ID: "default",
+    };
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    return { root, sharedCodexHome, managedAgentHome, env };
+  }
+
+  it("materializes only subscription auth and never touches uncopyable shared config", async () => {
+    const fx = await makeFixture();
+    let outputOnlyHome: string | null = null;
+    try {
+      await fs.writeFile(
+        path.join(fx.sharedCodexHome, "auth.json"),
+        JSON.stringify({
+          tokens: {
+            account_id: "acct-output-only",
+            access_token: "synthetic-access-token",
+            refresh_token: "synthetic-refresh-token",
+          },
+        }),
+        { mode: 0o600 },
+      );
+      // A directory cannot be copied as config.toml. Ordinary full seeding
+      // would throw EISDIR here, making this a deterministic unreadable-config
+      // regression fixture even when the test process runs as root.
+      await fs.mkdir(path.join(fx.sharedCodexHome, "config.toml"));
+      await fs.writeFile(path.join(fx.sharedCodexHome, "config.json"), "{}\n", "utf8");
+      await fs.writeFile(path.join(fx.sharedCodexHome, "instructions.md"), "secret rules\n", "utf8");
+      for (const name of ["skills", "sessions", "mcp", "shell_snapshots", "plugins"]) {
+        await fs.mkdir(path.join(fx.sharedCodexHome, name));
+        await fs.writeFile(path.join(fx.sharedCodexHome, name, "sentinel"), name, "utf8");
+      }
+
+      outputOnlyHome = await prepareOutputOnlyCodexHome({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: fx.managedAgentHome,
+        configuredApiKey: null,
+        onLog: async () => {},
+      });
+
+      expect(path.dirname(outputOnlyHome)).toBe(path.dirname(fx.managedAgentHome));
+      expect((await fs.stat(outputOnlyHome)).mode & 0o777).toBe(0o700);
+      expect(await fs.readdir(outputOnlyHome)).toEqual(["auth.json"]);
+      expect((await fs.lstat(path.join(outputOnlyHome, "auth.json"))).isSymbolicLink()).toBe(true);
+      expect(await fs.realpath(path.join(outputOnlyHome, "auth.json"))).toBe(
+        await fs.realpath(path.join(fx.sharedCodexHome, "auth.json")),
+      );
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes only configured API-key auth with least-privilege modes", async () => {
+    const fx = await makeFixture();
+    try {
+      await fs.mkdir(path.join(fx.sharedCodexHome, "config.toml"));
+      const outputOnlyHome = await prepareOutputOnlyCodexHome({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: fx.managedAgentHome,
+        configuredApiKey: "sk-output-only",
+        onLog: async () => {},
+      });
+      const authPath = path.join(outputOnlyHome, "auth.json");
+
+      expect(await fs.readdir(outputOnlyHome)).toEqual(["auth.json"]);
+      expect((await fs.lstat(authPath)).isSymbolicLink()).toBe(false);
+      expect((await fs.stat(authPath)).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(await fs.readFile(authPath, "utf8"))).toEqual({
+        OPENAI_API_KEY: "sk-output-only",
+      });
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["missing", "unreadable"] as const)(
+    "fails closed with a specific code when subscription auth is %s",
+    async (failureMode) => {
+      const fx = await makeFixture();
+      try {
+        if (failureMode === "unreadable") {
+          // readFile(auth.json) deterministically fails with EISDIR.
+          await fs.mkdir(path.join(fx.sharedCodexHome, "auth.json"));
+        }
+
+        await expect(
+          prepareOutputOnlyCodexHome({
+            env: fx.env,
+            companyId: "company-1",
+            configuredCodexHome: fx.managedAgentHome,
+            configuredApiKey: null,
+            onLog: async () => {},
+          }),
+        ).rejects.toMatchObject({
+          name: "CodexOutputOnlyCredentialError",
+          code: CODEX_OUTPUT_ONLY_CREDENTIAL_ERROR_CODE,
+          resultJson: {
+            authMode: "subscription",
+            failure: "missing_unreadable_or_unusable",
+          },
+        });
+
+        const managedParent = path.dirname(fx.managedAgentHome);
+        expect(await fs.readdir(managedParent)).toEqual([]);
+      } finally {
+        await fs.rm(fx.root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe("seedManagedCodexHome", () => {
   it("symlinks auth.json from the shared source into an explicit per-agent home", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-seed-"));
@@ -374,11 +506,15 @@ describe("seedManagedCodexHome", () => {
 
       await fs.mkdir(sharedCodexHome, { recursive: true });
       await fs.writeFile(sharedAuth, '{"OPENAI_API_KEY":"shared"}', "utf8");
+      await fs.writeFile(path.join(sharedCodexHome, "config.toml"), "model = \"standard\"\n", "utf8");
+      await fs.writeFile(path.join(sharedCodexHome, "instructions.md"), "ordinary instructions\n", "utf8");
 
       await seedManagedCodexHome(agentHome, { CODEX_HOME: sharedCodexHome }, async () => {});
 
       expect((await fs.lstat(agentAuth)).isSymbolicLink()).toBe(true);
       expect(await fs.realpath(agentAuth)).toBe(await fs.realpath(sharedAuth));
+      expect(await fs.readFile(path.join(agentHome, "config.toml"), "utf8")).toBe('model = "standard"\n');
+      expect(await fs.readFile(path.join(agentHome, "instructions.md"), "utf8")).toBe("ordinary instructions\n");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

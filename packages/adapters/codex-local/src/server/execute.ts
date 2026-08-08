@@ -70,6 +70,7 @@ import {
   isManagedCodexHomePath,
   pathExists,
   prepareManagedCodexHome,
+  prepareOutputOnlyCodexHome,
   resolveManagedCodexHomeDir,
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
@@ -651,7 +652,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       void error;
     });
   }
-  if (configuredCodexHome == null) {
+  let outputOnlyCodexHomeDir: string | null = null;
+  if (outputOnly) {
+    outputOnlyCodexHomeDir = await prepareOutputOnlyCodexHome({
+      env: process.env,
+      companyId: agent.companyId,
+      configuredCodexHome,
+      configuredApiKey: configuredOpenAiApiKey,
+      onLog,
+    });
+  } else if (configuredCodexHome == null) {
     await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
       apiKey: configuredOpenAiApiKey,
     });
@@ -661,47 +671,45 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
   }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
-  const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
-  await fs.mkdir(effectiveCodexHome, { recursive: true });
-
-  // Never launch a managed CODEX_HOME with no credentials. Without auth.json
-  // and with OPENAI_API_KEY="" the provider rejects every request with
-  // "401 Missing bearer"; fail fast with a clear adapter error instead of
-  // emitting unauthenticated calls. External overrides manage their own auth.
-  // This is the execute-time backstop for the control plane's pre-dispatch
-  // configuration-incomplete gate (see server heartbeat); both decide host
-  // readiness through the same `evaluateCodexCredentialReadiness` predicate,
-  // and sandbox targets are additionally allowed to supply their own login
-  // (the pre-dispatch gate defers sandbox-destined runs here for exactly that
-  // probe).
-  await assertCodexCredentialsLaunchable({
-    runId,
-    companyId: agent.companyId,
-    configuredCodexHome,
-    configuredApiKey: configuredOpenAiApiKey,
-    effectiveCodexHome,
-    target: executionTarget,
-    cwd,
-    onLog,
-  });
-  // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
-  // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
-  // target, so both local and sandboxed Codex processes pick up the routing.
-  // An explicit env.CODEX_HOME override is treated as user-managed and skipped.
-  const envConfigStrings = Object.fromEntries(
-    Object.entries(envConfig).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
-  );
-  const preparedRuntimeConfig = await prepareCodexRuntimeConfig({
-    env: envConfigStrings,
-    codexHome: configuredCodexHome ? null : effectiveCodexHome,
-  });
-  // Curated allowlist dir staged for the remote `home` asset (see below). Held
-  // here so the outer `finally` can remove it on every exit path (teardown and
-  // error), never only the happy path.
+  const effectiveCodexHome = outputOnlyCodexHomeDir ?? configuredCodexHome ?? defaultCodexHome;
+  let preparedRuntimeConfig: Awaited<ReturnType<typeof prepareCodexRuntimeConfig>> = {
+    notes: [],
+    cleanup: async () => {},
+  };
   let stagedCodexHomeDir: string | null = null;
   try {
+    await fs.mkdir(effectiveCodexHome, { recursive: true });
+
+    // Never launch a managed CODEX_HOME with no credentials. Without auth.json
+    // and with OPENAI_API_KEY="" the provider rejects every request with
+    // "401 Missing bearer"; fail fast with a clear adapter error instead of
+    // emitting unauthenticated calls. Output-only points this backstop at its
+    // freshly validated credential-only home.
+    await assertCodexCredentialsLaunchable({
+      runId,
+      companyId: agent.companyId,
+      configuredCodexHome: outputOnly ? effectiveCodexHome : configuredCodexHome,
+      configuredApiKey: configuredOpenAiApiKey,
+      effectiveCodexHome,
+      target: executionTarget,
+      cwd,
+      onLog,
+    });
+
+    // Output-only must not parse, merge, restore, or otherwise access shared
+    // config. Ordinary runs retain the existing provider-config preparation.
+    if (!outputOnly) {
+      const envConfigStrings = Object.fromEntries(
+        Object.entries(envConfig).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
+      preparedRuntimeConfig = await prepareCodexRuntimeConfig({
+        env: envConfigStrings,
+        codexHome: configuredCodexHome ? null : effectiveCodexHome,
+      });
+    }
+
     for (const note of preparedRuntimeConfig.notes) {
       await onLog("stdout", `[paperclip] ${note}\n`);
     }
@@ -1566,6 +1574,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
   } finally {
+    if (outputOnlyCodexHomeDir) {
+      await fs.rm(outputOnlyCodexHomeDir, { recursive: true, force: true }).catch(async () => {
+        await onLog(
+          "stderr",
+          "[paperclip] Failed to remove the credential-only Codex home after output-only execution.\n",
+        );
+      });
+    }
     // Remove the staged CODEX_HOME allowlist temp dir on every exit path
     // (teardown AND error), never only the happy path. Cleanup failure is
     // logged, not fatal — a leaked temp dir must not crash the run.
