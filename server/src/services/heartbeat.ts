@@ -6560,6 +6560,13 @@ export interface HeartbeatServiceOptions {
       testRunId: string;
       heartbeatRunId: string;
     }) => Promise<void>;
+    afterOutputOnlySkillTestTerminalLocksAcquired?: (input: {
+      companyId: string;
+      issueId: string;
+      testRunId: string;
+      heartbeatRunId: string;
+      outcome: "succeeded";
+    }) => Promise<void>;
   };
 }
 
@@ -7092,7 +7099,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     testRunId: string;
     agentId: string;
     heartbeatRunId: string;
-  }): Promise<{ id: string; status: "succeeded"; outputDocumentKey: string } | null> {
+    heartbeatPatch: Partial<typeof heartbeatRuns.$inferInsert>;
+  }): Promise<{
+    run: typeof heartbeatRuns.$inferSelect | null;
+    updated: boolean;
+  }> {
     return db.transaction(async (tx) => {
       const testRun = await tx
         .select({
@@ -7116,10 +7127,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .then((rows) => rows[0] ?? null);
       if (
         !testRun
-        || (testRun.status !== "queued" && testRun.status !== "running")
         || !testRun.outputSnapshot.trim()
       ) {
-        return null;
+        return { run: null, updated: false };
       }
 
       const harness = await tx
@@ -7140,17 +7150,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         || harness.workMode !== "skill_test"
         || harness.originKind !== "skill_test"
         || harness.originId !== input.testRunId
-        || harness.status === "done"
-        || harness.status === "cancelled"
       ) {
-        return null;
+        return { run: null, updated: false };
       }
 
       const heartbeatRun = await tx
-        .select({
-          status: heartbeatRuns.status,
-          contextSnapshot: heartbeatRuns.contextSnapshot,
-        })
+        .select()
         .from(heartbeatRuns)
         .where(and(
           eq(heartbeatRuns.companyId, input.companyId),
@@ -7159,13 +7164,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ))
         .for("update")
         .then((rows) => rows[0] ?? null);
+      const heartbeatContext = parseObject(heartbeatRun?.contextSnapshot);
+      const heartbeatProfile = parseObject(heartbeatContext.paperclipExecutionProfile);
       if (
         !heartbeatRun
-        || heartbeatRun.status !== "succeeded"
-        || readNonEmptyString(parseObject(heartbeatRun.contextSnapshot).issueId) !== input.issueId
+        || readNonEmptyString(heartbeatContext.issueId) !== input.issueId
+        || readNonEmptyString(heartbeatProfile.kind) !== "skill_test_output_only"
+        || readNonEmptyString(heartbeatProfile.testRunId) !== input.testRunId
+        || readNonEmptyString(heartbeatProfile.issueId) !== input.issueId
+        || readNonEmptyString(heartbeatProfile.outputDocumentKey) !== "output"
       ) {
-        return null;
+        return { run: heartbeatRun, updated: false };
       }
+      if (
+        (testRun.status !== "queued" && testRun.status !== "running")
+        || harness.status === "done"
+        || harness.status === "cancelled"
+        || heartbeatRun.status !== "running"
+      ) {
+        return { run: heartbeatRun, updated: false };
+      }
+
+      await options.testHooks?.afterOutputOnlySkillTestTerminalLocksAcquired?.({
+        companyId: input.companyId,
+        issueId: input.issueId,
+        testRunId: input.testRunId,
+        heartbeatRunId: input.heartbeatRunId,
+        outcome: "succeeded",
+      });
 
       const outputDocument = await tx
         .select({ body: documents.latestBody })
@@ -7177,7 +7203,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           eq(issueDocuments.key, "output"),
         ))
         .then((rows) => rows[0] ?? null);
-      if (!outputDocument || outputDocument.body !== testRun.outputSnapshot) return null;
+      if (!outputDocument || outputDocument.body !== testRun.outputSnapshot) {
+        return { run: heartbeatRun, updated: false };
+      }
 
       const now = new Date();
       const updatedRun = await tx
@@ -7195,7 +7223,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ))
         .returning({ id: companySkillTestRuns.id })
         .then((rows) => rows[0] ?? null);
-      if (!updatedRun) return null;
+      if (!updatedRun) return { run: heartbeatRun, updated: false };
 
       const updatedHarness = await tx
         .update(issues)
@@ -7215,11 +7243,51 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         throw conflict("Output-only Skill Studio harness became terminal", { issueId: input.issueId });
       }
 
-      return {
-        id: updatedRun.id,
-        status: "succeeded",
-        outputDocumentKey: testRun.outputDocumentKey,
-      };
+      const updatedHeartbeat = await tx
+        .update(heartbeatRuns)
+        .set({ status: "succeeded", ...input.heartbeatPatch, updatedAt: now })
+        .where(and(
+          eq(heartbeatRuns.companyId, input.companyId),
+          eq(heartbeatRuns.id, input.heartbeatRunId),
+          eq(heartbeatRuns.agentId, input.agentId),
+          eq(heartbeatRuns.status, "running"),
+        ))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!updatedHeartbeat) {
+        throw conflict("Output-only Skill Studio heartbeat became terminal", { runId: input.heartbeatRunId });
+      }
+
+      if (updatedHeartbeat.wakeupRequestId) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({ status: "completed", finishedAt: now, error: null, updatedAt: now })
+          .where(and(
+            eq(agentWakeupRequests.companyId, input.companyId),
+            eq(agentWakeupRequests.id, updatedHeartbeat.wakeupRequestId),
+          ));
+      }
+
+      await tx.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: "system",
+        actorId: "heartbeat_finalize",
+        agentId: input.agentId,
+        runId: input.heartbeatRunId,
+        action: "company.skill_test_run_completed",
+        entityType: "company_skill_test_run",
+        entityId: updatedRun.id,
+        details: {
+          issueId: input.issueId,
+          status: "succeeded",
+          outputDocumentKey: testRun.outputDocumentKey,
+          heartbeatOutcome: "succeeded",
+          source: "heartbeat.run_finalized",
+        },
+        createdAt: now,
+      });
+
+      return { run: updatedHeartbeat, updated: true };
     });
   }
 
@@ -7377,7 +7445,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (!existingRun || ["succeeded", "failed", "cancelled"].includes(existingRun.status)) return null;
 
     // Standard-profile success keeps its existing harness-owned completion path.
-    if (completion.outcome === "succeeded" && existingRun.executionProfile !== "output_only") return null;
+    // Output-only success is claimed atomically with the heartbeat and harness
+    // before this generic post-finalization dispatcher runs.
+    if (completion.outcome === "succeeded") return null;
 
     if (existingRun.executionProfile === "output_only" && completion.outcome === "failed") {
       const outputOnlyFinalization = await finalizeFailedOutputOnlySkillTestRun({
@@ -7392,20 +7462,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (outputOnlyFinalization === "terminal") return null;
     }
 
-    const completedRun = existingRun.executionProfile === "output_only" && completion.outcome === "succeeded"
-      ? await finalizeStagedOutputOnlySkillTestRun({
-          companyId: input.run.companyId,
-          issueId: input.issueId,
-          testRunId: existingRun.id,
-          agentId: input.run.agentId,
-          heartbeatRunId: input.run.id,
-        })
-      : await companySkills.completeTestRunForIssue({
-          companyId: input.run.companyId,
-          issueId: input.issueId,
-          outcome: completion.outcome,
-          error: completion.error,
-        });
+    const completedRun = await companySkills.completeTestRunForIssue({
+      companyId: input.run.companyId,
+      issueId: input.issueId,
+      outcome: completion.outcome,
+      error: completion.error,
+    });
     if (!completedRun) return null;
 
     await logActivity(db, {
@@ -9329,6 +9391,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return ensured;
   }
 
+  function publishPersistedRunStatus(updated: typeof heartbeatRuns.$inferSelect) {
+    if (isHeartbeatRunTerminalStatus(updated.status)) {
+      clearHeartbeatRunRuntimeStatus(updated.id);
+    }
+    publishLiveEvent({
+      companyId: updated.companyId,
+      type: "heartbeat.run.status",
+      payload: buildHeartbeatRunStatusLiveEventPayload(updated),
+    });
+    publishRunLifecyclePluginEvent(updated);
+  }
+
   async function setRunStatus(
     runId: string,
     status: string,
@@ -9342,15 +9416,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
 
     if (updated) {
-      if (isHeartbeatRunTerminalStatus(updated.status)) {
-        clearHeartbeatRunRuntimeStatus(updated.id);
-      }
-      publishLiveEvent({
-        companyId: updated.companyId,
-        type: "heartbeat.run.status",
-        payload: buildHeartbeatRunStatusLiveEventPayload(updated),
-      });
-      publishRunLifecyclePluginEvent(updated);
+      publishPersistedRunStatus(updated);
     }
 
     return updated;
@@ -9369,15 +9435,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
 
     if (updated) {
-      if (isHeartbeatRunTerminalStatus(updated.status)) {
-        clearHeartbeatRunRuntimeStatus(updated.id);
-      }
-      publishLiveEvent({
-        companyId: updated.companyId,
-        type: "heartbeat.run.status",
-        payload: buildHeartbeatRunStatusLiveEventPayload(updated),
-      });
-      publishRunLifecyclePluginEvent(updated);
+      publishPersistedRunStatus(updated);
       return { run: updated, updated: true as const };
     }
 
@@ -16112,6 +16170,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       let outputOnlySkillTestExecution = false;
+      let outputOnlySkillTestIdentity: { issueId: string; testRunId: string } | null = null;
       try {
         const skillTestDispatchState = issueId
           ? await getPersistedSkillTestHarnessState(run.companyId, issueId)
@@ -16156,6 +16215,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               outputDocumentKey: "output" as const,
             }
           : undefined;
+        if (executionProfile) {
+          outputOnlySkillTestIdentity = { issueId: executionProfile.issueId, testRunId: executionProfile.testRunId };
+        }
         if (executionProfile && !adapter.supportedExecutionProfiles?.includes(executionProfile.kind)) {
           throw new UnsupportedExecutionProfileFailure(
             "Adapter " + agent.adapterType + " does not support " + executionProfile.kind + ".",
@@ -16501,7 +16563,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterResult.summary ?? null,
       );
 
-      const persistedRunWrite = await setRunStatusIfRunning(run.id, status, {
+      const heartbeatPatch: Partial<typeof heartbeatRuns.$inferInsert> = {
         finishedAt: new Date(),
         error: runErrorMessage,
         errorCode: runErrorCode,
@@ -16515,7 +16577,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
-      });
+      };
+      const linkedOutputOnlySuccess = status === "succeeded" ? outputOnlySkillTestIdentity : null;
+      const persistedRunWrite = linkedOutputOnlySuccess
+        ? await finalizeStagedOutputOnlySkillTestRun({
+            companyId: run.companyId,
+            issueId: linkedOutputOnlySuccess.issueId,
+            testRunId: linkedOutputOnlySuccess.testRunId,
+            agentId: agent.id,
+            heartbeatRunId: run.id,
+            heartbeatPatch,
+          })
+        : await setRunStatusIfRunning(run.id, status, heartbeatPatch);
+      if (linkedOutputOnlySuccess && persistedRunWrite.updated && persistedRunWrite.run) {
+        publishPersistedRunStatus(persistedRunWrite.run);
+      }
       if (!persistedRunWrite.updated) {
         logger.info(
           {
@@ -19221,6 +19297,208 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     eventPayload?: Record<string, unknown>;
   };
 
+  async function cancelOutputOnlySkillTestRunInternal(input: {
+    companyId: string;
+    skillId: string;
+    testRunId: string;
+    issueId: string;
+    agentId: string;
+    reason: string;
+    options?: CancelRunOptions;
+  }) {
+    const options = input.options ?? {};
+    const agent = await getAgent(input.agentId);
+    const errorCode = options.errorCode ?? "skill_test_cancelled";
+
+    // Output-only terminal claims always lock in this order: exact test run,
+    // exact harness, then linked heartbeat rows. Success uses the same order,
+    // so either success or cancellation commits the whole disposition first.
+    const claimed = await db.transaction(async (tx) => {
+      const testRun = await tx
+        .select()
+        .from(companySkillTestRuns)
+        .where(and(
+          eq(companySkillTestRuns.companyId, input.companyId),
+          eq(companySkillTestRuns.skillId, input.skillId),
+          eq(companySkillTestRuns.id, input.testRunId),
+          eq(companySkillTestRuns.issueId, input.issueId),
+          eq(companySkillTestRuns.agentId, input.agentId),
+          eq(companySkillTestRuns.executionProfile, "output_only"),
+          eq(companySkillTestRuns.outputDocumentKey, "output"),
+          isNull(companySkillTestRuns.deletedAt),
+          isNull(companySkillTestRuns.supersededAt),
+        ))
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (!testRun) return { status: null, cancelledRuns: [] as (typeof heartbeatRuns.$inferSelect)[] };
+
+      const harness = await tx
+        .select({
+          status: issues.status,
+          harnessKind: issues.harnessKind,
+          workMode: issues.workMode,
+          originKind: issues.originKind,
+          originId: issues.originId,
+        })
+        .from(issues)
+        .where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)))
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (
+        !harness
+        || harness.harnessKind !== "skill_test"
+        || harness.workMode !== "skill_test"
+        || harness.originKind !== "skill_test"
+        || harness.originId !== input.testRunId
+      ) {
+        throw conflict("Output-only Skill Studio harness identity mismatch", { issueId: input.issueId });
+      }
+
+      const linkedRuns = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, input.companyId),
+          eq(heartbeatRuns.agentId, input.agentId),
+          inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.issueId}`,
+          sql`coalesce(${heartbeatRuns.contextSnapshot} -> 'paperclipExecutionProfile' ->> 'testRunId', ${input.testRunId}) = ${input.testRunId}`,
+        ))
+        .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
+        .for("update");
+
+      if (testRun.status === "succeeded" || testRun.status === "failed") {
+        return { status: testRun.status, cancelledRuns: [] as (typeof heartbeatRuns.$inferSelect)[] };
+      }
+      if (harness.status === "done") {
+        throw conflict("Output-only Skill Studio harness already completed", { issueId: input.issueId });
+      }
+
+      const now = new Date();
+      if (testRun.status === "queued" || testRun.status === "running") {
+        await tx
+          .update(companySkillTestRuns)
+          .set({ status: "cancelled", error: input.reason, updatedAt: now })
+          .where(and(
+            eq(companySkillTestRuns.companyId, input.companyId),
+            eq(companySkillTestRuns.id, input.testRunId),
+            inArray(companySkillTestRuns.status, ["queued", "running"]),
+          ));
+      }
+      if (harness.status !== "cancelled") {
+        await tx
+          .update(issues)
+          .set({ status: "cancelled", cancelledAt: now, updatedAt: now })
+          .where(and(
+            eq(issues.companyId, input.companyId),
+            eq(issues.id, input.issueId),
+            eq(issues.harnessKind, "skill_test"),
+            eq(issues.workMode, "skill_test"),
+            eq(issues.originKind, "skill_test"),
+            eq(issues.originId, input.testRunId),
+            ne(issues.status, "done"),
+          ));
+      }
+
+      const cancelledRuns: (typeof heartbeatRuns.$inferSelect)[] = [];
+      for (const linkedRun of linkedRuns) {
+        if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(
+          linkedRun.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number],
+        )) continue;
+        const resultJson = agent
+          ? {
+              ...mergeRunStopMetadataForAgent(agent, "cancelled", {
+                resultJson: parseObject(linkedRun.resultJson),
+                errorCode,
+                errorMessage: input.reason,
+              }),
+              ...(options.resultJson ?? {}),
+            }
+          : options.resultJson;
+        const cancelledRun = await tx
+          .update(heartbeatRuns)
+          .set({
+            status: "cancelled",
+            finishedAt: now,
+            error: input.reason,
+            errorCode,
+            ...(resultJson ? { resultJson } : {}),
+            updatedAt: now,
+          })
+          .where(and(
+            eq(heartbeatRuns.companyId, input.companyId),
+            eq(heartbeatRuns.id, linkedRun.id),
+            inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
+          ))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!cancelledRun) continue;
+        cancelledRuns.push(cancelledRun);
+        if (cancelledRun.wakeupRequestId) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({ status: "cancelled", finishedAt: now, error: input.reason, updatedAt: now })
+            .where(and(
+              eq(agentWakeupRequests.companyId, input.companyId),
+              eq(agentWakeupRequests.id, cancelledRun.wakeupRequestId),
+            ));
+        }
+      }
+
+      await tx
+        .update(agentWakeupRequests)
+        .set({ status: "cancelled", finishedAt: now, error: input.reason, updatedAt: now })
+        .where(and(
+          eq(agentWakeupRequests.companyId, input.companyId),
+          eq(agentWakeupRequests.agentId, input.agentId),
+          inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "claimed"]),
+          sql`(
+            ${agentWakeupRequests.payload} ->> 'issueId' = ${input.issueId}
+            or ${agentWakeupRequests.payload} ->> 'taskId' = ${input.issueId}
+            or ${agentWakeupRequests.payload} -> '_paperclipWakeContext' ->> 'issueId' = ${input.issueId}
+            or ${agentWakeupRequests.payload} -> '_paperclipWakeContext' ->> 'taskId' = ${input.issueId}
+          )`,
+        ));
+
+      return { status: "cancelled" as const, cancelledRuns };
+    });
+
+    for (const cancelledRun of claimed.cancelledRuns) {
+      const running = runningProcesses.get(cancelledRun.id);
+      try {
+        if (running) {
+          await terminateHeartbeatRunProcess({
+            pid: running.child.pid ?? cancelledRun.processPid,
+            processGroupId: running.processGroupId ?? cancelledRun.processGroupId,
+            graceMs: Math.max(1, running.graceSec) * 1000,
+          });
+        } else if (cancelledRun.processPid || cancelledRun.processGroupId) {
+          await terminateHeartbeatRunProcess({
+            pid: cancelledRun.processPid,
+            processGroupId: cancelledRun.processGroupId,
+          });
+        }
+      } finally {
+        runningProcesses.delete(cancelledRun.id);
+      }
+      publishPersistedRunStatus(cancelledRun);
+      await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: options.eventMessage ?? "Skill Studio run cancelled by operator",
+        ...(options.eventPayload ? { payload: options.eventPayload } : {}),
+      });
+      await releaseIssueExecutionAndPromote(cancelledRun);
+    }
+
+    if (claimed.cancelledRuns.length > 0) {
+      await finalizeAgentStatus(input.agentId, "cancelled");
+      await startNextQueuedRunForAgent(input.agentId);
+    }
+    return claimed.status;
+  }
+
   async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
@@ -19881,6 +20159,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     },
 
     cancelRun: (runId: string, reason?: string, options?: CancelRunOptions) => cancelRunInternal(runId, reason, options),
+
+    cancelOutputOnlySkillTestRun: (input: {
+      companyId: string;
+      skillId: string;
+      testRunId: string;
+      issueId: string;
+      agentId: string;
+      reason: string;
+      options?: CancelRunOptions;
+    }) => cancelOutputOnlySkillTestRunInternal(input),
 
     cancelIssueInvocations: (
       companyId: string,

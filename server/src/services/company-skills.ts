@@ -6757,7 +6757,16 @@ export function companySkillService(db: Db) {
     companyId: string,
     skillId: string,
     runId: string,
-    deps: { cancelHarnessIssue: (issueId: string) => Promise<unknown> },
+    deps: {
+      cancelHarnessIssue: (issueId: string) => Promise<unknown>;
+      cancelOutputOnlyLinkedRun?: (input: {
+        companyId: string;
+        skillId: string;
+        testRunId: string;
+        issueId: string;
+        agentId: string;
+      }) => Promise<unknown>;
+    },
   ): Promise<CompanySkillTestRun | null> {
     const existing = await db
       .select()
@@ -6773,6 +6782,28 @@ export function companySkillService(db: Db) {
     if (!existing) return null;
     if (["succeeded", "failed", "cancelled"].includes(existing.status)) {
       return (await hydrateTestRuns(companyId, [existing]))[0] ?? null;
+    }
+    if (existing.executionProfile === "output_only") {
+      if (!deps.cancelOutputOnlyLinkedRun) {
+        throw new Error("Output-only Skill Studio cancellation requires linked terminal coordination.");
+      }
+      await deps.cancelOutputOnlyLinkedRun({
+        companyId,
+        skillId,
+        testRunId: existing.id,
+        issueId: existing.issueId,
+        agentId: existing.agentId,
+      });
+      const terminal = await db
+        .select()
+        .from(companySkillTestRuns)
+        .where(and(
+          eq(companySkillTestRuns.companyId, companyId),
+          eq(companySkillTestRuns.skillId, skillId),
+          eq(companySkillTestRuns.id, runId),
+        ))
+        .then((rows) => rows[0] ?? null);
+      return terminal ? (await hydrateTestRuns(companyId, [terminal]))[0] ?? null : null;
     }
     // Persist the test-run terminal state first. The route callback then makes
     // the linked harness terminal before it tears down any process, so late

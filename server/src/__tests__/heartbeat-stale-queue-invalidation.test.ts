@@ -2179,20 +2179,24 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await heartbeat.resumeQueuedRuns();
     await outputStaged;
 
-    const cancelledAt = new Date();
-    await db.transaction(async (tx) => {
-      await tx.update(companySkillTestRuns).set({
-        status: "cancelled",
-        error: "Cancelled by operator",
-        updatedAt: cancelledAt,
-      }).where(eq(companySkillTestRuns.id, harness.testRunId));
-      await tx.update(issues).set({
-        status: "cancelled",
-        cancelledAt,
-        updatedAt: cancelledAt,
-      }).where(eq(issues.id, harness.issueId));
-    });
-    await heartbeat.cancelRun(harness.runId, "Cancelled by operator");
+    const cancellationInput = {
+      companyId,
+      skillId: harness.skillId,
+      testRunId: harness.testRunId,
+      issueId: harness.issueId,
+      agentId,
+      reason: "Cancelled by operator",
+      options: {
+        errorCode: "skill_test_cancelled",
+        resultJson: { stopReason: "skill_test_cancelled" },
+      },
+    };
+    expect(await heartbeat.cancelOutputOnlySkillTestRun(cancellationInput)).toBe("cancelled");
+    expect(await heartbeat.cancelOutputOnlySkillTestRun(cancellationInput)).toBe("cancelled");
+    const [cancelledWakeup] = await db.select({ status: agentWakeupRequests.status })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, harness.wakeupRequestId));
+    expect(cancelledWakeup?.status).toBe("cancelled");
     releaseStagedOutput();
     await heartbeat.waitForRunExecutionDrain(harness.runId);
 
@@ -2225,6 +2229,92 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(auditRows).toEqual([{ action: "company.skill_test_output_staged" }]);
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
+  }, 20_000);
+
+  it("returns persisted success when cancellation reaches the linked rows after success holds the locks", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const harness = await seedSkillTestHarness({ companyId, agentId, executionProfile: "output_only" });
+    mockSupportedExecutionProfiles.push("skill_test_output_only");
+    let releaseTerminalLocks = () => {};
+    let markTerminalLocksAcquired = () => {};
+    const terminalLocksAcquired = new Promise<void>((resolve) => {
+      markTerminalLocksAcquired = resolve;
+    });
+    const holdTerminalLocks = new Promise<void>((resolve) => {
+      releaseTerminalLocks = resolve;
+    });
+    heartbeat = heartbeatService(db, {
+      testHooks: {
+        afterOutputOnlySkillTestTerminalLocksAcquired: async () => {
+          markTerminalLocksAcquired();
+          await holdTerminalLocks;
+        },
+      },
+    });
+    mockAdapterExecute.mockImplementationOnce(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      summary: "Success wins exactly once.",
+      provider: "test",
+      model: "test-model",
+    }));
+
+    await heartbeat.resumeQueuedRuns();
+    await terminalLocksAcquired;
+    const cancellationInput = {
+      companyId,
+      skillId: harness.skillId,
+      testRunId: harness.testRunId,
+      issueId: harness.issueId,
+      agentId,
+      reason: "Cancelled by operator",
+      options: { errorCode: "skill_test_cancelled" },
+    };
+    const cancellation = heartbeat.cancelOutputOnlySkillTestRun(cancellationInput);
+    releaseTerminalLocks();
+
+    expect(await cancellation).toBe("succeeded");
+    await heartbeat.waitForRunExecutionDrain(harness.runId);
+    expect(await heartbeat.cancelOutputOnlySkillTestRun(cancellationInput)).toBe("succeeded");
+
+    const [run] = await db.select({ status: heartbeatRuns.status, retryOfRunId: heartbeatRuns.retryOfRunId })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, harness.runId));
+    const [testRun] = await db.select({
+      status: companySkillTestRuns.status,
+      output: companySkillTestRuns.outputSnapshot,
+    })
+      .from(companySkillTestRuns)
+      .where(eq(companySkillTestRuns.id, harness.testRunId));
+    const [issue] = await db.select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, harness.issueId));
+    const [wakeup] = await db.select({ status: agentWakeupRequests.status })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, harness.wakeupRequestId));
+    expect(run).toEqual({ status: "succeeded", retryOfRunId: null });
+    expect(testRun).toEqual({ status: "succeeded", output: "Success wins exactly once." });
+    expect(issue?.status).toBe("done");
+    expect(wakeup?.status).toBe("completed");
+
+    const outputDocuments = await db.select({ body: documents.latestBody })
+      .from(issueDocuments)
+      .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
+      .where(eq(issueDocuments.issueId, harness.issueId));
+    expect(outputDocuments).toEqual([{ body: "Success wins exactly once." }]);
+    expect(await db.select().from(documentRevisions).where(
+      eq(documentRevisions.createdByRunId, harness.runId),
+    )).toHaveLength(1);
+    const auditRows = await db.select({ action: activityLog.action })
+      .from(activityLog)
+      .where(eq(activityLog.entityId, harness.testRunId));
+    expect(auditRows).toEqual(expect.arrayContaining([
+      { action: "company.skill_test_output_staged" },
+      { action: "company.skill_test_run_completed" },
+    ]));
+    expect(auditRows).toHaveLength(2);
   }, 20_000);
 
   it("retains one staged output when a failure wins before heartbeat success reconciliation", async () => {

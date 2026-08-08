@@ -70,6 +70,7 @@ const mockIssueService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(),
   cancelRun: vi.fn(),
+  cancelOutputOnlySkillTestRun: vi.fn(),
   cancelIssueInvocations: vi.fn(),
 }));
 
@@ -2144,6 +2145,69 @@ describe("company skill mutation permissions", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith("44444444-4444-4444-8444-444444444444", expect.objectContaining({
       status: "cancelled",
       actorUserId: "local-board",
+    }));
+  });
+
+  it("returns the persisted success disposition when output-only cancellation loses", async () => {
+    mockHeartbeatService.cancelOutputOnlySkillTestRun.mockResolvedValue("succeeded");
+    mockCompanySkillService.cancelTestRun.mockImplementationOnce(async (
+      companyId: string,
+      skillId: string,
+      testRunId: string,
+      deps: {
+        cancelOutputOnlyLinkedRun: (input: {
+          companyId: string;
+          skillId: string;
+          testRunId: string;
+          issueId: string;
+          agentId: string;
+        }) => Promise<unknown>;
+      },
+    ) => {
+      await deps.cancelOutputOnlyLinkedRun({
+        companyId,
+        skillId,
+        testRunId,
+        issueId: "44444444-4444-4444-8444-444444444444",
+        agentId: "55555555-5555-4555-8555-555555555555",
+      });
+      return {
+        id: testRunId,
+        companyId,
+        skillId,
+        issueId: "44444444-4444-4444-8444-444444444444",
+        agentId: "55555555-5555-4555-8555-555555555555",
+        status: "succeeded",
+        outputDocumentKey: "output",
+        outputSnapshot: "Persisted output",
+      };
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const response = await request(app)
+      .post("/api/companies/company-1/skills/skill-1/test-runs/22222222-2222-4222-8222-222222222222/cancel")
+      .send({});
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({ status: "succeeded", outputSnapshot: "Persisted output" });
+    expect(mockHeartbeatService.cancelOutputOnlySkillTestRun).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      skillId: "skill-1",
+      testRunId: "22222222-2222-4222-8222-222222222222",
+      issueId: "44444444-4444-4444-8444-444444444444",
+      agentId: "55555555-5555-4555-8555-555555555555",
+      reason: "Cancelled by Skill Studio operator request",
+    }));
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.cancelIssueInvocations).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: "company.skill_test_run_cancelled",
     }));
   });
 

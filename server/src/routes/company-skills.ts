@@ -682,6 +682,26 @@ export function companySkillRoutes(db: Db) {
     await assertCanOrchestrateSkillTestHarness(req, companyId, await loadSkillTestRunAssignmentScope(companyId, skillId, runId));
     const actor = getActorInfo(req);
     const result = await svc.cancelTestRun(companyId, skillId, runId, {
+      cancelOutputOnlyLinkedRun: async (linked) => heartbeat.cancelOutputOnlySkillTestRun({
+        ...linked,
+        reason: "Cancelled by Skill Studio operator request",
+        options: {
+          errorCode: "skill_test_cancelled",
+          resultJson: {
+            stopReason: "skill_test_cancelled",
+            skillTestCancellation: {
+              kind: "operator",
+              skillId,
+              testRunId: runId,
+              issueId: linked.issueId,
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+            },
+          },
+          eventMessage: "Skill Studio run cancelled by operator",
+          eventPayload: { skillId, testRunId: runId, issueId: linked.issueId },
+        },
+      }),
       cancelHarnessIssue: async (issueId) => {
         const issue = await issues.getById(issueId);
         if (!issue || issue.companyId !== companyId) return;
@@ -719,19 +739,21 @@ export function companySkillRoutes(db: Db) {
       res.status(404).json({ error: "Test run not found" });
       return;
     }
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      agentApiKeyId: actor.agentApiKeyId,
-      action: "company.skill_test_run_cancelled",
-      entityType: "company_skill_test_run",
-      entityId: result.id,
-      issueId: result.issueId,
-      details: { skillId, issueId: result.issueId },
-    });
+    if (result.status === "cancelled") {
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "company.skill_test_run_cancelled",
+        entityType: "company_skill_test_run",
+        entityId: result.id,
+        issueId: result.issueId,
+        details: { skillId, issueId: result.issueId },
+      });
+    }
     res.json(result);
   });
 
