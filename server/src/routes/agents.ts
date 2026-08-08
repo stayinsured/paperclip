@@ -56,6 +56,7 @@ import {
   workspaceOperationService,
 } from "../services/index.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { isPluginExecutionPrincipalAgent } from "../services/plugin-execution-attempts.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
@@ -2766,6 +2767,11 @@ export function agentRoutes(
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
 
+    if (isPluginExecutionPrincipalAgent(existing)) {
+      res.status(403).json({ error: "Plugin execution principals cannot receive ordinary permissions", code: "plugin_execution_principal_permissions_denied" });
+      return;
+    }
+
     if (req.actor.type === "agent") {
       const actorAgent = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
       if (!actorAgent || actorAgent.companyId !== existing.companyId) {
@@ -3061,6 +3067,10 @@ export function agentRoutes(
     const patchData = { ...(req.body as Record<string, unknown>) };
     const replaceAdapterConfig = patchData.replaceAdapterConfig === true;
     delete patchData.replaceAdapterConfig;
+    if (isPluginExecutionPrincipalAgent(existing)) {
+      delete patchData.role;
+      delete patchData.metadata;
+    }
     if (hasOwn(patchData, "adapterConfig")) {
       const adapterConfig = asRecord(patchData.adapterConfig);
       if (!adapterConfig) {
@@ -3457,6 +3467,10 @@ export function agentRoutes(
     if (!agent) {
       return;
     }
+    if (isPluginExecutionPrincipalAgent(agent)) {
+      res.status(403).json({ error: "Plugin execution principals cannot receive ordinary API keys", code: "plugin_execution_principal_key_denied" });
+      return;
+    }
     const key = await svc.createApiKey(id, req.body.name, req.body.scope, {
       responsibleUserId: req.actor.userId ?? null,
     });
@@ -3535,6 +3549,11 @@ export function agentRoutes(
     const id = req.params.id as string;
     const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!agent) return;
+    if (isPluginExecutionPrincipalAgent(agent)) {
+      res.status(403).json({ error: "Plugin execution principals cannot use ordinary wake routes", code: "plugin_execution_principal_wake_denied" });
+      return;
+    }
+
 
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== id) {
@@ -3600,11 +3619,17 @@ export function agentRoutes(
     // the body without `validate(wakeAgentSchema)` because callers — including
     // the e2e suite — post an empty body, and the schema rejects undefined
     // / missing bodies. Only forwards fields the caller actually supplied so
+
     // an empty body produces the original fixed-arg `heartbeat.invoke()`
     // shape exactly.
     const id = req.params.id as string;
     const agent = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!agent) return;
+    if (isPluginExecutionPrincipalAgent(agent)) {
+      res.status(403).json({ error: "Plugin execution principals cannot use ordinary invoke routes", code: "plugin_execution_principal_wake_denied" });
+      return;
+    }
+
 
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== id) {

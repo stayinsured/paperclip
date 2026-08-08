@@ -125,6 +125,10 @@ export function createLocalAgentJwt(
   if (!config) return null;
 
   const now = Math.floor(Date.now() / 1000);
+  const scopeExpiry = keyScope.kind === "plugin_execution"
+    ? Math.floor(new Date(keyScope.expiresAt).getTime() / 1000)
+    : Number.POSITIVE_INFINITY;
+  const expiresAt = Math.min(now + config.ttlSeconds, scopeExpiry);
   const claims: LocalAgentJwtClaims = {
     sub: agentId,
     company_id: companyId,
@@ -133,7 +137,7 @@ export function createLocalAgentJwt(
     responsible_user_id: responsibleUserId?.trim() || null,
     ...(keyScope.kind === "standard" ? {} : { key_scope: keyScope }),
     iat: now,
-    exp: now + config.ttlSeconds,
+    exp: expiresAt,
     iss: config.issuer,
     aud: config.audience,
     instance_id: config.instanceId,

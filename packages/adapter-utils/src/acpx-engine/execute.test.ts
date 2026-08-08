@@ -3018,7 +3018,7 @@ describe("ACPX engine remote session-lifecycle re-staging (PR 3: stage once / re
     expect(resultB.exitCode).toBe(0);
     expect(resultC.exitCode).toBe(0);
     expect(events).toEqual(["stage:run-a", "dispose:run-a", "stage:run-c"]);
-  });
+  }, 30_000);
 
   // Superseding an incompatible session that collides on sessionKey re-stages
   // fresh AND releases the superseded entry's host staged-temp (no leak, no

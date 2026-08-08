@@ -194,6 +194,11 @@ export const pluginManagedAgentDeclarationSchema = z.object({
   adapterConfig: z.record(z.string(), z.unknown()).optional(),
   runtimeConfig: z.record(z.string(), z.unknown()).optional(),
   permissions: z.record(z.string(), z.unknown()).optional(),
+  executionPrincipal: z.object({
+    kind: z.literal("plugin_tool_only"),
+    skillKey: z.string().min(1).max(100),
+    tool: z.string().min(3).max(201).regex(/^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/),
+  }).strict().optional(),
   status: z.enum(["idle", "paused"]).optional(),
   budgetMonthlyCents: z.number().int().min(0).optional(),
   instructions: z.object({
@@ -751,6 +756,27 @@ export const pluginManifestV1Schema = z.object({
     launchers: z.array(pluginLauncherDeclarationSchema).optional(),
   }).optional(),
 }).superRefine((manifest, ctx) => {
+  const declaredSkills = new Set((manifest.skills ?? []).map((skill) => skill.skillKey));
+  const declaredTools = new Set((manifest.tools ?? []).map((tool) => `${manifest.id}:${tool.name}`));
+  for (const [agentIndex, agent] of (manifest.agents ?? []).entries()) {
+    const principal = agent.executionPrincipal;
+    if (!principal) continue;
+    if (agent.permissions && Object.keys(agent.permissions).length > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "plugin_tool_only execution principals cannot declare ordinary permissions", path: ["agents", agentIndex, "permissions"] });
+    }
+    if (agent.role !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "plugin_tool_only execution principals cannot declare an ordinary agent role", path: ["agents", agentIndex, "role"] });
+    }
+    if (agent.instructions) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "plugin_tool_only execution principals cannot declare ordinary agent instructions", path: ["agents", agentIndex, "instructions"] });
+    }
+    if (!declaredSkills.has(principal.skillKey)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `executionPrincipal.skillKey "${principal.skillKey}" must reference a skill owned by this plugin`, path: ["agents", agentIndex, "executionPrincipal", "skillKey"] });
+    }
+    if (!declaredTools.has(principal.tool)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `executionPrincipal.tool "${principal.tool}" must be an exact namespaced tool owned by this plugin`, path: ["agents", agentIndex, "executionPrincipal", "tool"] });
+    }
+  }
   // ── Entrypoint ↔ UI slot consistency ──────────────────────────────────
   // Plugins that declare UI slots must also declare a UI entrypoint so the
   // host knows where to load the bundle from (PLUGIN_SPEC.md §10.1).

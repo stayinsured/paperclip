@@ -1,20 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
-import type { heartbeatRuns } from "@paperclipai/db";
+import { heartbeatRuns, issues, pluginExecutionAttempts } from "@paperclipai/db";
 import { resolveLedgerScopeForRun } from "../services/heartbeat.ts";
 
 type IssueRow = { id: string; projectId: string | null; billingCode: string | null };
+type PluginAttemptRow = { id: string; billingCode: string };
 
-/**
- * Minimal Drizzle stand-in for the single lookup `resolveLedgerScopeForRun`
- * performs: `db.select({...}).from(issues).where(...)` resolved as a thenable.
- */
 type LedgerDb = Parameters<typeof resolveLedgerScopeForRun>[0];
 
-function makeDb(rows: IssueRow[]) {
-  const where = vi.fn(() => Promise.resolve(rows));
-  const from = vi.fn(() => ({ where }));
-  const select = vi.fn(() => ({ from }));
-  return { db: { select } as unknown as LedgerDb, select, from, where };
+function makeDb(input: { issues?: IssueRow[]; pluginAttempts?: PluginAttemptRow[] }) {
+  const select = vi.fn(() => ({
+    from: (table: unknown) => ({
+      where: () => Promise.resolve(
+        table === pluginExecutionAttempts
+          ? input.pluginAttempts ?? []
+          : table === issues
+            ? input.issues ?? []
+            : [],
+      ),
+    }),
+  }));
+  return { db: { select } as unknown as LedgerDb, select };
 }
 
 function makeRun(contextSnapshot: Record<string, unknown>) {
@@ -22,8 +27,10 @@ function makeRun(contextSnapshot: Record<string, unknown>) {
 }
 
 describe("resolveLedgerScopeForRun billing code propagation", () => {
-  it("carries the issue's billing code onto the ledger scope", async () => {
-    const { db } = makeDb([{ id: "issue-1", projectId: "project-1", billingCode: "ACME-42" }]);
+  it("carries the issue billing code onto the ledger scope", async () => {
+    const { db } = makeDb({
+      issues: [{ id: "issue-1", projectId: "project-1", billingCode: "ACME-42" }],
+    });
 
     const scope = await resolveLedgerScopeForRun(db, "company-1", makeRun({
       issueId: "issue-1",
@@ -38,7 +45,9 @@ describe("resolveLedgerScopeForRun billing code propagation", () => {
   });
 
   it("resolves a null billing code when the issue has none set", async () => {
-    const { db } = makeDb([{ id: "issue-1", projectId: "project-1", billingCode: null }]);
+    const { db } = makeDb({
+      issues: [{ id: "issue-1", projectId: "project-1", billingCode: null }],
+    });
 
     const scope = await resolveLedgerScopeForRun(db, "company-1", makeRun({
       issueId: "issue-1",
@@ -49,8 +58,8 @@ describe("resolveLedgerScopeForRun billing code propagation", () => {
     expect(scope.issueId).toBe("issue-1");
   });
 
-  it("resolves a null billing code without querying when the run has no issue in context", async () => {
-    const { db, select } = makeDb([]);
+  it("resolves a null billing code when the run has no issue in context", async () => {
+    const { db, select } = makeDb({});
 
     const scope = await resolveLedgerScopeForRun(db, "company-1", makeRun({
       projectId: "context-project",
@@ -61,11 +70,11 @@ describe("resolveLedgerScopeForRun billing code propagation", () => {
       projectId: "context-project",
       billingCode: null,
     });
-    expect(select).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledTimes(1);
   });
 
   it("resolves a null billing code when the issue is not visible to the company", async () => {
-    const { db } = makeDb([]);
+    const { db } = makeDb({});
 
     const scope = await resolveLedgerScopeForRun(db, "other-company", makeRun({
       issueId: "issue-1",
@@ -76,6 +85,24 @@ describe("resolveLedgerScopeForRun billing code propagation", () => {
       issueId: null,
       projectId: "context-project",
       billingCode: null,
+    });
+  });
+
+  it("prefers the durable plugin attempt by heartbeat run id without a context hint", async () => {
+    const { db } = makeDb({
+      pluginAttempts: [{ id: "attempt-1", billingCode: "STA-1832/outline-materiality" }],
+      issues: [{ id: "issue-1", projectId: "project-1", billingCode: "spoofed-context" }],
+    });
+
+    const scope = await resolveLedgerScopeForRun(db, "company-1", makeRun({
+      issueId: "issue-1",
+    }));
+
+    expect(scope).toEqual({
+      issueId: null,
+      projectId: null,
+      billingCode: "STA-1832/outline-materiality",
+      pluginExecutionAttemptId: "attempt-1",
     });
   });
 });

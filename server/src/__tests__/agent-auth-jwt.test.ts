@@ -79,6 +79,36 @@ describe("agent local JWT", () => {
     expect(claims?.key_scope).toEqual({ kind: "skill_test", issueId });
   });
 
+  it("round-trips the strict plugin_execution scope and caps JWT expiry", () => {
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const scope = {
+      kind: "plugin_execution" as const,
+      companyId: "11111111-1111-4111-8111-111111111111",
+      pluginId: "22222222-2222-4222-8222-222222222222",
+      pluginKey: "paperclip.classifier",
+      principalAgentId: "33333333-3333-4333-8333-333333333333",
+      attemptId: "44444444-4444-4444-8444-444444444444",
+      assessmentId: "assessment-1",
+      sourceKind: "issue",
+      sourceId: "source-1",
+      policyId: "policy-1",
+      policyVersion: "1",
+      skillId: "55555555-5555-4555-8555-555555555555",
+      skillVersionId: "66666666-6666-4666-8666-666666666666",
+      skillRevisionNumber: 3,
+      skillContentDigest: `sha256:${"a".repeat(64)}`,
+      tool: "paperclip.classifier:submit",
+      nonceDigest: `sha256:${"b".repeat(64)}`,
+      heartbeatRunId: "77777777-7777-4777-8777-777777777777",
+      billingCode: "STA-1832/outline-materiality",
+      expiresAt: "2026-01-01T00:02:00.000Z",
+    };
+    const token = createLocalAgentJwt(scope.principalAgentId, scope.companyId, "codex_local", scope.heartbeatRunId, null, scope);
+    const claims = verifyLocalAgentJwt(token!);
+    expect(claims?.key_scope).toEqual(scope);
+    expect(claims!.exp - claims!.iat).toBe(120);
+  });
+
   it("returns null when secret is missing", () => {
     process.env[secretEnv] = "";
     const token = createLocalAgentJwt("agent-1", "company-1", "claude_local", "run-1");

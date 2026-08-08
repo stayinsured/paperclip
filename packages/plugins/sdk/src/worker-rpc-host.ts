@@ -1161,6 +1161,18 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             return callHost("agents.managed.reset", { agentKey, companyId });
           },
         },
+        execution: {
+          async invoke(input) {
+            return callHost("agents.execution.invoke", input);
+          },
+          async cancel(attemptId: string, companyId: string, reason?: string) {
+            return callHost("agents.execution.cancel", { attemptId, companyId, reason });
+          },
+          async reclaim(attemptId: string, companyId: string, reason?: string) {
+            return callHost("agents.execution.reclaim", { attemptId, companyId, reason });
+          },
+        },
+
 
         sessions: {
           async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string }) {

@@ -278,6 +278,9 @@ export interface HostServices {
     managedGet(params: WorkerToHostMethods["agents.managed.get"][0]): Promise<WorkerToHostMethods["agents.managed.get"][1]>;
     managedReconcile(params: WorkerToHostMethods["agents.managed.reconcile"][0]): Promise<WorkerToHostMethods["agents.managed.reconcile"][1]>;
     managedReset(params: WorkerToHostMethods["agents.managed.reset"][0]): Promise<WorkerToHostMethods["agents.managed.reset"][1]>;
+    executionInvoke(params: WorkerToHostMethods["agents.execution.invoke"][0]): Promise<WorkerToHostMethods["agents.execution.invoke"][1]>;
+    executionCancel(params: WorkerToHostMethods["agents.execution.cancel"][0]): Promise<WorkerToHostMethods["agents.execution.cancel"][1]>;
+    executionReclaim(params: WorkerToHostMethods["agents.execution.reclaim"][0]): Promise<WorkerToHostMethods["agents.execution.reclaim"][1]>;
   };
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
@@ -493,6 +496,9 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "agents.managed.get": "agents.managed",
   "agents.managed.reconcile": "agents.managed",
   "agents.managed.reset": "agents.managed",
+  "agents.execution.invoke": "agents.managed",
+  "agents.execution.cancel": "agents.managed",
+  "agents.execution.reclaim": "agents.managed",
 
   // Agent Sessions
   "agents.sessions.create": "agent.sessions.create",
@@ -995,6 +1001,9 @@ export function createHostClientHandlers(
       return services.agents.managedReset(params);
     }),
 
+    "agents.execution.invoke": gated("agents.execution.invoke", async (params) => services.agents.executionInvoke(params)),
+    "agents.execution.cancel": gated("agents.execution.cancel", async (params) => services.agents.executionCancel(params)),
+    "agents.execution.reclaim": gated("agents.execution.reclaim", async (params) => services.agents.executionReclaim(params)),
     // Agent Sessions
     "agents.sessions.create": gated("agents.sessions.create", async (params) => {
       return services.agentSessions.create(params);

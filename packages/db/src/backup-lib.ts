@@ -3,6 +3,7 @@ import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { open as openFile } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import postgres from "postgres";
@@ -440,6 +441,32 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     stream.destroy();
     raw.destroy();
   }
+}
+
+function parseCopyRestoreStatement(statement: string) {
+  const lines = statement.split(/\r?\n/);
+  const copyIndex = lines.findIndex((line) => /^COPY\s+.+\s+FROM\s+stdin;\s*$/i.test(line.trim()));
+  if (copyIndex < 0) return null;
+
+  const terminatorIndex = lines.findIndex((line, index) => index > copyIndex && line === "\\.");
+  if (terminatorIndex < 0 || lines.slice(terminatorIndex + 1).some((line) => line.trim().length > 0)) {
+    throw new Error("Invalid COPY restore block: missing or misplaced \\. terminator");
+  }
+
+  return {
+    command: lines[copyIndex]!.replace(/;\s*$/, ""),
+    data: `${lines.slice(copyIndex + 1, terminatorIndex).join("\n")}\n`,
+  };
+}
+
+async function restoreStatement(sql: ReturnType<typeof postgres>, statement: string) {
+  const copy = parseCopyRestoreStatement(statement);
+  if (!copy) {
+    await sql.unsafe(statement).execute();
+    return;
+  }
+  const writable = await sql.unsafe(copy.command).writable();
+  await pipeline(Readable.from([copy.data]), writable);
 }
 
 export function createBufferedTextFileWriter(filePath: string, maxBufferedBytes = DEFAULT_BACKUP_WRITE_BUFFER_BYTES) {
@@ -1009,7 +1036,7 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
   try {
     await sql`SELECT 1`;
     for await (const statement of readRestoreStatements(opts.backupFile)) {
-      await sql.unsafe(statement).execute();
+      await restoreStatement(sql, statement);
     }
   } catch (error) {
     const statementPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"

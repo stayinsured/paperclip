@@ -1457,6 +1457,13 @@
       "when": 1786190836925,
       "tag": "0209_skill_test_response_only_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1786193199489,
+      "tag": "0210_aromatic_blazing_skull",
+      "breakpoints": true
     }
   ]
 }

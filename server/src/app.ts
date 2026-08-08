@@ -9,6 +9,7 @@ import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
+import { pluginExecutionIngressGuard } from "./middleware/plugin-execution-ingress.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
 import { healthRoutes } from "./routes/health.js";
@@ -60,6 +61,7 @@ import {
 import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
+import { pluginExecutionRoutes } from "./routes/plugin-executions.js";
 import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { mcpGatewayProtocolRoutes, toolGatewayRoutes } from "./routes/tool-gateway.js";
@@ -316,6 +318,9 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // A plugin-execution capability is not an ordinary agent credential. Keep
+  // this on the app-level API mount, ahead of auth and every other API route.
+  app.use("/api", pluginExecutionIngressGuard(db));
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
@@ -441,6 +446,7 @@ export async function createApp(
     deploymentExposure: opts.deploymentExposure,
     trustedLocalStdioRuntimeHost,
   });
+  api.use(pluginExecutionRoutes(db, toolDispatcher));
   // Issue routes are intentionally mounted after the gateway is constructed because
   // issue approval endpoints delegate to it. The intervening routers use distinct
   // route prefixes, so this dependency does not change issue-route precedence.

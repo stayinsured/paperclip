@@ -52,10 +52,10 @@ describe("companySkillsApi test runs", () => {
       executionMode: "response_only",
     });
 
-    await expect(request).rejects.toMatchObject<ApiError>({
+    await expect(request).rejects.toMatchObject({
       status: 422,
       message: errorBody.error,
       body: errorBody,
-    });
+    } satisfies Partial<ApiError>);
   });
 });

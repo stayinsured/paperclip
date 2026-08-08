@@ -1647,6 +1647,42 @@ export interface PluginApprovalsClient {
  * Requires `agents.read` for reads; `agents.pause` / `agents.resume` /
  * `agents.invoke` for write operations.
  */
+export interface PluginExecutionInvocation {
+  companyId: string;
+  principalAgentKey: string;
+  coordinatorAttemptId: string;
+  assessmentId: string;
+  source: { kind: string; id: string };
+  policy: { id: string; version: string };
+  nonce: string;
+  billingCode: string;
+  envelope: Record<string, unknown>;
+}
+
+export interface PluginExecutionAttempt {
+  id: string;
+  companyId: string;
+  pluginId: string;
+  principalAgentId: string;
+  heartbeatRunId: string | null;
+  companySkillId: string;
+  companySkillVersionId: string;
+  skillRevisionNumber: number;
+  skillContentDigest: string;
+  allowedTool: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "reclaimed" | "timed_out";
+  terminalReason: string | null;
+  runtimeExpiresAt: string;
+  callbackExpiresAt: string;
+  billingCode: string;
+}
+
+export interface PluginAgentExecutionClient {
+  invoke(input: PluginExecutionInvocation): Promise<PluginExecutionAttempt>;
+  cancel(attemptId: string, companyId: string, reason?: string): Promise<PluginExecutionAttempt>;
+  reclaim(attemptId: string, companyId: string, reason?: string): Promise<PluginExecutionAttempt>;
+}
+
 export interface PluginAgentsClient {
   list(input: { companyId: string; status?: Agent["status"]; limit?: number; offset?: number }): Promise<Agent[]>;
   get(agentId: string, companyId: string): Promise<Agent | null>;
@@ -1662,6 +1698,8 @@ export interface PluginAgentsClient {
     reconcile(agentKey: string, companyId: string): Promise<PluginManagedAgentResolution>;
     reset(agentKey: string, companyId: string): Promise<PluginManagedAgentResolution>;
   };
+  /** Invoke and control a manifest-declared plugin_tool_only principal. Requires `agents.managed`. */
+  execution: PluginAgentExecutionClient;
   /** Create, message, and close agent chat sessions. Requires `agent.sessions.*` capabilities. */
   sessions: PluginAgentSessionsClient;
 }

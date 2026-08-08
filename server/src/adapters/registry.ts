@@ -257,7 +257,7 @@ const acpxLocalAdapter: ServerAdapterModule = {
 
 const codexLocalAdapter: ServerAdapterModule = {
   type: "codex_local",
-  supportedExecutionProfiles: ["skill_test_output_only", "skill_test_response_only"],
+  supportedExecutionProfiles: ["skill_test_output_only", "skill_test_response_only", "plugin_execution_tool_only"],
   execute: codexExecute,
   executeResponseOnly: codexExecuteResponseOnly,
   testEnvironment: codexTestEnvironment,

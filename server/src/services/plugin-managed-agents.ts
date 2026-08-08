@@ -1,10 +1,13 @@
 import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  agentApiKeys,
+  agentTaskSessions,
   agents,
   companies,
   pluginEntities,
   pluginManagedResources,
+  principalPermissionGrants,
 } from "@paperclipai/db";
 import type {
   Agent,
@@ -20,6 +23,10 @@ import { agentInstructionsService } from "./agent-instructions.js";
 
 const MANAGED_AGENT_ENTITY_TYPE = "managed_agent";
 const DEFAULT_MANAGED_AGENT_ADAPTER_TYPE = "process";
+const PLUGIN_EXECUTION_PERMISSIONS = {
+  canCreateAgents: false,
+  canCreateSkills: false,
+} as const;
 
 interface PluginManagedAgentServiceOptions {
   pluginId: string;
@@ -52,6 +59,7 @@ function managedMetadata(
       agentKey: declaration.agentKey,
       displayName: declaration.displayName,
       instructions: declaration.instructions ?? null,
+      executionPrincipal: declaration.executionPrincipal ?? null,
     },
   };
 }
@@ -103,14 +111,16 @@ function selectPreferredAdapterType(
 function declarationPatch(declaration: PluginManagedAgentDeclaration, input: { adapterType?: string } = {}) {
   return {
     name: declaration.displayName,
-    role: declaration.role ?? "general",
+    role: declaration.executionPrincipal ? "general" : (declaration.role ?? "general"),
     title: declaration.title ?? null,
     icon: declaration.icon ?? null,
     capabilities: declaration.capabilities ?? null,
     adapterType: input.adapterType ?? fallbackAdapterType(declaration),
     adapterConfig: declaration.adapterConfig ?? {},
     runtimeConfig: declaration.runtimeConfig ?? {},
-    permissions: declaration.permissions ?? {},
+    permissions: declaration.executionPrincipal
+      ? PLUGIN_EXECUTION_PERMISSIONS
+      : (declaration.permissions ?? {}),
     budgetMonthlyCents: declaration.budgetMonthlyCents ?? 0,
   };
 }
@@ -211,7 +221,7 @@ export function pluginManagedAgentService(
     const defaultsJson = {
       agentKey: declaration.agentKey,
       displayName: declaration.displayName,
-      role: declaration.role ?? "general",
+      role: declaration.executionPrincipal ? "general" : (declaration.role ?? "general"),
       title: declaration.title ?? null,
       icon: declaration.icon ?? null,
       capabilities: declaration.capabilities ?? null,
@@ -219,7 +229,9 @@ export function pluginManagedAgentService(
       adapterPreference: declaration.adapterPreference ?? null,
       adapterConfig: declaration.adapterConfig ?? {},
       runtimeConfig: declaration.runtimeConfig ?? {},
-      permissions: declaration.permissions ?? {},
+      permissions: declaration.executionPrincipal
+        ? PLUGIN_EXECUTION_PERMISSIONS
+        : (declaration.permissions ?? {}),
       budgetMonthlyCents: declaration.budgetMonthlyCents ?? 0,
       instructions: declaration.instructions ?? null,
     };
@@ -406,6 +418,43 @@ export function pluginManagedAgentService(
     };
   }
 
+  async function hardenExecutionPrincipal(
+    companyId: string,
+    declaration: PluginManagedAgentDeclaration,
+    agent: Agent,
+  ): Promise<Agent> {
+    if (declaration.executionPrincipal?.kind !== "plugin_tool_only") return agent;
+    const existingMetadata = agent.metadata && typeof agent.metadata === "object"
+      ? agent.metadata
+      : {};
+    await db.transaction(async (tx) => {
+      await tx.update(agents).set({
+        role: "general",
+        metadata: managedMetadata(options.pluginId, options.pluginKey, declaration, existingMetadata),
+        permissions: PLUGIN_EXECUTION_PERMISSIONS,
+        updatedAt: new Date(),
+      }).where(and(eq(agents.id, agent.id), eq(agents.companyId, companyId)));
+      await tx.update(agentApiKeys).set({
+        revokedAt: new Date(),
+      }).where(and(
+        eq(agentApiKeys.agentId, agent.id),
+        eq(agentApiKeys.companyId, companyId),
+      ));
+      await tx.delete(principalPermissionGrants).where(and(
+        eq(principalPermissionGrants.companyId, companyId),
+        eq(principalPermissionGrants.principalType, "agent"),
+        eq(principalPermissionGrants.principalId, agent.id),
+      ));
+      await tx.delete(agentTaskSessions).where(and(
+        eq(agentTaskSessions.companyId, companyId),
+        eq(agentTaskSessions.agentId, agent.id),
+      ));
+    });
+    const hardened = await agentSvc.getById(agent.id);
+    if (!hardened) throw notFound("Managed execution principal not found");
+    return hardened as Agent;
+  }
+
   async function createManagedAgent(companyId: string, declaration: PluginManagedAgentDeclaration) {
     const company = await db
       .select()
@@ -507,13 +556,17 @@ export function pluginManagedAgentService(
       const current = await get(agentKey, companyId);
       if (current.agent) {
         await upsertBinding(companyId, declaration, current.agent.id);
-        return current;
+        const agent = await hardenExecutionPrincipal(companyId, declaration, current.agent);
+        return resolution(companyId, declaration, agent, current.status, current.approvalId);
       }
 
       const relinkCandidate = await findRelinkCandidate(companyId, declaration);
       if (relinkCandidate) {
         await upsertBinding(companyId, declaration, relinkCandidate.id);
-        const agent = await agentSvc.getById(relinkCandidate.id);
+        const resolvedAgent = await agentSvc.getById(relinkCandidate.id);
+        const agent = resolvedAgent
+          ? await hardenExecutionPrincipal(companyId, declaration, resolvedAgent as Agent)
+          : null;
         return resolution(companyId, declaration, agent as Agent, "relinked");
       }
 
@@ -538,20 +591,21 @@ export function pluginManagedAgentService(
       });
       if (!updated) throw notFound("Managed agent not found");
       const updatedAgent = await materializeDeclaredInstructions(companyId, updated as Agent, declaration, { replaceExisting: true });
-      await upsertBinding(companyId, declaration, updatedAgent.id, {}, adapterType);
+      const hardenedAgent = await hardenExecutionPrincipal(companyId, declaration, updatedAgent);
+      await upsertBinding(companyId, declaration, hardenedAgent.id, {}, adapterType);
       await logActivity(db, {
         companyId,
         actorType: "plugin",
         actorId: options.pluginId,
         action: "plugin.managed_agent.reset",
         entityType: "agent",
-        entityId: updatedAgent.id,
+        entityId: hardenedAgent.id,
         details: {
           sourcePluginKey: options.pluginKey,
           managedResourceKey: declaration.agentKey,
         },
       });
-      return resolution(companyId, declaration, updatedAgent, "reset");
+      return resolution(companyId, declaration, hardenedAgent, "reset");
   }
 
   return {

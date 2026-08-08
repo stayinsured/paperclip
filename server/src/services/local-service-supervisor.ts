@@ -194,10 +194,14 @@ export async function findLocalServiceRegistryRecordByRuntimeServiceId(input: {
       await removeLocalServiceRegistryRecord(candidate.serviceKey);
       return null;
     }
+    const recoveredProcessGroupId = await readProcessGroupId(ownerPid);
     candidate = {
       ...candidate,
       pid: ownerPid,
-      processGroupId: candidate.processGroupId && isPidAlive(candidate.processGroupId) ? candidate.processGroupId : ownerPid,
+      processGroupId:
+        recoveredProcessGroupId && isProcessGroupAlive(recoveredProcessGroupId)
+          ? recoveredProcessGroupId
+          : ownerPid,
       lastSeenAt: new Date().toISOString(),
     };
     await writeLocalServiceRegistryRecord(candidate);
@@ -292,7 +296,15 @@ async function readProcessGroupId(pid: number) {
     const parsed = Number.parseInt(stdout.trim(), 10);
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
   } catch {
-    return null;
+    if (process.platform !== "linux") return null;
+    try {
+      const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      const parsed = Number.parseInt(fields[2] ?? "", 10);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -317,8 +329,11 @@ async function adoptLocalServiceFromPortOwner(input: {
     }
   }
 
-  const processGroupId = await readProcessGroupId(ownerPid);
-  const pid = processGroupId && isPidAlive(processGroupId) ? processGroupId : ownerPid;
+  const recoveredProcessGroupId = await readProcessGroupId(ownerPid);
+  const processGroupId =
+    recoveredProcessGroupId && isProcessGroupAlive(recoveredProcessGroupId)
+      ? recoveredProcessGroupId
+      : ownerPid;
   const now = new Date().toISOString();
   const record: LocalServiceRegistryRecord = {
     version: 1,
@@ -330,8 +345,8 @@ async function adoptLocalServiceFromPortOwner(input: {
     envFingerprint: input.envFingerprint ?? "",
     port: input.port,
     url: input.url ?? null,
-    pid,
-    processGroupId: processGroupId ?? pid,
+    pid: ownerPid,
+    processGroupId,
     provider: "local_process",
     runtimeServiceId: null,
     reuseKey: input.envFingerprint ?? null,
@@ -414,8 +429,56 @@ export async function readLocalServicePortOwner(port: number) {
       .find((value) => Number.isInteger(value) && value > 0);
     return firstPid ?? null;
   } catch {
+    if (process.platform !== "linux") return null;
+    return await readLinuxPortOwnerFromProc(port);
+  }
+}
+
+async function readLinuxPortOwnerFromProc(port: number) {
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+  const socketInodes = new Set<string>();
+  for (const tablePath of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    try {
+      const table = await fs.readFile(tablePath, "utf8");
+      for (const line of table.split("\n").slice(1)) {
+        const fields = line.trim().split(/\s+/);
+        const localAddress = fields[1];
+        if (!localAddress || fields[3] !== "0A" || localAddress.split(":").at(-1) !== portHex) continue;
+        const inode = fields[9];
+        if (inode) socketInodes.add(inode);
+      }
+    } catch {
+      // The table may be unavailable in a restricted runtime.
+    }
+  }
+  if (socketInodes.size === 0) return null;
+
+  let procEntries: string[];
+  try {
+    procEntries = await fs.readdir("/proc");
+  } catch {
     return null;
   }
+  for (const entry of procEntries) {
+    const pid = Number.parseInt(entry, 10);
+    if (!Number.isInteger(pid) || String(pid) !== entry) continue;
+    let fdEntries: string[];
+    try {
+      fdEntries = await fs.readdir(`/proc/${pid}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fdEntries) {
+      try {
+        const target = await fs.readlink(`/proc/${pid}/fd/${fd}`);
+        const inode = /^socket:\[(\d+)\]$/.exec(target)?.[1];
+        if (inode && socketInodes.has(inode)) return pid;
+      } catch {
+        // File descriptors can disappear while they are inspected.
+      }
+    }
+  }
+  return null;
 }
 
 export async function readLocalServiceProcessCwd(pid: number) {

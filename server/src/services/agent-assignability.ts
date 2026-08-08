@@ -10,7 +10,15 @@ import { conflict, notFound, unprocessable } from "../errors.js";
 
 type AgentAssignmentKind = "work" | "routine";
 
-type AssignabilityAgent = AgentEligibilityAgent;
+type AssignabilityAgent = AgentEligibilityAgent & { metadata?: Record<string, unknown> | null };
+
+function isPluginExecutionPrincipal(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const managed = (metadata as Record<string, unknown>).pluginManagedAgent;
+  if (!managed || typeof managed !== "object" || Array.isArray(managed)) return false;
+  const principal = (managed as Record<string, unknown>).executionPrincipal;
+  return Boolean(principal && typeof principal === "object" && !Array.isArray(principal) && (principal as Record<string, unknown>).kind === "plugin_tool_only");
+}
 
 type AgentAssignmentConflictReason =
   | "pending_approval"
@@ -20,7 +28,8 @@ type AgentAssignmentConflictReason =
   | "ancestor_missing"
   | "ancestor_cross_company"
   | "ancestor_cycle"
-  | "ancestor_depth_exceeded";
+  | "ancestor_depth_exceeded"
+  | "plugin_execution_principal";
 
 function assignmentMessage(kind: AgentAssignmentKind, reason: AgentAssignmentConflictReason) {
   if (reason === "pending_approval") {
@@ -37,6 +46,11 @@ function assignmentMessage(kind: AgentAssignmentKind, reason: AgentAssignmentCon
     return kind === "routine"
       ? "Cannot assign routines to agents with an unsupported lifecycle status"
       : "Cannot assign work to agents with an unsupported lifecycle status";
+  }
+  if (reason === "plugin_execution_principal") {
+    return kind === "routine"
+      ? "Cannot assign routines to plugin execution principals"
+      : "Cannot assign work to plugin execution principals";
   }
   return kind === "routine"
     ? "Cannot assign routines to agents with an invalid org chain"
@@ -75,6 +89,7 @@ async function getAgent(db: Db, agentId: string): Promise<AssignabilityAgent | n
       name: agents.name,
       status: agents.status,
       reportsTo: agents.reportsTo,
+      metadata: agents.metadata,
     })
     .from(agents)
     .where(eq(agents.id, agentId))
@@ -89,6 +104,7 @@ async function listCompanyAgents(db: Db, companyId: string): Promise<Assignabili
       name: agents.name,
       status: agents.status,
       reportsTo: agents.reportsTo,
+      metadata: agents.metadata,
     })
     .from(agents)
     .where(eq(agents.companyId, companyId));
@@ -124,6 +140,15 @@ export async function assertAssignableAgent(
     status: entry.status,
     reportsTo: entry.reportsTo,
   }));
+
+  if (isPluginExecutionPrincipal(assignee.metadata)) {
+    throw conflict(assignmentMessage(kind, "plugin_execution_principal"), conflictDetails({
+      companyId,
+      assigneeAgentId: agentId,
+      reason: "plugin_execution_principal",
+      chain: [assignee],
+    }));
+  }
 
   if (eligibility.assignable) return;
 

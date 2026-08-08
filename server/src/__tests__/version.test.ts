@@ -74,6 +74,7 @@ describe("resolveServerVersion", () => {
 
     expect(
       resolveServerVersion({
+        buildVersion: null,
         buildCommit: null,
         packageVersion: "2026.706.0",
         gitDescribeCommand: () => {
@@ -218,6 +219,7 @@ describe("resolveServerVersion", () => {
     try {
       expect(
         resolveServerVersion({
+          buildVersion: null,
           buildCommit: null,
           packageVersion: "2026.706.0",
           gitDescribeCommand: () => {

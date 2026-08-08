@@ -37,6 +37,7 @@ import { issueService } from "./issues.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
+import { companySkillService } from "./company-skills.js";
 import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
@@ -50,6 +51,7 @@ import { pluginStateStore } from "./plugin-state-store.js";
 import { pluginDatabaseService } from "./plugin-database.js";
 import { pluginManagedAgentService } from "./plugin-managed-agents.js";
 import { pluginManagedRoutineService } from "./plugin-managed-routines.js";
+import { isPluginExecutionPrincipalAgent, pluginExecutionAttemptService } from "./plugin-execution-attempts.js";
 import { pluginManagedSkillService } from "./plugin-managed-skills.js";
 import {
   assertConfiguredLocalFolder,
@@ -721,10 +723,12 @@ export function buildHostServices(
     pluginKey,
     manifest: options.manifest,
   });
+  const companySkills = companySkillService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
   const projects = projectService(db);
+  const executionAttempts = pluginExecutionAttemptService(db);
   const executionWorkspaces = executionWorkspaceService(db);
   const issues = issueService(db);
   const documents = documentService(db);
@@ -740,6 +744,18 @@ export function buildHostServices(
   // Track active session event subscriptions for cleanup
   const activeSubscriptions = new Set<{ unsubscribe: () => void; timer: ReturnType<typeof setTimeout> }>();
   let disposed = false;
+  const isRestrictedAgentId = async (companyId: string, agentId: string) => {
+    const row = await db
+      .select({ companyId: agentsTable.companyId, metadata: agentsTable.metadata })
+      .from(agentsTable)
+      .where(and(eq(agentsTable.id, agentId), eq(agentsTable.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    return Boolean(
+      row?.companyId === companyId
+      && isPluginExecutionPrincipalAgent({ metadata: row.metadata }),
+    );
+  };
+
 
   const ensureCompanyId = (companyId?: string) => {
     if (!companyId) throw new Error("companyId is required for this operation");
@@ -2765,6 +2781,7 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
         requireInCompany("Agent", agent, companyId);
+        if (isPluginExecutionPrincipalAgent(agent!)) throw new Error("plugin execution principals cannot be invoked through agents.invoke");
         const run = await heartbeat.wakeup(params.agentId, {
           source: "automation",
           triggerDetail: "system",
@@ -2798,6 +2815,56 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         return managedAgents.reset(params.agentKey, companyId);
+      },
+      async executionInvoke(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const declaration = options.manifest?.agents?.find((candidate) => candidate.agentKey === params.principalAgentKey);
+        if (!declaration?.executionPrincipal) throw new Error("Managed agent is not a plugin execution principal");
+        await managedAgents.reconcile(params.principalAgentKey, companyId);
+        const skillResolution = await managedSkills.reconcile(declaration.executionPrincipal.skillKey, companyId);
+        if (!skillResolution.skill) throw new Error("Managed execution skill is unavailable");
+        if (!skillResolution.skill.currentVersionId) {
+          await companySkills.createVersion(
+            companyId, skillResolution.skill.id, { label: "Restricted execution pin" }, null,
+          );
+        }
+        const attempt = await executionAttempts.invoke(params, { pluginId, pluginKey, manifest: options.manifest! });
+        if (attempt.heartbeatRunId) {
+          return executionAttempts.publicAttempt(attempt);
+        }
+        const run = await heartbeat.wakeup(attempt.principalAgentId, {
+          source: "automation", triggerDetail: "system", reason: "plugin_execution", payload: {},
+          contextSnapshot: {
+            taskKey: `plugin-execution:${attempt.id}`,
+            paperclipPluginExecution: { attemptId: attempt.id },
+          },
+          requestedByActorType: "system", requestedByActorId: pluginId,
+        });
+        if (!run) throw new Error("Restricted execution wakeup was skipped by heartbeat policy");
+        const queuedAttempt = await executionAttempts.getRow(attempt.id);
+        if (!queuedAttempt || queuedAttempt.heartbeatRunId !== run.id) {
+          throw new Error("Restricted execution heartbeat binding was not persisted before dispatch");
+        }
+        return executionAttempts.publicAttempt(queuedAttempt);
+      },
+      async executionCancel(params) {
+        const row = await executionAttempts.getRow(params.attemptId);
+        if (!row || row.companyId !== ensureCompanyId(params.companyId) || row.pluginId !== pluginId) throw new Error("Restricted execution attempt not found");
+        const terminal = await executionAttempts.terminalize(row.id, "cancelled", params.reason ?? "cancelled_by_plugin");
+        if (terminal.status === "cancelled" && terminal.heartbeatRunId) {
+          await heartbeat.cancelRun(terminal.heartbeatRunId, "Restricted plugin execution cancelled", { errorCode: "plugin_execution_cancelled" });
+        }
+        return executionAttempts.publicAttempt(terminal);
+      },
+      async executionReclaim(params) {
+        const row = await executionAttempts.getRow(params.attemptId);
+        if (!row || row.companyId !== ensureCompanyId(params.companyId) || row.pluginId !== pluginId) throw new Error("Restricted execution attempt not found");
+        const terminal = await executionAttempts.terminalize(row.id, "reclaimed", params.reason ?? "reclaimed_by_coordinator");
+        if (terminal.status === "reclaimed" && terminal.heartbeatRunId) {
+          await heartbeat.cancelRun(terminal.heartbeatRunId, "Restricted plugin execution reclaimed", { errorCode: "plugin_execution_reclaimed" });
+        }
+        return executionAttempts.publicAttempt(terminal);
       },
     },
 
@@ -3179,6 +3246,7 @@ export function buildHostServices(
         requireInCompany("Agent", agent, companyId);
         const taskKey = params.taskKey ?? `plugin:${pluginKey}:session:${randomUUID()}`;
 
+        if (isPluginExecutionPrincipalAgent(agent!)) throw new Error("plugin execution principals cannot use sessions");
         const row = await db
           .insert(agentTaskSessionsTable)
           .values({
@@ -3206,6 +3274,7 @@ export function buildHostServices(
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
+        if (await isRestrictedAgentId(companyId, params.agentId)) throw new Error("plugin execution principals cannot use sessions");
         const rows = await db
           .select()
           .from(agentTaskSessionsTable)
@@ -3248,6 +3317,7 @@ export function buildHostServices(
           )
           .then((rows) => rows[0] ?? null);
         if (!session) throw new Error(`Session not found: ${params.sessionId}`);
+        if (await isRestrictedAgentId(companyId, session.agentId)) throw new Error("plugin execution principals cannot use sessions");
 
         const run = await heartbeat.wakeup(session.agentId, {
           source: "automation",
@@ -3346,6 +3416,19 @@ export function buildHostServices(
       async close(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
+        const session = await db
+          .select()
+          .from(agentTaskSessionsTable)
+          .where(
+            and(
+              eq(agentTaskSessionsTable.id, params.sessionId),
+              eq(agentTaskSessionsTable.companyId, companyId),
+              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+        if (!session) throw new Error(`Session not found: ${params.sessionId}`);
+        if (await isRestrictedAgentId(companyId, session.agentId)) throw new Error("plugin execution principals cannot use sessions");
         const deleted = await db
           .delete(agentTaskSessionsTable)
           .where(

@@ -336,6 +336,61 @@ Authoring rules:
   plugin, but the resulting resources are normal Paperclip records that the
   operator can inspect, pause, and adjust.
 
+### Restricted plugin execution principals
+
+Use a restricted execution principal when a plugin needs a model to apply one
+company skill and call one structured plugin operation, including a
+write-capable documentation maintenance operation, but must not receive
+ordinary Paperclip agent authority. Declare one managed agent with
+`executionPrincipal.kind: "plugin_tool_only"`, an owned `skillKey`, and the
+exact namespaced tool owned by the same manifest:
+
+```ts
+agents: [{
+  agentKey: "classifier",
+  displayName: "Classifier",
+  adapterType: "codex_local",
+  executionPrincipal: {
+    kind: "plugin_tool_only",
+    skillKey: "classify",
+    tool: "example.docs:maintain-document",
+  },
+}],
+```
+
+The declaration cannot include ordinary agent permissions or instructions, and
+the referenced skill and tool must be declared by that plugin. The host
+reconciles the managed resources, pins the exact current company skill version
+and canonical content digest, creates an unattached heartbeat run, and mints a
+short-lived capability bound to the company, plugin, principal, attempt,
+assessment, source, policy, skill pin, tool, nonce, run, billing code, and
+expiry.
+
+Invoke through `ctx.agents.execution.invoke(input)`; use `cancel()` or
+`reclaim()` only for coordinator lifecycle control. Reusing the same
+`coordinatorAttemptId` with the same envelope is idempotent. Reusing it with
+different assessment, nonce, or envelope data is a conflict.
+
+Restricted principals cannot be assigned tasks, invoked through
+`ctx.agents.invoke()`, use sessions, receive ordinary API keys or permissions,
+or access ordinary Paperclip endpoints. Codex is the only initially supported
+adapter. It runs fresh for at most 120 seconds in an ephemeral non-repository
+directory with ignored user/repository config, the exact pinned skill snapshot,
+and one host-owned MCP gateway exposing only the bound callback tool. The
+callback capability lasts no more than five minutes; pin drift, expiry,
+cross-scope calls, conflicting replay, cancel, reclaim, and late completion all
+fail closed. Identical accepted callback replay returns the stored result.
+
+The bound tool is not required to be read-only. For documentation maintenance,
+give the tool a narrow schema such as document identity, intended content or
+patch, and an expected provider revision. The plugin worker—not the model
+principal—owns provider credentials, validates the permitted space/document
+target and optimistic-concurrency precondition, performs the mutation, and
+returns an auditable result. Do not expose a generic provider client, URL,
+arbitrary document selector, or credential to the principal. Installing this
+declaration makes the capability available to the plugin coordinator; provider
+activation and production writes remain separately governed operator actions.
+
 UI:
 
 - `usePluginData`

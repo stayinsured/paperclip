@@ -104,6 +104,8 @@ runWorker(plugin, import.meta.url);
 
 **Agents:** `ctx.agents.invoke(agentId, companyId, opts)` for one-shot invocation. `ctx.agents.sessions` for two-way chat: `create`, `list`, `sendMessage` (with streaming `onEvent` callback), `close`. See the [Plugin Authoring Guide](../../doc/plugins/PLUGIN_AUTHORING_GUIDE.md#agent-sessions-two-way-chat) for details.
 
+**Restricted execution:** manifest-declared `plugin_tool_only` principals use `ctx.agents.execution.invoke(input)`, `cancel(attemptId, companyId)`, and `reclaim(attemptId, companyId)`. The host resolves the managed principal and exact current skill pin, creates an unattached run, and exposes only the declaration's one namespaced callback tool. Do not use ordinary `invoke` or sessions for these principals.
+
 **Jobs:** Declare in `manifest.jobs` with `jobKey`, `displayName`, `schedule` (cron). Register handler with `ctx.jobs.register(jobKey, fn)`. **Webhooks:** Declare in `manifest.webhooks` with `endpointKey`; handle in `onWebhook(input)`. **State:** `ctx.state.get/set/delete(scopeKey)`; scope kinds: `instance`, `company`, `project`, `project_workspace`, `agent`, `issue`, `goal`, `run`.
 
 **Trusted local folders:** Declare `manifest.localFolders[]` and the `local.folders` capability when a plugin needs an operator-configured company-scoped folder. Use `ctx.localFolders.configure()`, `status()`, `readText()`, and `writeTextAtomic()` instead of resolving arbitrary filesystem paths yourself. The host validates absolute roots, read/write access, required relative folders/files, traversal attempts, symlink escapes, and writes through temp-file-plus-rename atomic replacement.

@@ -64,6 +64,7 @@ export function buildCodexExecArgs(
     resumeSessionId?: string | null;
     skipGitRepoCheck?: boolean;
     outputOnly?: boolean;
+    pluginToolOnly?: boolean;
   } = {},
 ): BuildCodexExecArgsResult {
   const record = asRecord(config);
@@ -73,10 +74,11 @@ export function buildCodexExecArgs(
     asString(record.reasoningEffort, ""),
   ).trim();
   const outputOnly = options.outputOnly === true;
-  const search = !outputOnly && asBoolean(record.search, false);
+  const sealed = outputOnly || options.pluginToolOnly === true;
+  const search = !sealed && asBoolean(record.search, false);
   const fastModeRequested = asBoolean(record.fastMode, false);
   const fastModeApplied = fastModeRequested && isCodexLocalFastModeSupported(model);
-  const bypass = !outputOnly && asBoolean(
+  const bypass = !sealed && asBoolean(
     record.dangerouslyBypassApprovalsAndSandbox,
     asBoolean(record.dangerouslyBypassSandbox, false),
   );
@@ -87,7 +89,7 @@ export function buildCodexExecArgs(
   // times"). Output-only runs always receive one adapter-owned copy because
   // their fallback cwd can deliberately be a non-repository and operator args
   // are excluded. Ordinary sandbox runs keep an operator copy when present.
-  if (outputOnly || (options.skipGitRepoCheck && !extraArgs.includes(SKIP_GIT_REPO_CHECK_FLAG))) {
+  if (sealed || (options.skipGitRepoCheck && !extraArgs.includes(SKIP_GIT_REPO_CHECK_FLAG))) {
     args.push(SKIP_GIT_REPO_CHECK_FLAG);
   }
   if (search) args.unshift("--search");
@@ -99,8 +101,8 @@ export function buildCodexExecArgs(
   if (fastModeApplied) {
     args.push("-c", 'service_tier="fast"', "-c", "features.fast_mode=true");
   }
-  if (extraArgs.length > 0 && !outputOnly) args.push(...extraArgs);
-  if (outputOnly) {
+  if (extraArgs.length > 0 && !sealed) args.push(...extraArgs);
+  if (sealed) {
     args.push(
       "--ignore-user-config",
       "--ignore-rules",
@@ -114,12 +116,11 @@ export function buildCodexExecArgs(
       "project_doc_fallback_filenames=[]",
       "-c",
       "project_root_markers=[]",
-      "-c",
-      "mcp_servers={}",
     );
+    if (outputOnly) args.push("-c", "mcp_servers={}");
     for (const feature of OUTPUT_ONLY_DISABLED_FEATURES) args.push("--disable", feature);
   }
-  if (options.resumeSessionId && !outputOnly) args.push("resume", options.resumeSessionId, "-");
+  if (options.resumeSessionId && !sealed) args.push("resume", options.resumeSessionId, "-");
   else args.push("-");
 
   return {

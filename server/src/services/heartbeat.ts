@@ -57,6 +57,7 @@ import {
   issueThreadInteractions,
   issues,
   issueWorkProducts,
+  pluginExecutionAttempts,
   projects,
   projectWorkspaces,
   routineRevisions,
@@ -97,6 +98,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { pluginExecutionAttemptService, PLUGIN_EXECUTION_RUNTIME_MS } from "./plugin-execution-attempts.js";
 import { evaluateExecutionAdmission, type ExecutionAdmissionResult } from "./execution-admission.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
@@ -3737,6 +3739,19 @@ export async function resolveLedgerScopeForRun(
   run: typeof heartbeatRuns.$inferSelect,
 ) {
   const context = parseObject(run.contextSnapshot);
+  const pluginAttempt = await db
+    .select({ id: pluginExecutionAttempts.id, billingCode: pluginExecutionAttempts.billingCode })
+    .from(pluginExecutionAttempts)
+    .where(and(eq(pluginExecutionAttempts.companyId, companyId), eq(pluginExecutionAttempts.heartbeatRunId, run.id)))
+    .then((rows) => rows[0] ?? null);
+  if (pluginAttempt) {
+    return {
+      issueId: null,
+      projectId: null,
+      billingCode: pluginAttempt.billingCode,
+      pluginExecutionAttemptId: pluginAttempt.id,
+    };
+  }
   const contextIssueId = readNonEmptyString(context.issueId);
   const contextProjectId = readNonEmptyString(context.projectId);
 
@@ -7084,23 +7099,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .then((rows) => rows[0] ?? null);
       if (!updatedRun) return { run: heartbeatRun, updated: false };
 
-      const updatedHarness = await tx
-        .update(issues)
-        .set({ status: "done", completedAt: now, updatedAt: now })
-        .where(and(
-          eq(issues.companyId, input.companyId),
-          eq(issues.id, input.issueId),
-          eq(issues.harnessKind, "skill_test"),
-          eq(issues.workMode, "skill_test"),
-          eq(issues.originKind, "skill_test"),
-          eq(issues.originId, input.testRunId),
-          notInArray(issues.status, ["done", "cancelled"]),
-        ))
-        .returning({ id: issues.id })
-        .then((rows) => rows[0] ?? null);
-      if (!updatedHarness) {
-        throw conflict("Output-only Skill Studio harness became terminal", { issueId: input.issueId });
-      }
       if (!existingOutput) {
         const document = await tx.insert(documents).values({
           companyId: input.companyId,
@@ -7154,6 +7152,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       }
 
+      const updatedHarness = await tx
+        .update(issues)
+        .set({ status: "done", completedAt: now, updatedAt: now })
+        .where(and(
+          eq(issues.companyId, input.companyId),
+          eq(issues.id, input.issueId),
+          eq(issues.harnessKind, "skill_test"),
+          eq(issues.workMode, "skill_test"),
+          eq(issues.originKind, "skill_test"),
+          eq(issues.originId, input.testRunId),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ))
+        .returning({ id: issues.id })
+        .then((rows) => rows[0] ?? null);
+      if (!updatedHarness) {
+        throw conflict("Output-only Skill Studio harness became terminal", { issueId: input.issueId });
+      }
 
       const updatedHeartbeat = await tx
         .update(heartbeatRuns)
@@ -13959,7 +13974,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       })
       .where(eq(agentRuntimeState.agentId, agent.id));
 
-    if (additionalCostCents > 0 || hasTokenUsage) {
+    if (additionalCostCents > 0 || hasTokenUsage || ledgerScope.pluginExecutionAttemptId) {
       const costs = costService(db, budgetHooks);
       await costs.createEvent(agent.companyId, {
         heartbeatRunId: run.id,
@@ -13978,6 +13993,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         costCents: additionalCostCents,
         occurredAt: new Date(),
       });
+    }
+    if (ledgerScope.pluginExecutionAttemptId) {
+      const startedAt = run.startedAt?.getTime() ?? run.createdAt.getTime();
+      const finishedAt = run.finishedAt?.getTime() ?? Date.now();
+      await db.update(pluginExecutionAttempts).set({
+        provider,
+        biller,
+        model: result.model ?? "unknown",
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        durationMs: Math.max(0, finishedAt - startedAt),
+        billingType,
+        billingStatus: costStatus,
+        costCents: additionalCostCents,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(pluginExecutionAttempts.id, ledgerScope.pluginExecutionAttemptId),
+        eq(pluginExecutionAttempts.heartbeatRunId, run.id),
+        eq(pluginExecutionAttempts.companyId, agent.companyId),
+      ));
     }
   }
 
@@ -16456,7 +16492,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             { testRunId: skillTestDispatchState.testRunId, adapterType: agent.adapterType },
           );
         }
-        const executionProfile = skillTestDispatchState?.executionProfile === "output_only"
+        const pluginAttemptId = readNonEmptyString(parseObject(context.paperclipPluginExecution).attemptId);
+        if (pluginAttemptId && !runScratch) {
+          throw new Error("Restricted plugin execution requires an ephemeral local run scratch directory");
+        }
+        const pluginExecution = pluginAttemptId
+          ? await pluginExecutionAttemptService(db).start(pluginAttemptId, run.id, agent.id, agent.adapterType)
+          : null;
+        if (pluginExecution) {
+          context.paperclipExecutionProfile = {
+            kind: pluginExecution.profile.kind,
+            attemptId: pluginExecution.profile.attemptId,
+          };
+          runtimeConfig = {
+            ...runtimeConfig,
+            cwd: runScratch?.dir,
+            timeoutSec: PLUGIN_EXECUTION_RUNTIME_MS / 1000,
+            search: false,
+            dangerouslyBypassApprovalsAndSandbox: false,
+            dangerouslyBypassSandbox: false,
+            extraArgs: [],
+            args: [],
+            paperclipRuntimeSkills: [],
+          };
+        }
+        const skillTestExecutionProfile = skillTestDispatchState?.executionProfile === "output_only"
           ? {
               kind: "skill_test_output_only" as const,
               testRunId: skillTestDispatchState.testRunId!,
@@ -16464,8 +16524,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               outputDocumentKey: "output" as const,
             }
           : undefined;
-        if (executionProfile) {
-          outputOnlySkillTestIdentity = { issueId: executionProfile.issueId, testRunId: executionProfile.testRunId };
+        const executionProfile = pluginExecution?.profile ?? skillTestExecutionProfile;
+        if (skillTestExecutionProfile) {
+          outputOnlySkillTestIdentity = { issueId: skillTestExecutionProfile.issueId, testRunId: skillTestExecutionProfile.testRunId };
         }
         if (executionProfile && !adapter.supportedExecutionProfiles?.includes(executionProfile.kind)) {
           throw new UnsupportedExecutionProfileFailure(
@@ -16474,7 +16535,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           );
         }
         const adapterContext = { ...context };
-        const runtimeMcpServers = executionProfile ? [] : await buildPaperclipRuntimeMcpServers({
+        const runtimeMcpServers = pluginExecution
+          ? [{
+              name: "plugin_execution_callback",
+              url: `${paperclipApiBaseUrl()}/api/plugin-executions/${pluginExecution.row.id}/mcp`,
+              token: pluginExecution.token,
+              connectionId: pluginExecution.row.id,
+            }]
+          : executionProfile ? [] : await buildPaperclipRuntimeMcpServers({
           db,
           agent,
           runId: run.id,
@@ -16527,8 +16595,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           authToken: executionProfile ? undefined : authToken ?? undefined,
           executionProfile,
         });
+        if (pluginExecution) {
+          const attemptService = pluginExecutionAttemptService(db);
+          const latest = await attemptService.getRow(pluginExecution.row.id);
+          if (adapterResult.timedOut) {
+            await attemptService.terminalize(pluginExecution.row.id, "timed_out", "runtime_deadline_exceeded");
+          } else if (latest?.status === "running") {
+            await attemptService.terminalize(pluginExecution.row.id, "failed", "callback_missing");
+            adapterResult = {
+              ...adapterResult,
+              exitCode: 1,
+              errorCode: "plugin_execution_callback_missing",
+              errorMessage: "Restricted plugin execution returned without its bound callback.",
+            };
+          } else if (latest?.status !== "succeeded") {
+            adapterResult = {
+              ...adapterResult,
+              exitCode: 1,
+              errorCode: `plugin_execution_${latest?.status ?? "missing"}`,
+              errorMessage: `Restricted plugin execution is ${latest?.status ?? "missing"}.`,
+            };
+          }
+        }
         if (
-          executionProfile
+          executionProfile?.kind === "skill_test_output_only"
           && !adapterResult.timedOut
           && (adapterResult.exitCode ?? 0) === 0
           && !adapterResult.errorMessage
@@ -17024,6 +17114,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ?? "adapter_failed";
       logger.error({ err, runId }, "heartbeat execution failed");
 
+      const failedPluginAttemptId = readNonEmptyString(
+        parseObject(context.paperclipPluginExecution).attemptId,
+      );
+      if (failedPluginAttemptId) {
+        await pluginExecutionAttemptService(db)
+          .terminalize(failedPluginAttemptId, "failed", failureErrorCode)
+          .catch((terminalizeErr) => {
+            logger.warn(
+              { err: terminalizeErr, runId, attemptId: failedPluginAttemptId },
+              "failed to terminalize restricted plugin execution after adapter failure",
+            );
+          });
+      }
+
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
       if (handle) {
         try {
@@ -17175,6 +17279,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             recordedResponsibleUserDenialCode ??
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
+          const setupContext = parseObject(run.contextSnapshot);
+          const setupFailureAttemptId = readNonEmptyString(
+            parseObject(setupContext.paperclipPluginExecution).attemptId,
+          );
+          if (setupFailureAttemptId) {
+            await pluginExecutionAttemptService(db)
+              .terminalize(setupFailureAttemptId, "failed", setupFailureErrorCode)
+              .catch((terminalizeErr) => {
+                logger.warn(
+                  { err: terminalizeErr, runId, attemptId: setupFailureAttemptId },
+                  "failed to terminalize restricted plugin execution after setup failure",
+                );
+              });
+          }
           const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
           const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
             error: message,
@@ -18187,6 +18305,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       triggerDetail,
       payload,
     });
+    const pluginExecutionAttemptId = readNonEmptyString(
+      parseObject(enrichedContextSnapshot.paperclipPluginExecution).attemptId,
+    );
     let issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
 
     const agent = await getAgent(agentId);
@@ -19392,6 +19513,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         })
         .returning()
         .then((rows) => rows[0]);
+
+      if (pluginExecutionAttemptId) {
+        const boundAttempt = await tx
+          .update(pluginExecutionAttempts)
+          .set({ heartbeatRunId: newRun.id, updatedAt: new Date() })
+          .where(and(
+            eq(pluginExecutionAttempts.id, pluginExecutionAttemptId),
+            eq(pluginExecutionAttempts.companyId, agent.companyId),
+            eq(pluginExecutionAttempts.principalAgentId, agent.id),
+            eq(pluginExecutionAttempts.status, "queued"),
+            isNull(pluginExecutionAttempts.heartbeatRunId),
+          ))
+          .returning({ id: pluginExecutionAttempts.id })
+          .then((rows) => rows[0] ?? null);
+        if (!boundAttempt) {
+          throw conflict("Restricted execution attempt could not bind its queued heartbeat run");
+        }
+      }
 
       await tx
         .update(agentWakeupRequests)

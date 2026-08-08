@@ -181,15 +181,41 @@ export const skillTestAgentKeyScopeSchema = z.object({
   issueId: z.string().uuid(),
 }).strict();
 
+/** A deliberately exhaustive, signed capability for one restricted run. */
+export const pluginExecutionAgentKeyScopeSchema = z.object({
+  kind: z.literal("plugin_execution"),
+  companyId: z.string().uuid(),
+  pluginId: z.string().uuid(),
+  pluginKey: z.string().min(1),
+  principalAgentId: z.string().uuid(),
+  attemptId: z.string().uuid(),
+  assessmentId: z.string().min(1),
+  sourceKind: z.string().min(1),
+  sourceId: z.string().min(1),
+  policyId: z.string().min(1),
+  policyVersion: z.string().min(1),
+  skillId: z.string().uuid(),
+  skillVersionId: z.string().uuid(),
+  skillRevisionNumber: z.number().int().positive(),
+  skillContentDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  tool: z.string().min(3).regex(/^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/),
+  nonceDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  heartbeatRunId: z.string().uuid(),
+  billingCode: z.string().min(1),
+  expiresAt: z.string().datetime(),
+}).strict();
+
 export const agentApiKeyScopeSchema = z.union([
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  pluginExecutionAgentKeyScopeSchema,
 ]);
 
 export type AgentApiKeyScope = z.infer<typeof agentApiKeyScopeSchema>;
 export type TaskBridgeAgentKeyScope = z.infer<typeof taskBridgeAgentKeyScopeSchema>;
 export type SkillTestAgentKeyScope = z.infer<typeof skillTestAgentKeyScopeSchema>;
+export type PluginExecutionAgentKeyScope = z.infer<typeof pluginExecutionAgentKeyScopeSchema>;
 
 export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
   const parsed = agentApiKeyScopeSchema.safeParse(value);

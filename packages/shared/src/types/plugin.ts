@@ -210,6 +210,12 @@ export interface PluginManagedAgentDeclaration {
   runtimeConfig?: Record<string, unknown>;
   /** Suggested permissions object. Normalized by the host on create/reset. */
   permissions?: Record<string, unknown>;
+  /** Host-only execution authority for exactly one managed skill and one plugin-owned tool. */
+  executionPrincipal?: {
+    kind: "plugin_tool_only";
+    skillKey: string;
+    tool: string;
+  };
   /** Suggested starting status when no board approval is required. */
   status?: Extract<AgentStatus, "idle" | "paused">;
   /** Suggested monthly budget in cents. */

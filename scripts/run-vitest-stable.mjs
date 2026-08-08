@@ -42,6 +42,7 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/heartbeat-dependency-scheduling.test.ts",
   "server/src/__tests__/heartbeat-issue-liveness-escalation.test.ts",
   "server/src/__tests__/heartbeat-process-recovery.test.ts",
+  "server/src/__tests__/heartbeat-workspace-busy.test.ts",
   "server/src/__tests__/invite-accept-existing-member.test.ts",
   "server/src/__tests__/invite-accept-gateway-defaults.test.ts",
   "server/src/__tests__/invite-accept-replay.test.ts",
@@ -66,6 +67,10 @@ const generalWorkspacesAProjects = ["@paperclipai/ui", "paperclipai"];
 const generalWorkspacesBProjects = nonServerProjects.filter((project) => !generalWorkspacesAProjects.includes(project));
 const generalGroupNames = [generalServerGroupName, generalWorkspacesAGroupName, generalWorkspacesBGroupName];
 const serializedServerVitestArgs = [
+  "--no-file-parallelism",
+  "--maxWorkers=1",
+];
+const serializedUiVitestArgs = [
   "--no-file-parallelism",
   "--maxWorkers=1",
 ];
@@ -267,11 +272,17 @@ function runVitest(args, label) {
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
-    cwd: repoRoot,
-    env,
-    stdio: "inherit",
-  });
+  // Some workspace builds emit tests into dist. Never execute generated copies
+  // beside their source suites: they share process-global fixtures and can race.
+  const result = spawnSync(
+    "pnpm",
+    ["exec", "vitest", "run", "--exclude", "**/dist/**", ...args],
+    {
+      cwd: repoRoot,
+      env,
+      stdio: "inherit",
+    },
+  );
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
     process.exit(1);
@@ -289,7 +300,10 @@ function runGeneralSuites(routeTests) {
 
 function runProjectGroup(projects, groupName) {
   for (const project of projects) {
-    runVitest(["--project", project], `${groupName} project ${project}`);
+    runVitest(
+      ["--project", project, ...(project === "@paperclipai/ui" ? serializedUiVitestArgs : [])],
+      `${groupName} project ${project}`,
+    );
   }
 }
 

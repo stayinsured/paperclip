@@ -31,6 +31,7 @@ import type {
   PluginJobContext,
   PluginLauncherRegistration,
   PluginEvent,
+  PluginExecutionAttempt,
   ScopeKey,
   ToolResult,
   ToolRunContext,
@@ -570,6 +571,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
 
   const sessions = new Map<string, AgentSession>();
   const sessionEventCallbacks = new Map<string, (event: AgentSessionEvent) => void>();
+  const pluginExecutionAttempts = new Map<string, PluginExecutionAttempt>();
 
   const events: EventRegistration[] = [];
   const jobs = new Map<string, (job: PluginJobContext) => Promise<void>>();
@@ -700,12 +702,20 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   }
 
   function managedAgentMetadata(agentKey: string, existing?: Record<string, unknown> | null) {
+    const declaration = manifest.agents?.find((candidate) => candidate.agentKey === agentKey);
     return {
       ...(existing ?? {}),
       paperclipManagedResource: {
         pluginKey: manifest.id,
         resourceKind: "agent",
         resourceKey: agentKey,
+      },
+      pluginManagedAgent: {
+        pluginKey: manifest.id,
+        agentKey,
+        displayName: declaration?.displayName ?? agentKey,
+        instructions: declaration?.instructions ?? null,
+        executionPrincipal: declaration?.executionPrincipal ?? null,
       },
     };
   }
@@ -2215,6 +2225,50 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           };
           agents.set(updated.id, updated);
           return managedResolution(agentKey, cid, updated, "reset");
+        },
+      },
+      execution: {
+        async invoke(input) {
+          requireCapability(manifest, capabilitySet, "agents.managed");
+          const cid = requireCompanyId(input.companyId);
+          const declaration = managedAgentDeclaration(input.principalAgentKey);
+          if (!declaration.executionPrincipal) throw new Error("Managed agent is not a plugin execution principal");
+          const principal = [...agents.values()].find((candidate) => candidate.companyId === cid && isManagedAgent(candidate, input.principalAgentKey));
+          if (!principal) throw new Error("Plugin execution principal must be reconciled before invocation");
+          const now = Date.now();
+          const attempt: PluginExecutionAttempt = {
+            id: randomUUID(),
+            companyId: cid,
+            pluginId: manifest.id,
+            principalAgentId: principal.id,
+            heartbeatRunId: randomUUID(),
+            companySkillId: randomUUID(),
+            companySkillVersionId: randomUUID(),
+            skillRevisionNumber: 1,
+            skillContentDigest: `sha256:${"0".repeat(64)}`,
+            allowedTool: declaration.executionPrincipal.tool,
+            status: "queued",
+            terminalReason: null,
+            runtimeExpiresAt: new Date(now + 120_000).toISOString(),
+            callbackExpiresAt: new Date(now + 300_000).toISOString(),
+            billingCode: input.billingCode,
+          };
+          pluginExecutionAttempts.set(attempt.id, attempt);
+          return attempt;
+        },
+        async cancel(attemptId, companyId, reason) {
+          requireCapability(manifest, capabilitySet, "agents.managed");
+          const attempt = pluginExecutionAttempts.get(attemptId);
+          if (!attempt || attempt.companyId !== requireCompanyId(companyId)) throw new Error(`Restricted execution attempt not found: ${attemptId}`);
+          if (["queued", "running"].includes(attempt.status)) Object.assign(attempt, { status: "cancelled", terminalReason: reason ?? "cancelled_by_plugin" });
+          return attempt;
+        },
+        async reclaim(attemptId, companyId, reason) {
+          requireCapability(manifest, capabilitySet, "agents.managed");
+          const attempt = pluginExecutionAttempts.get(attemptId);
+          if (!attempt || attempt.companyId !== requireCompanyId(companyId)) throw new Error(`Restricted execution attempt not found: ${attemptId}`);
+          if (["queued", "running"].includes(attempt.status)) Object.assign(attempt, { status: "reclaimed", terminalReason: reason ?? "reclaimed_by_coordinator" });
+          return attempt;
         },
       },
       sessions: {

@@ -63,6 +63,8 @@ import type {
   PluginJobContext,
   PluginExecutionWorkspaceMetadata,
   PluginWorkspace,
+  PluginExecutionInvocation,
+  PluginExecutionAttempt,
   ToolRunContext,
   ToolResult,
   PluginLocalFolderListing,
@@ -1711,6 +1713,9 @@ export interface WorkerToHostMethods {
     result: PluginManagedAgentResolution,
   ];
 
+  "agents.execution.invoke": [params: PluginExecutionInvocation, result: PluginExecutionAttempt];
+  "agents.execution.cancel": [params: { attemptId: string; companyId: string; reason?: string }, result: PluginExecutionAttempt];
+  "agents.execution.reclaim": [params: { attemptId: string; companyId: string; reason?: string }, result: PluginExecutionAttempt];
   // Agent Sessions
   "agents.sessions.create": [
     params: { agentId: string; companyId: string; taskKey?: string; reason?: string },

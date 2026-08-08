@@ -39,6 +39,18 @@ async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 
   throw new Error("Timed out waiting for condition");
 }
 
+function gatewayAdmissionRuntimeConfig() {
+  return {
+    admissionProfile: {
+      gatewayReachable: true,
+      workspaceAvailable: true,
+      capabilities: {},
+      productionProviderMutationAuthorized: false,
+      verifiedAt: new Date().toISOString(),
+    },
+  };
+}
+
 async function closeDbClient(db: ReturnType<typeof createDb> | undefined) {
   await db?.$client?.end?.({ timeout: 0 });
 }
@@ -448,7 +460,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 
@@ -649,7 +661,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 
@@ -797,7 +809,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 
@@ -993,7 +1005,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             },
             waitTimeoutMs: 2_000,
           },
-          runtimeConfig: {},
+          runtimeConfig: gatewayAdmissionRuntimeConfig(),
           permissions: {},
         },
         {
@@ -1013,7 +1025,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             },
             waitTimeoutMs: 2_000,
           },
-          runtimeConfig: {},
+          runtimeConfig: gatewayAdmissionRuntimeConfig(),
           permissions: {},
         },
       ]);
@@ -1193,7 +1205,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 
@@ -1361,7 +1373,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 
@@ -1574,7 +1586,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 
@@ -1727,7 +1739,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             },
             waitTimeoutMs: 2_000,
           },
-          runtimeConfig: {},
+          runtimeConfig: gatewayAdmissionRuntimeConfig(),
           permissions: {},
         },
         {
@@ -1747,7 +1759,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             },
             waitTimeoutMs: 2_000,
           },
-          runtimeConfig: {},
+          runtimeConfig: gatewayAdmissionRuntimeConfig(),
           permissions: {},
         },
       ]);
@@ -1930,7 +1942,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             },
             waitTimeoutMs: 2_000,
           },
-          runtimeConfig: {},
+          runtimeConfig: gatewayAdmissionRuntimeConfig(),
           permissions: {},
         },
         {
@@ -1950,7 +1962,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             },
             waitTimeoutMs: 2_000,
           },
-          runtimeConfig: {},
+          runtimeConfig: gatewayAdmissionRuntimeConfig(),
           permissions: {},
         },
       ]);
@@ -2078,7 +2090,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: {},
+        runtimeConfig: gatewayAdmissionRuntimeConfig(),
         permissions: {},
       });
 

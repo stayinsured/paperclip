@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +29,15 @@ import {
 } from "./server-utils.js";
 
 function isPidAlive(pid: number) {
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const stateOffset = stat.lastIndexOf(")") + 2;
+      if (stateOffset > 1 && stat[stateOffset] === "Z") return false;
+    } catch {
+      // The process may have exited between the signal and this check.
+    }
+  }
   try {
     process.kill(pid, 0);
     return true;

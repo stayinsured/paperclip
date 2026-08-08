@@ -396,6 +396,27 @@ Rules:
   - `routines` → `routines.managed`
   - `skills` → `skills.managed`
 
+### 10.2 Restricted execution principal declaration
+
+A managed agent can be reserved for a single model-mediated plugin callback:
+
+```ts
+agents: [{
+  agentKey: "classifier",
+  displayName: "Classifier",
+  adapterType: "codex_local",
+  executionPrincipal: {
+    kind: "plugin_tool_only",
+    skillKey: "classification-policy",
+    tool: "my.plugin:maintain-document",
+  },
+}]
+```
+
+`skillKey` must name a skill in the same manifest and `tool` must be the exact namespaced name of a tool in the same manifest. Ordinary `permissions` and `instructions` conflict with this declaration. The principal is non-assignable and has no normal invoke, wake, session, issue, project, agent, secret, runtime, or company API authority. The one bound tool may perform a mutation such as maintaining documentation; its plugin worker retains provider credentials and must enforce the allowed provider tenant/space/document scope, validate optimistic-concurrency inputs, and audit the result. Write capability on that tool does not expose a generic provider API or any additional tool to the principal.
+
+After reconciling managed resources, the coordinator calls `ctx.agents.execution.invoke()` with its attempt/assessment/source/policy identities, nonce, billing code, and a sanitized bounded envelope. The host pins the current managed skill, creates the durable attempt, and queues an unattached run. `cancel()` and `reclaim()` converge attempt/run state without mutating source issues. A plugin remains responsible for its higher-level retry and review policy.
+
 ## 11. Agent Tools
 
 Plugins may contribute tools that Paperclip agents can use during runs.

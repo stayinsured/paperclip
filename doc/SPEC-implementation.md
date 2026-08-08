@@ -825,6 +825,18 @@ A Skill Studio test run persists immutable `executionMode` as `agentic | respons
 
 The control plane persists the final assistant text as document key `output` and applies the linked harness/test-run terminal transition. Those effects are atomic with respect to cancellation: the first terminal disposition wins, and a cancelled or superseded run cannot accept a late result, output, activity, or cancelled-to-done mutation.
 
+### Restricted plugin execution principals
+
+A plugin may declare a managed agent `executionPrincipal` with kind `plugin_tool_only`, one managed `skillKey`, and one exact plugin-owned namespaced callback `tool`. This declaration is an authority boundary, not an ordinary agent preset: it cannot include ordinary permissions or instructions, cannot be assigned work, invoked or woken through normal agent routes, or use task sessions. The bound callback may be a write-capable operation, including a validated documentation create/update, but that does not grant the model direct provider, network, filesystem, shell, or ordinary Paperclip write authority. Provider credentials and target-scope enforcement remain inside the plugin worker behind the one tool contract.
+
+The host resolves the company-scoped managed agent and current managed skill version, stores an immutable attempt, queues an unattached heartbeat, and mints a short-lived `plugin_execution` JWT only after revalidating the exact skill id, version, revision, and canonical content digest. Source issue identity may be durable context but the run does not checkout or mutate that issue. The signed scope binds company, plugin, principal, attempt, assessment, source, policy, skill pin, tool, nonce digest, heartbeat run, billing code, and expiry. Global API ingress rejects this JWT everywhere except `/api/plugin-executions/:attemptId/mcp`; that MCP server discovers exactly the bound tool and revalidates the full durable scope and current skill pin before dispatch.
+
+Codex is initially the only supported `plugin_execution_tool_only` adapter. It runs fresh in an ephemeral non-repository directory with the output-only credential home and user/repository config ignored. Shell, filesystem/source discovery, browser/web/search, plugin discovery, sessions, and ordinary Paperclip credentials remain unavailable. Unlike `skill_test_output_only`, which continues to expose zero MCP servers, this profile receives one host-owned MCP server containing only the bound callback tool.
+
+Attempts have a 120-second runtime deadline and a maximum five-minute callback lifetime. Terminal updates are conditional first-terminal-wins. Cancel, coordinator reclaim, timeout, failure, and success finalize only attempt/heartbeat state; late output or callbacks cannot revive a terminal attempt. Identical callback request-digest replay returns the stored result, while conflicting replay returns `409` before worker dispatch.
+
+Billing scope is resolved from the durable attempt by heartbeat run id, never caller context JSON. The attempt and cost ledger retain billing code, provider/biller/model, input/cached/output tokens, duration, billing type/status, and cost, including zero-cost subscription and unpriced usage. Mint, invoke, start, callback allow/deny/replay, cancel, reclaim, timeout, ingress deny, and pin drift produce non-secret activity provenance.
+
 ### Core API and ownership boundary
 
 Core owns and ships these company-scoped endpoints:

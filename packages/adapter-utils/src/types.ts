@@ -200,12 +200,29 @@ export interface AdapterExecutionContext {
   startupTraceContext?: import("./acpx-engine/startup-timing.js").StartupTraceContext;
 }
 
-export interface AdapterExecutionProfile {
-  kind: "skill_test_output_only" | "skill_test_response_only";
-  testRunId: string;
-  issueId: string;
-  outputDocumentKey: "output";
-}
+export type AdapterExecutionProfile =
+  | {
+      kind: "skill_test_output_only" | "skill_test_response_only";
+      testRunId: string;
+      issueId: string;
+      outputDocumentKey: "output";
+    }
+  | {
+      kind: "plugin_execution_tool_only";
+      attemptId: string;
+      skillId: string;
+      skillVersionId: string;
+      skillRevisionNumber: number;
+      skillContentDigest: string;
+      tool: string;
+      callbackExpiresAt: string;
+      sanitizedEnvelope: Record<string, unknown>;
+      skillSnapshot: {
+        name: string;
+        slug: string;
+        files: Array<{ path: string; content: string }>;
+      };
+    };
 
 export interface AdapterResponseOnlyExecutionContext {
   runId: string;
