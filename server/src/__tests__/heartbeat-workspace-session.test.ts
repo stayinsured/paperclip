@@ -1604,6 +1604,49 @@ describe("effective run execution workspace config freshness", () => {
     });
   });
 
+  it("allows an accepted-plan config refresh to replace an incompatible persisted workspace", async () => {
+    const base = buildWorkspaceConfigMetadata();
+    const next = buildWorkspaceConfigMetadata({
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      workspaceStrategy: {
+        type: "git_worktree",
+        branchTemplate: "{{issue.identifier}}-{{slug}}",
+      },
+    });
+    const decision = resolveExecutionWorkspaceConfigFreshness({
+      hasExistingWorkspace: true,
+      existingWorkspaceMetadata: persistedWorkspaceConfigFingerprint(base),
+      nextMetadata: next,
+    });
+    const restoreExistingWorkspace = vi.fn(async () => ({ id: "workspace-old", warnings: [] }));
+    const realizeWorkspace = vi.fn(async () => ({ id: "workspace-new", warnings: [] }));
+
+    const result = await provisionExecutionWorkspaceForFreshnessDecision({
+      requestedShouldReuseExisting: true,
+      allowReplacementForConfigRefresh: true,
+      existingExecutionWorkspaceId: "workspace-old",
+      issueRef: { id: "issue-1", identifier: "PAP-42" },
+      runId: "run-1",
+      workspaceConfigFreshness: decision,
+      restoreExistingWorkspace,
+      realizeWorkspace,
+    });
+
+    expect(decision.action).toBe("replace");
+    expect(result).toEqual({
+      executionWorkspace: { id: "workspace-new", warnings: [] },
+      reusedExecutionWorkspace: null,
+      policy: {
+        shouldRestoreExistingWorkspace: false,
+        shouldRefreshWorkspaceConfigSnapshot: false,
+        shouldPersistLatestWorkspaceConfigMetadata: true,
+      },
+    });
+    expect(restoreExistingWorkspace).not.toHaveBeenCalled();
+    expect(realizeWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it("fails loudly when explicit reuse restore errors", async () => {
     const base = buildWorkspaceConfigMetadata();
     const next = buildWorkspaceConfigMetadata({

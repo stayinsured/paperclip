@@ -4364,10 +4364,16 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
 export function resolveExecutionWorkspaceReuseProvisioningPolicy(input: {
   requestedShouldReuseExisting: boolean;
   workspaceConfigFreshness: ExecutionWorkspaceConfigFreshnessDecision;
+  allowReplacementForConfigRefresh?: boolean;
 }): ExecutionWorkspaceReuseProvisioningPolicy {
-  const shouldRestoreExistingWorkspace = input.requestedShouldReuseExisting;
   const replacementClassDrift =
     input.requestedShouldReuseExisting && input.workspaceConfigFreshness.action === "replace";
+  // Accepted plan confirmations explicitly request a fresh workspace-aware
+  // continuation. They may replace an available but incompatible workspace;
+  // ordinary resume and checkout paths keep strict fail-closed reuse.
+  const shouldRestoreExistingWorkspace =
+    input.requestedShouldReuseExisting &&
+    !(replacementClassDrift && input.allowReplacementForConfigRefresh === true);
 
   return {
     shouldRestoreExistingWorkspace,
@@ -4375,7 +4381,8 @@ export function resolveExecutionWorkspaceReuseProvisioningPolicy(input: {
       shouldRestoreExistingWorkspace &&
       !replacementClassDrift &&
       input.workspaceConfigFreshness.shouldRefreshConfigSnapshot,
-    shouldPersistLatestWorkspaceConfigMetadata: !replacementClassDrift,
+    shouldPersistLatestWorkspaceConfigMetadata:
+      !shouldRestoreExistingWorkspace || !replacementClassDrift,
   };
 }
 
@@ -4406,6 +4413,7 @@ function formatInheritedExecutionWorkspaceReuseFailure(input: {
 
 export async function provisionExecutionWorkspaceForFreshnessDecision<T extends { warnings?: string[] }>(input: {
   requestedShouldReuseExisting: boolean;
+  allowReplacementForConfigRefresh?: boolean;
   existingExecutionWorkspaceId?: string | null;
   issueRef: WorkspaceReuseIssueRef;
   runId: string;
@@ -4420,6 +4428,7 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<T extends 
   const policy = resolveExecutionWorkspaceReuseProvisioningPolicy({
     requestedShouldReuseExisting: input.requestedShouldReuseExisting,
     workspaceConfigFreshness: input.workspaceConfigFreshness,
+    allowReplacementForConfigRefresh: input.allowReplacementForConfigRefresh,
   });
 
   if (!policy.shouldRestoreExistingWorkspace) {
@@ -15354,9 +15363,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       inferredMetadata: inferredExistingWorkspaceConfigMetadata,
       nextMetadata: latestWorkspaceConfigMetadata,
     });
+    const allowReplacementForConfigRefresh =
+      readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation" &&
+      Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0;
     const workspaceReuseProvisioningPolicy = resolveExecutionWorkspaceReuseProvisioningPolicy({
       requestedShouldReuseExisting,
       workspaceConfigFreshness,
+      allowReplacementForConfigRefresh,
     });
     const workspaceOperationRecorder = workspaceOperationsSvc.createRecorder({
       companyId: agent.companyId,
@@ -15376,6 +15389,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const { executionWorkspace, reusedExecutionWorkspace, policy: resolvedWorkspaceReusePolicy } =
       await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>({
         requestedShouldReuseExisting,
+        allowReplacementForConfigRefresh,
         existingExecutionWorkspaceId: workspaceReuseRequest.requestedExecutionWorkspaceId,
         issueRef,
         runId: run.id,
