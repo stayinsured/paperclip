@@ -151,6 +151,16 @@ export const updateExecutionWorkspaceSchema = z.object({
 }).strict();
 
 const branchReconcileReasonSchema = z.string().trim().min(1);
+const fullGitObjectShaSchema = z.string().regex(
+  /^[0-9a-fA-F]{40}$/,
+  "Expected a full 40-character Git object SHA",
+);
+
+export const adoptExecutionWorkspaceGitWorktreeSchema = z.object({
+  expectedHeadSha: fullGitObjectShaSchema,
+  expectedTreeSha: fullGitObjectShaSchema.optional().nullable(),
+  reason: z.string().trim().min(1),
+}).strict();
 
 export const reconcileExecutionWorkspaceBranchSchema = z.discriminatedUnion("mode", [
   z.object({
@@ -168,5 +178,6 @@ export const reconcileExecutionWorkspaceBranchSchema = z.discriminatedUnion("mod
 ]);
 
 export type UpdateExecutionWorkspace = z.infer<typeof updateExecutionWorkspaceSchema>;
+export type AdoptExecutionWorkspaceGitWorktree = z.infer<typeof adoptExecutionWorkspaceGitWorktreeSchema>;
 export type ReconcileExecutionWorkspaceBranch = z.infer<typeof reconcileExecutionWorkspaceBranchSchema>;
 export type WorkspaceOverviewQuery = z.infer<typeof workspaceOverviewQuerySchema>;

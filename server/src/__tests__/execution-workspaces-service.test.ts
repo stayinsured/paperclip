@@ -27,6 +27,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   executionWorkspaceService,
+  inspectExecutionWorkspaceGitWorktreeAdoption,
   mergeExecutionWorkspaceConfig,
   readExecutionWorkspaceConfig,
 } from "../services/execution-workspaces.ts";
@@ -253,6 +254,394 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
   afterAll(async () => {
     await tempDb?.cleanup();
   });
+
+  const adoptionActor = {
+    actorType: "user" as const,
+    actorId: "local-board",
+    agentId: null,
+    runId: null,
+    agentApiKeyId: null,
+  };
+
+  async function seedAdoptableGitWorktree() {
+    const repoRoot = await createTempRepo();
+    tempDirs.add(repoRoot);
+    const worktreePath = path.join(path.dirname(repoRoot), "paperclip-adopt-worktree-" + randomUUID());
+    tempDirs.add(worktreePath);
+    await runGit(repoRoot, ["worktree", "add", "--detach", worktreePath, "HEAD"]);
+    const headSha = (await readGit(worktreePath, ["rev-parse", "HEAD"]))!;
+    const treeSha = (await readGit(worktreePath, ["rev-parse", "HEAD^{tree}"]))!;
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const issueId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+    const runtimeServiceId = randomUUID();
+    const metadata = {
+      source: "git_worktree",
+      createdByRuntime: true,
+      exactCommit: headSha,
+      exactTree: treeSha,
+      config: {
+        desiredState: "manual",
+        workspaceRuntime: { commands: [{ id: "web", kind: "service", command: "pnpm dev" }] },
+      },
+      workspaceRealization: {
+        version: 1,
+        transport: "local",
+        local: {
+          path: worktreePath,
+          worktreePath,
+          source: "git_worktree",
+          strategy: "git_worktree",
+          projectId,
+          projectWorkspaceId,
+        },
+      },
+    };
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: "PAP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Adoption project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary",
+      sourceType: "git_repo",
+      isPrimary: true,
+      cwd: repoRoot,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      title: "Source task",
+      status: "blocked",
+      priority: "high",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      sourceIssueId: issueId,
+      mode: "shared_workspace",
+      strategyType: "project_primary",
+      name: "Exact SHA worktree",
+      status: "active",
+      providerType: "local_fs",
+      providerRef: "local:git_worktree:exact-sha",
+      cwd: worktreePath,
+      baseRef: headSha,
+      metadata,
+    });
+    await db.insert(workspaceRuntimeServices).values({
+      id: runtimeServiceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      executionWorkspaceId,
+      issueId,
+      scopeType: "execution_workspace",
+      scopeId: executionWorkspaceId,
+      serviceName: "web",
+      status: "stopped",
+      lifecycle: "shared",
+      command: "pnpm dev",
+      cwd: worktreePath,
+      provider: "local_process",
+      healthStatus: "unknown",
+      stoppedAt: new Date(),
+    });
+
+    return {
+      repoRoot,
+      worktreePath,
+      headSha,
+      treeSha,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      issueId,
+      executionWorkspaceId,
+      runtimeServiceId,
+      metadata,
+    };
+  }
+
+  it("adopts an exact clean registered worktree atomically and preserves metadata", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+
+    const result = await svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      reason: "Adopt the validated exact-SHA runtime worktree",
+      actor: adoptionActor,
+    });
+
+    expect(result.workspace).toMatchObject({
+      id: fixture.executionWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      providerType: "git_worktree",
+      providerRef: fixture.worktreePath,
+      metadata: fixture.metadata,
+      config: fixture.metadata.config,
+    });
+    expect(result.inspection).toEqual({
+      path: fixture.worktreePath,
+      gitTopLevel: fixture.worktreePath,
+      registeredWorktree: true,
+      clean: true,
+      statusEntryCount: 0,
+      expectedHeadSha: fixture.headSha,
+      actualHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      actualTreeSha: fixture.treeSha,
+    });
+    expect(result.activityId).not.toBeNull();
+
+    const [activity] = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.id, result.activityId!));
+    expect(activity).toMatchObject({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "local-board",
+      action: "execution_workspace.git_worktree_adopted",
+      entityType: "execution_workspace",
+      entityId: fixture.executionWorkspaceId,
+    });
+    expect(activity?.details).toMatchObject({
+      before: {
+        mode: "shared_workspace",
+        strategyType: "project_primary",
+        providerType: "local_fs",
+        providerRef: "local:git_worktree:exact-sha",
+        baseRef: fixture.headSha,
+      },
+      expectedHeadSha: fixture.headSha,
+      actualHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      actualTreeSha: fixture.treeSha,
+      verifiedPath: fixture.worktreePath,
+      registeredWorktree: true,
+      clean: true,
+      reason: "Adopt the validated exact-SHA runtime worktree",
+      actor: { type: "user", id: "local-board", runId: null },
+    });
+  }, 20_000);
+
+  it("rejects adoption when the worktree has untracked files", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    await fs.writeFile(path.join(fixture.worktreePath, "untracked.txt"), "dirty\n", "utf8");
+
+    await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      reason: "Must remain clean",
+      actor: adoptionActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "execution_workspace_git_worktree_adoption_dirty", clean: false },
+    });
+  }, 20_000);
+
+  it("rejects adoption when HEAD changed after the exact baseRef was recorded", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    await fs.writeFile(path.join(fixture.worktreePath, "README.md"), "# changed\n", "utf8");
+    await runGit(fixture.worktreePath, ["add", "README.md"]);
+    await runGit(fixture.worktreePath, ["commit", "-m", "Change exact head"]);
+
+    await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      reason: "Require the recorded exact head",
+      actor: adoptionActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: {
+        code: "execution_workspace_git_worktree_adoption_head_mismatch",
+        expectedHeadSha: fixture.headSha,
+      },
+    });
+  }, 20_000);
+
+  it("rejects adoption when the optional expected tree SHA is wrong", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    const wrongTreeSha = "f".repeat(40);
+
+    await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      expectedTreeSha: wrongTreeSha,
+      reason: "Require the expected tree",
+      actor: adoptionActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: {
+        code: "execution_workspace_git_worktree_adoption_tree_mismatch",
+        expectedTreeSha: wrongTreeSha,
+        actualTreeSha: fixture.treeSha,
+      },
+    });
+  }, 20_000);
+
+  it("rejects a Git toplevel that is absent from the reported worktree registry", async () => {
+    const repoRoot = await createTempRepo();
+    tempDirs.add(repoRoot);
+    const headSha = (await readGit(repoRoot, ["rev-parse", "HEAD"]))!;
+
+    await expect(inspectExecutionWorkspaceGitWorktreeAdoption({
+      cwd: repoRoot,
+      expectedHeadSha: headSha,
+      expectedTreeSha: null,
+      projectPrimaryPaths: [],
+      gitRunner: async (args) => {
+        if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+          return { stdout: repoRoot + "\n", stderr: "" };
+        }
+        if (args[0] === "worktree") {
+          return { stdout: "worktree /different/path\0HEAD " + headSha + "\0\0", stderr: "" };
+        }
+        throw new Error("Unexpected git command");
+      },
+    })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "execution_workspace_git_worktree_adoption_unregistered", registered: false },
+    });
+  }, 20_000);
+
+  it("rejects a project primary or main Git root worktree", async () => {
+    const repoRoot = await createTempRepo();
+    tempDirs.add(repoRoot);
+    const headSha = (await readGit(repoRoot, ["rev-parse", "HEAD"]))!;
+
+    await expect(inspectExecutionWorkspaceGitWorktreeAdoption({
+      cwd: repoRoot,
+      expectedHeadSha: headSha,
+      expectedTreeSha: null,
+      projectPrimaryPaths: [repoRoot],
+    })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "execution_workspace_git_worktree_adoption_project_root" },
+    });
+  }, 20_000);
+
+  it("rejects adoption while an attached runtime service is active", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    await db
+      .update(workspaceRuntimeServices)
+      .set({ status: "running", stoppedAt: null, updatedAt: new Date() })
+      .where(eq(workspaceRuntimeServices.id, fixture.runtimeServiceId));
+
+    await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      reason: "Services must remain stopped",
+      actor: adoptionActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: {
+        code: "execution_workspace_git_worktree_adoption_active_service",
+        runtimeServices: [{ id: fixture.runtimeServiceId, serviceName: "web", status: "running" }],
+      },
+    });
+  }, 20_000);
+
+  it("rejects adoption when realization metadata points at another path", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    await db
+      .update(executionWorkspaces)
+      .set({
+        metadata: {
+          ...fixture.metadata,
+          workspaceRealization: {
+            ...fixture.metadata.workspaceRealization,
+            local: {
+              ...fixture.metadata.workspaceRealization.local,
+              path: fixture.repoRoot,
+            },
+          },
+        },
+      })
+      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId));
+
+    await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      reason: "Metadata path must match",
+      actor: adoptionActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "execution_workspace_git_worktree_adoption_metadata_mismatch" },
+    });
+  }, 20_000);
+
+  it("rejects a concurrent execution-workspace row change", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    const originalTransaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(
+      (async (...args: Parameters<typeof db.transaction>) => {
+        await db
+          .update(executionWorkspaces)
+          .set({ name: "Changed concurrently", updatedAt: new Date() })
+          .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId));
+        return originalTransaction(...args);
+      }) as typeof db.transaction,
+    );
+
+    try {
+      await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+        expectedHeadSha: fixture.headSha,
+        expectedTreeSha: fixture.treeSha,
+        reason: "Reject concurrent row changes",
+        actor: adoptionActor,
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "execution_workspace_git_worktree_adoption_row_race" },
+      });
+    } finally {
+      transactionSpy.mockRestore();
+    }
+  }, 20_000);
+
+  it("rejects a concurrent runtime-service row change", async () => {
+    const fixture = await seedAdoptableGitWorktree();
+    const originalTransaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementation(
+      (async (...args: Parameters<typeof db.transaction>) => {
+        await db
+          .update(workspaceRuntimeServices)
+          .set({ updatedAt: new Date(Date.now() + 10_000) })
+          .where(eq(workspaceRuntimeServices.id, fixture.runtimeServiceId));
+        return originalTransaction(...args);
+      }) as typeof db.transaction,
+    );
+
+    try {
+      await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+        expectedHeadSha: fixture.headSha,
+        expectedTreeSha: fixture.treeSha,
+        reason: "Reject concurrent service changes",
+        actor: adoptionActor,
+      })).rejects.toMatchObject({
+        status: 409,
+        details: { code: "execution_workspace_git_worktree_adoption_service_race" },
+      });
+    } finally {
+      transactionSpy.mockRestore();
+    }
+  }, 20_000);
 
   it("allows archiving shared workspace sessions with warnings even when issues are still open", async () => {
     const companyId = randomUUID();

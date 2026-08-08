@@ -3,6 +3,7 @@ import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import { issues, projects, projectWorkspaces } from "@paperclipai/db";
 import {
+  adoptExecutionWorkspaceGitWorktreeSchema,
   findWorkspaceCommandDefinition,
   matchWorkspaceRuntimeServiceToCommand,
   reconcileExecutionWorkspaceBranchSchema,
@@ -489,6 +490,32 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
 
   router.post("/execution-workspaces/:id/runtime-services/:action", validate(workspaceRuntimeControlTargetSchema), handleExecutionWorkspaceRuntimeCommand);
   router.post("/execution-workspaces/:id/runtime-commands/:action", validate(workspaceRuntimeControlTargetSchema), handleExecutionWorkspaceRuntimeCommand);
+
+  router.post(
+    "/execution-workspaces/:id/adopt-git-worktree",
+    validate(adoptExecutionWorkspaceGitWorktreeSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
+      if (!existing) return;
+      if (!(await assertRuntimeManageAllowed(req, res, existing.companyId))) return;
+
+      const actor = getActorInfo(req);
+      const result = await svc.adoptGitWorktree(id, {
+        expectedHeadSha: req.body.expectedHeadSha,
+        expectedTreeSha: req.body.expectedTreeSha ?? null,
+        reason: req.body.reason,
+        actor: {
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+        },
+      });
+      res.json(result);
+    },
+  );
 
   router.post("/execution-workspaces/:id/reconcile-branch", validate(reconcileExecutionWorkspaceBranchSchema), async (req, res) => {
     const id = req.params.id as string;

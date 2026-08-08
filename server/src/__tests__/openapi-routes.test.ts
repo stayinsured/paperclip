@@ -252,6 +252,22 @@ describe("openapi routes", () => {
     expect(spec.paths["/api/execution-workspaces/{id}/reconcile-branch"].post["x-paperclip-authorization"]).toEqual({
       actor: "board",
     });
+    const adoptionOperation = spec.paths["/api/execution-workspaces/{id}/adopt-git-worktree"].post;
+    expect(adoptionOperation.security).toEqual([
+      { BoardSessionAuth: [] },
+      { BoardApiKeyAuth: [] },
+      { AgentBearerAuth: [] },
+    ]);
+    expect(adoptionOperation["x-paperclip-authorization"]).toEqual({ actor: "board_or_agent" });
+    const adoptionRequestSchema = adoptionOperation.requestBody.content["application/json"].schema;
+    expect(adoptionRequestSchema.required).toEqual(expect.arrayContaining([
+      "expectedHeadSha",
+      "reason",
+    ]));
+    expect(adoptionRequestSchema.properties.expectedHeadSha.pattern).toContain("{40}");
+    expect(adoptionRequestSchema.properties.expectedTreeSha.pattern).toContain("{40}");
+    expect(adoptionOperation.responses["409"]).toBeDefined();
+    expect(adoptionOperation.responses["422"]).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/cost-events"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/cost-events"].post.responses["403"]).toBeDefined();
     expect(spec.paths["/api/instance/database-backups"].post.responses["201"]).toBeDefined();

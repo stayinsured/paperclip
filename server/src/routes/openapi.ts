@@ -100,6 +100,7 @@ import {
   // Sidebar
   upsertSidebarOrderPreferenceSchema,
   // Execution workspaces
+  adoptExecutionWorkspaceGitWorktreeSchema,
   reconcileExecutionWorkspaceBranchSchema,
   updateExecutionWorkspaceSchema,
   workspaceOverviewQuerySchema,
@@ -4970,6 +4971,28 @@ registry.registerPath({
     body: jsonBody(updateExecutionWorkspaceSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/execution-workspaces/{id}/adopt-git-worktree",
+  tags: ["execution-workspaces"],
+  summary: "Adopt a verified exact-SHA local Git worktree",
+  description:
+    "Atomically converts only an eligible runtime-created shared/local execution-workspace row into an isolated git_worktree after runtime-manage authorization and fail-closed path, registration, cleanliness, service-state, HEAD, and optional tree verification. The full expected HEAD SHA and a non-empty operator reason are required; expectedTreeSha is optional but, when supplied, must be a full SHA and match HEAD^{tree}.",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(adoptExecutionWorkspaceGitWorktreeSchema),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
 });
 
 registry.registerPath({

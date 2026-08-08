@@ -32,6 +32,7 @@ import {
 } from "./issue-execution-policy.js";
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
+import { logActivity } from "./activity-log.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import {
@@ -55,6 +56,32 @@ export type ExecutionWorkspaceBranchReconcileActor = {
   actorId: string;
   agentId: string | null;
   runId: string | null;
+};
+
+export type ExecutionWorkspaceGitWorktreeAdoptionActor = {
+  actorType: "agent" | "user";
+  actorId: string;
+  agentId: string | null;
+  runId: string | null;
+  agentApiKeyId: string | null;
+};
+
+export type ExecutionWorkspaceGitWorktreeAdoptionInspection = {
+  path: string;
+  gitTopLevel: string;
+  registeredWorktree: true;
+  clean: true;
+  statusEntryCount: 0;
+  expectedHeadSha: string;
+  actualHeadSha: string;
+  expectedTreeSha: string | null;
+  actualTreeSha: string;
+};
+
+export type ExecutionWorkspaceGitWorktreeAdoptionResult = {
+  workspace: ExecutionWorkspace;
+  inspection: ExecutionWorkspaceGitWorktreeAdoptionInspection;
+  activityId: string | null;
 };
 
 export type ExecutionWorkspaceBranchRefResolution = "resolved" | "missing" | "error";
@@ -188,6 +215,7 @@ async function readGitStdout(args: string[], cwd: string): Promise<string | null
 }
 
 function stableStringify(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
   }
@@ -196,6 +224,168 @@ function stableStringify(value: unknown): string {
     return `{${Object.keys(rec).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(rec[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function fingerprintExecutionWorkspaceRow(row: ExecutionWorkspaceRow) {
+  return createHash("sha256").update(stableStringify(row)).digest("hex");
+}
+
+function fingerprintRuntimeServiceRows(rows: WorkspaceRuntimeServiceRow[]) {
+  return createHash("sha256")
+    .update(stableStringify([...rows].sort((left, right) => left.id.localeCompare(right.id))))
+    .digest("hex");
+}
+
+function assertGitWorktreeAdoptionMetadata(row: ExecutionWorkspaceRow) {
+  const metadata = isRecord(row.metadata) ? row.metadata : null;
+  const realization = isRecord(metadata?.workspaceRealization) ? metadata.workspaceRealization : null;
+  const local = isRecord(realization?.local) ? realization.local : null;
+  const cwd = readNullableString(row.cwd);
+  const realizationPath = readNullableString(local?.path);
+  const realizationWorktreePath = readNullableString(local?.worktreePath);
+  const pathMatches = Boolean(cwd && realizationPath && path.resolve(realizationPath) === path.resolve(cwd));
+  const worktreePathMatches = !realizationWorktreePath
+    || Boolean(cwd && path.resolve(realizationWorktreePath) === path.resolve(cwd));
+
+  if (
+    metadata?.createdByRuntime !== true
+    || metadata?.source !== "git_worktree"
+    || local?.source !== "git_worktree"
+    || local?.strategy !== "git_worktree"
+    || !pathMatches
+    || !worktreePathMatches
+  ) {
+    throw unprocessable(
+      "Execution workspace lacks matching runtime-created git_worktree realization metadata",
+      {
+        code: "execution_workspace_git_worktree_adoption_metadata_mismatch",
+        createdByRuntime: metadata?.createdByRuntime === true,
+        metadataSource: readNullableString(metadata?.source),
+        realizationSource: readNullableString(local?.source),
+        realizationStrategy: readNullableString(local?.strategy),
+        cwd,
+        realizationPath,
+        realizationWorktreePath,
+      },
+    );
+  }
+}
+
+export async function inspectExecutionWorkspaceGitWorktreeAdoption(input: {
+  cwd: string;
+  expectedHeadSha: string;
+  expectedTreeSha: string | null;
+  projectPrimaryPaths: string[];
+  gitRunner?: typeof runGit;
+}): Promise<ExecutionWorkspaceGitWorktreeAdoptionInspection> {
+  const gitRunner = input.gitRunner ?? runGit;
+  const expectedHeadSha = input.expectedHeadSha.toLowerCase();
+  const expectedTreeSha = input.expectedTreeSha?.toLowerCase() ?? null;
+  const requestedPath = path.resolve(input.cwd);
+
+  try {
+    const stat = await fs.stat(requestedPath);
+    if (!stat.isDirectory()) {
+      throw unprocessable("Execution workspace cwd must be an existing directory", {
+        code: "execution_workspace_git_worktree_adoption_path_missing",
+        path: requestedPath,
+      });
+    }
+    const verifiedPath = await fs.realpath(requestedPath);
+    const gitTopLevelRaw = (await gitRunner(["rev-parse", "--show-toplevel"], verifiedPath)).stdout.trim();
+    const gitTopLevel = await fs.realpath(path.resolve(gitTopLevelRaw));
+    if (gitTopLevel !== verifiedPath || requestedPath !== path.resolve(gitTopLevelRaw)) {
+      throw unprocessable("Execution workspace cwd must be the exact Git toplevel", {
+        code: "execution_workspace_git_worktree_adoption_not_toplevel",
+        path: requestedPath,
+        gitTopLevel,
+      });
+    }
+
+    const worktreeOutput = (await gitRunner(["worktree", "list", "--porcelain", "-z"], verifiedPath)).stdout;
+    const registeredPaths = worktreeOutput
+      .split("\0")
+      .filter((entry) => entry.startsWith("worktree "))
+      .map((entry) => entry.slice("worktree ".length));
+    const canonicalRegisteredPaths: string[] = [];
+    for (const registeredPath of registeredPaths) {
+      try {
+        canonicalRegisteredPaths.push(await fs.realpath(path.resolve(registeredPath)));
+      } catch {
+        canonicalRegisteredPaths.push(path.resolve(registeredPath));
+      }
+    }
+    const registeredIndex = canonicalRegisteredPaths.indexOf(verifiedPath);
+    if (registeredIndex < 0) {
+      throw unprocessable("Execution workspace cwd is not registered in git worktree list", {
+        code: "execution_workspace_git_worktree_adoption_unregistered",
+        path: verifiedPath,
+        registered: false,
+      });
+    }
+
+    const canonicalPrimaryPaths: string[] = [];
+    for (const primaryPath of input.projectPrimaryPaths) {
+      try {
+        canonicalPrimaryPaths.push(await fs.realpath(path.resolve(primaryPath)));
+      } catch {
+        canonicalPrimaryPaths.push(path.resolve(primaryPath));
+      }
+    }
+    if (registeredIndex === 0 || canonicalPrimaryPaths.includes(verifiedPath)) {
+      throw unprocessable("Project primary and Git root worktrees cannot be adopted as isolated workspaces", {
+        code: "execution_workspace_git_worktree_adoption_project_root",
+        path: verifiedPath,
+      });
+    }
+
+    const statusOutput = (await gitRunner(["status", "--porcelain=v1", "--untracked-files=all"], verifiedPath)).stdout;
+    const statusEntries = statusOutput.split(/\r?\n/).filter(Boolean);
+    if (statusEntries.length > 0) {
+      throw unprocessable("Execution workspace git worktree must be clean, including untracked files", {
+        code: "execution_workspace_git_worktree_adoption_dirty",
+        path: verifiedPath,
+        clean: false,
+        statusEntryCount: statusEntries.length,
+      });
+    }
+
+    const actualHeadSha = (await gitRunner(["rev-parse", "--verify", "HEAD^{commit}"], verifiedPath)).stdout.trim().toLowerCase();
+    const actualTreeSha = (await gitRunner(["rev-parse", "--verify", "HEAD^{tree}"], verifiedPath)).stdout.trim().toLowerCase();
+    if (actualHeadSha !== expectedHeadSha) {
+      throw unprocessable("Execution workspace HEAD does not match expectedHeadSha", {
+        code: "execution_workspace_git_worktree_adoption_head_mismatch",
+        expectedHeadSha,
+        actualHeadSha,
+      });
+    }
+    if (expectedTreeSha && actualTreeSha !== expectedTreeSha) {
+      throw unprocessable("Execution workspace tree does not match expectedTreeSha", {
+        code: "execution_workspace_git_worktree_adoption_tree_mismatch",
+        expectedTreeSha,
+        actualTreeSha,
+      });
+    }
+
+    return {
+      path: verifiedPath,
+      gitTopLevel,
+      registeredWorktree: true,
+      clean: true,
+      statusEntryCount: 0,
+      expectedHeadSha,
+      actualHeadSha,
+      expectedTreeSha,
+      actualTreeSha,
+    };
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "status" in error) throw error;
+    throw unprocessable("Could not fail-closed verify the execution workspace Git worktree", {
+      code: "execution_workspace_git_worktree_adoption_verification_failed",
+      path: requestedPath,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function formatBranchForMessage(branch: string | null | undefined) {
@@ -880,6 +1070,33 @@ function selectPrimaryOverviewService(services: WorkspaceRuntimeService[]) {
 function usesInheritedProjectRuntimeServices(row: ExecutionWorkspaceRow) {
   if (row.mode !== "shared_workspace" || !row.projectWorkspaceId) return false;
   return !readExecutionWorkspaceConfig((row.metadata as Record<string, unknown> | null) ?? null)?.workspaceRuntime;
+}
+
+function runtimeServicesForGitWorktreeAdoptionCondition(row: ExecutionWorkspaceRow) {
+  if (usesInheritedProjectRuntimeServices(row)) {
+    return and(
+      eq(workspaceRuntimeServices.companyId, row.companyId),
+      or(
+        and(
+          eq(workspaceRuntimeServices.projectWorkspaceId, row.projectWorkspaceId!),
+          eq(workspaceRuntimeServices.scopeType, "project_workspace"),
+        ),
+        eq(workspaceRuntimeServices.executionWorkspaceId, row.id),
+      ),
+    );
+  }
+  return and(
+    eq(workspaceRuntimeServices.companyId, row.companyId),
+    eq(workspaceRuntimeServices.executionWorkspaceId, row.id),
+  );
+}
+
+async function listRuntimeServiceRowsForGitWorktreeAdoption(db: Db, row: ExecutionWorkspaceRow) {
+  return await db
+    .select()
+    .from(workspaceRuntimeServices)
+    .where(runtimeServicesForGitWorktreeAdoptionCondition(row))
+    .orderBy(asc(workspaceRuntimeServices.id));
 }
 
 function noActiveRuntimeServicesForWorkspaceCondition(row: ExecutionWorkspaceRow) {
@@ -1693,6 +1910,213 @@ export function executionWorkspaceService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null);
       return row ? toExecutionWorkspace(row) : null;
+    },
+
+    adoptGitWorktree: async (
+      id: string,
+      input: {
+        expectedHeadSha: string;
+        expectedTreeSha?: string | null;
+        reason: string;
+        actor: ExecutionWorkspaceGitWorktreeAdoptionActor;
+      },
+    ): Promise<ExecutionWorkspaceGitWorktreeAdoptionResult> => {
+      const expectedHeadSha = input.expectedHeadSha.trim().toLowerCase();
+      const expectedTreeSha = input.expectedTreeSha?.trim().toLowerCase() ?? null;
+      const reason = input.reason.trim();
+      const isFullSha = (value: string) =>
+        value.length === 40 && value.split("").every((char) => "0123456789abcdef".includes(char));
+      if (!isFullSha(expectedHeadSha) || (expectedTreeSha !== null && !isFullSha(expectedTreeSha)) || !reason) {
+        throw unprocessable("Git worktree adoption requires full expected SHAs and a non-empty reason", {
+          code: "execution_workspace_git_worktree_adoption_invalid_request",
+        });
+      }
+
+      const existingRow = await db
+        .select()
+        .from(executionWorkspaces)
+        .where(eq(executionWorkspaces.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!existingRow) throw notFound("Execution workspace not found");
+      const initialRowFingerprint = fingerprintExecutionWorkspaceRow(existingRow);
+      const initialRuntimeServices = await listRuntimeServiceRowsForGitWorktreeAdoption(db, existingRow);
+      const initialRuntimeServicesFingerprint = fingerprintRuntimeServiceRows(initialRuntimeServices);
+
+      return db.transaction(async (tx) => {
+        const txDb = tx as unknown as Db;
+        const lockedRow = await tx
+          .select()
+          .from(executionWorkspaces)
+          .where(eq(executionWorkspaces.id, id))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedRow) throw notFound("Execution workspace not found");
+        if (fingerprintExecutionWorkspaceRow(lockedRow) !== initialRowFingerprint) {
+          throw conflict("Execution workspace changed during git worktree adoption; retry with fresh state", {
+            code: "execution_workspace_git_worktree_adoption_row_race",
+          });
+        }
+
+        const lockedProjectWorkspaces = await tx
+          .select({
+            id: projectWorkspaces.id,
+            cwd: projectWorkspaces.cwd,
+            isPrimary: projectWorkspaces.isPrimary,
+          })
+          .from(projectWorkspaces)
+          .where(and(
+            eq(projectWorkspaces.companyId, lockedRow.companyId),
+            eq(projectWorkspaces.projectId, lockedRow.projectId),
+          ))
+          .for("update");
+
+        await tx
+          .select({ id: workspaceRuntimeServices.id })
+          .from(workspaceRuntimeServices)
+          .where(runtimeServicesForGitWorktreeAdoptionCondition(lockedRow))
+          .for("update");
+        const currentRuntimeServices = await listRuntimeServiceRowsForGitWorktreeAdoption(txDb, lockedRow);
+        if (fingerprintRuntimeServiceRows(currentRuntimeServices) !== initialRuntimeServicesFingerprint) {
+          throw conflict("Runtime services changed during git worktree adoption; retry with fresh state", {
+            code: "execution_workspace_git_worktree_adoption_service_race",
+          });
+        }
+
+        if (
+          !["active", "idle"].includes(lockedRow.status)
+          || lockedRow.closedAt !== null
+          || lockedRow.mode !== "shared_workspace"
+          || lockedRow.strategyType !== "project_primary"
+          || lockedRow.providerType !== "local_fs"
+        ) {
+          throw unprocessable("Execution workspace is not an active or idle shared local project_primary row", {
+            code: "execution_workspace_git_worktree_adoption_ineligible_state",
+            status: lockedRow.status,
+            closedAt: lockedRow.closedAt,
+            mode: lockedRow.mode,
+            strategyType: lockedRow.strategyType,
+            providerType: lockedRow.providerType,
+          });
+        }
+        if (!lockedRow.sourceIssueId) {
+          throw unprocessable("Execution workspace needs a source issue before Git worktree adoption", {
+            code: "execution_workspace_git_worktree_adoption_missing_source_issue",
+          });
+        }
+        assertGitWorktreeAdoptionMetadata(lockedRow);
+        const cwd = readNullableString(lockedRow.cwd);
+        if (!cwd) {
+          throw unprocessable("Execution workspace needs a local cwd before Git worktree adoption", {
+            code: "execution_workspace_git_worktree_adoption_path_missing",
+          });
+        }
+        if (lockedRow.baseRef?.toLowerCase() !== expectedHeadSha) {
+          throw unprocessable("Execution workspace baseRef must equal expectedHeadSha as a full SHA", {
+            code: "execution_workspace_git_worktree_adoption_base_ref_mismatch",
+            recordedBaseRef: lockedRow.baseRef,
+            expectedHeadSha,
+          });
+        }
+
+        const activeRuntimeServices = currentRuntimeServices.filter((service) => service.status !== "stopped");
+        if (activeRuntimeServices.length > 0) {
+          throw unprocessable("Execution workspace Git worktree adoption requires all runtime services to be stopped", {
+            code: "execution_workspace_git_worktree_adoption_active_service",
+            runtimeServices: activeRuntimeServices.map((service) => ({
+              id: service.id,
+              serviceName: service.serviceName,
+              status: service.status,
+            })),
+          });
+        }
+
+        const inspection = await inspectExecutionWorkspaceGitWorktreeAdoption({
+          cwd,
+          expectedHeadSha,
+          expectedTreeSha,
+          projectPrimaryPaths: lockedProjectWorkspaces
+            .filter((workspace) => workspace.isPrimary && workspace.cwd)
+            .map((workspace) => workspace.cwd!),
+        });
+        const now = new Date();
+        const updatedRow = await tx
+          .update(executionWorkspaces)
+          .set({
+            mode: "isolated_workspace",
+            strategyType: "git_worktree",
+            providerType: "git_worktree",
+            providerRef: inspection.path,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(executionWorkspaces.id, lockedRow.id),
+            eq(executionWorkspaces.companyId, lockedRow.companyId),
+            inArray(executionWorkspaces.status, ["active", "idle"]),
+            isNull(executionWorkspaces.closedAt),
+            eq(executionWorkspaces.mode, "shared_workspace"),
+            eq(executionWorkspaces.strategyType, "project_primary"),
+            eq(executionWorkspaces.providerType, "local_fs"),
+            eq(executionWorkspaces.cwd, lockedRow.cwd!),
+            eq(executionWorkspaces.baseRef, lockedRow.baseRef!),
+            noActiveRuntimeServicesForWorkspaceCondition(lockedRow),
+          ))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updatedRow) {
+          throw conflict("Execution workspace or runtime services changed during Git worktree adoption", {
+            code: "execution_workspace_git_worktree_adoption_commit_race",
+          });
+        }
+
+        const activity = await logActivity(txDb, {
+          companyId: lockedRow.companyId,
+          actorType: input.actor.actorType,
+          actorId: input.actor.actorId,
+          agentId: input.actor.agentId,
+          runId: input.actor.runId,
+          agentApiKeyId: input.actor.agentApiKeyId,
+          issueId: lockedRow.sourceIssueId,
+          action: "execution_workspace.git_worktree_adopted",
+          entityType: "execution_workspace",
+          entityId: lockedRow.id,
+          details: {
+            before: {
+              status: lockedRow.status,
+              mode: lockedRow.mode,
+              strategyType: lockedRow.strategyType,
+              providerType: lockedRow.providerType,
+              providerRef: lockedRow.providerRef,
+              cwd: lockedRow.cwd,
+              baseRef: lockedRow.baseRef,
+              sourceIssueId: lockedRow.sourceIssueId,
+              updatedAt: lockedRow.updatedAt.toISOString(),
+            },
+            expectedHeadSha: inspection.expectedHeadSha,
+            actualHeadSha: inspection.actualHeadSha,
+            expectedTreeSha: inspection.expectedTreeSha,
+            actualTreeSha: inspection.actualTreeSha,
+            verifiedPath: inspection.path,
+            gitTopLevel: inspection.gitTopLevel,
+            registeredWorktree: inspection.registeredWorktree,
+            clean: inspection.clean,
+            statusEntryCount: inspection.statusEntryCount,
+            reason,
+            actor: {
+              type: input.actor.actorType,
+              id: input.actor.actorId,
+              agentId: input.actor.agentId,
+              runId: input.actor.runId,
+              agentApiKeyId: input.actor.agentApiKeyId,
+            },
+          },
+        });
+
+        return {
+          workspace: toExecutionWorkspace(updatedRow, currentRuntimeServices.map(toRuntimeService)),
+          inspection,
+          activityId: activity?.id ?? null,
+        };
+      });
     },
 
     reconcileExecutionWorkspaceBranch: async (

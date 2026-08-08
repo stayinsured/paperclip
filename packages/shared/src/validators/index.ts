@@ -547,6 +547,7 @@ export {
 } from "./artifact.js";
 
 export {
+  adoptExecutionWorkspaceGitWorktreeSchema,
   executionWorkspaceConfigSchema,
   reconcileExecutionWorkspaceBranchSchema,
   updateExecutionWorkspaceSchema,
@@ -558,6 +559,7 @@ export {
   executionWorkspaceCloseLinkedIssueSchema,
   executionWorkspaceCloseReadinessSchema,
   executionWorkspaceCloseReadinessStateSchema,
+  type AdoptExecutionWorkspaceGitWorktree,
   type ReconcileExecutionWorkspaceBranch,
   type UpdateExecutionWorkspace,
   type WorkspaceOverviewQuery,

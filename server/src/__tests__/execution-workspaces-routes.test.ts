@@ -10,6 +10,7 @@ const mockExecutionWorkspaceService = vi.hoisted(() => ({
   listSummaries: vi.fn(),
   getById: vi.fn(),
   getCloseReadiness: vi.fn(),
+  adoptGitWorktree: vi.fn(),
   reconcileExecutionWorkspaceBranch: vi.fn(),
   update: vi.fn(),
 }));
@@ -81,6 +82,7 @@ describe.sequential("execution workspace routes", () => {
       },
     ]);
     mockExecutionWorkspaceService.getById.mockResolvedValue(null);
+    mockExecutionWorkspaceService.adoptGitWorktree.mockResolvedValue(null);
     mockExecutionWorkspaceService.reconcileExecutionWorkspaceBranch.mockResolvedValue(null);
     mockHeartbeatService.wakeup.mockResolvedValue(null);
   });
@@ -134,6 +136,102 @@ describe.sequential("execution workspace routes", () => {
 
     expect(res.status).toBe(422);
     expect(mockExecutionWorkspaceService.listOverview).not.toHaveBeenCalled();
+  });
+
+  it("allows a same-company runtime manager to adopt a verified Git worktree", async () => {
+    const expectedHeadSha = "1".repeat(40);
+    const expectedTreeSha = "2".repeat(40);
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      id: "workspace-1",
+      companyId: "company-1",
+      sourceIssueId: "issue-1",
+    });
+    mockExecutionWorkspaceService.adoptGitWorktree.mockResolvedValue({
+      workspace: { id: "workspace-1", mode: "isolated_workspace", strategyType: "git_worktree" },
+      inspection: { expectedHeadSha, actualHeadSha: expectedHeadSha },
+      activityId: "activity-1",
+    });
+
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "agent-1",
+      companyId: "company-1",
+      source: "agent_jwt",
+      runId: "run-1",
+      keyId: "key-1",
+    }))
+      .post("/api/execution-workspaces/workspace-1/adopt-git-worktree")
+      .send({ expectedHeadSha, expectedTreeSha, reason: "adopt exact validation worktree" });
+
+    expect(res.status).toBe(200);
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({
+      action: "runtime:manage",
+      resource: { type: "company", companyId: "company-1" },
+    }));
+    expect(mockExecutionWorkspaceService.adoptGitWorktree).toHaveBeenCalledWith("workspace-1", {
+      expectedHeadSha,
+      expectedTreeSha,
+      reason: "adopt exact validation worktree",
+      actor: {
+        actorType: "agent",
+        actorId: "agent-1",
+        agentId: "agent-1",
+        runId: "run-1",
+        agentApiKeyId: "key-1",
+      },
+    });
+  });
+
+  it("rejects Git worktree adoption without runtime-manage authorization", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      id: "workspace-1",
+      companyId: "company-1",
+      sourceIssueId: "issue-1",
+    });
+    mockAccessService.decide.mockResolvedValue({
+      allowed: false,
+      action: "runtime:manage",
+      reason: "missing_permission",
+      explanation: "Denied by test mock.",
+    });
+
+    const res = await request(createApp())
+      .post("/api/execution-workspaces/workspace-1/adopt-git-worktree")
+      .send({ expectedHeadSha: "1".repeat(40), reason: "operator reason" });
+
+    expect(res.status).toBe(403);
+    expect(mockExecutionWorkspaceService.adoptGitWorktree).not.toHaveBeenCalled();
+  });
+
+  it("hides cross-company workspaces from Git worktree adoption", async () => {
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      id: "workspace-1",
+      companyId: "company-1",
+      sourceIssueId: "issue-1",
+    });
+
+    const res = await request(createApp({
+      type: "agent",
+      agentId: "agent-2",
+      companyId: "company-2",
+      source: "agent_jwt",
+      runId: "run-2",
+    }))
+      .post("/api/execution-workspaces/workspace-1/adopt-git-worktree")
+      .send({ expectedHeadSha: "1".repeat(40), reason: "operator reason" });
+
+    expect(res.status).toBe(404);
+    expect(mockExecutionWorkspaceService.adoptGitWorktree).not.toHaveBeenCalled();
+  });
+
+  it("requires a full expected HEAD SHA and non-empty adoption reason", async () => {
+    const res = await request(createApp())
+      .post("/api/execution-workspaces/workspace-1/adopt-git-worktree")
+      .send({ expectedHeadSha: "abc123", reason: "  " });
+
+    expect(res.status).toBe(400);
+    expect(mockExecutionWorkspaceService.getById).not.toHaveBeenCalled();
+    expect(mockExecutionWorkspaceService.adoptGitWorktree).not.toHaveBeenCalled();
   });
 
   it.each([
