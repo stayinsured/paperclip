@@ -32,6 +32,7 @@ import {
   readExecutionWorkspaceConfig,
 } from "../services/execution-workspaces.ts";
 import {
+  ensurePersistedExecutionWorkspaceAvailable,
   startRuntimeServicesForWorkspaceControl,
   stopRuntimeServicesForExecutionWorkspace,
 } from "../services/workspace-runtime.ts";
@@ -263,12 +264,21 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     agentApiKeyId: null,
   };
 
-  async function seedAdoptableGitWorktree() {
-    const repoRoot = await createTempRepo();
+  async function seedAdoptableGitWorktree(input: {
+    registry?: "project_primary" | "bare_origin";
+  } = {}) {
+    const sourceRepo = await createTempRepo();
+    tempDirs.add(sourceRepo);
+    const bareOrigin = path.join(path.dirname(sourceRepo), "paperclip-adopt-origin-" + randomUUID() + ".git");
+    const repoRoot = path.join(path.dirname(sourceRepo), "paperclip-adopt-primary-" + randomUUID());
+    tempDirs.add(bareOrigin);
     tempDirs.add(repoRoot);
+    await execFileAsync("git", ["clone", "--bare", sourceRepo, bareOrigin], { cwd: path.dirname(sourceRepo) });
+    await execFileAsync("git", ["clone", bareOrigin, repoRoot], { cwd: path.dirname(sourceRepo) });
     const worktreePath = path.join(path.dirname(repoRoot), "paperclip-adopt-worktree-" + randomUUID());
     tempDirs.add(worktreePath);
-    await runGit(repoRoot, ["worktree", "add", "--detach", worktreePath, "HEAD"]);
+    const registryRoot = input.registry === "bare_origin" ? bareOrigin : repoRoot;
+    await runGit(registryRoot, ["worktree", "add", "--detach", worktreePath, "HEAD"]);
     const headSha = (await readGit(worktreePath, ["rev-parse", "HEAD"]))!;
     const treeSha = (await readGit(worktreePath, ["rev-parse", "HEAD^{tree}"]))!;
     const companyId = randomUUID();
@@ -320,6 +330,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       sourceType: "git_repo",
       isPrimary: true,
       cwd: repoRoot,
+      repoUrl: bareOrigin,
     });
     await db.insert(issues).values({
       id: issueId,
@@ -366,6 +377,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
 
     return {
       repoRoot,
+      bareOrigin,
       worktreePath,
       headSha,
       treeSha,
@@ -401,6 +413,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     expect(result.inspection).toEqual({
       path: fixture.worktreePath,
       gitTopLevel: fixture.worktreePath,
+      authoritativeRepoRoot: fixture.repoRoot,
       registeredWorktree: true,
       clean: true,
       statusEntryCount: 0,
@@ -436,11 +449,88 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       expectedTreeSha: fixture.treeSha,
       actualTreeSha: fixture.treeSha,
       verifiedPath: fixture.worktreePath,
+      authoritativeRepoRoot: "***REDACTED***",
       registeredWorktree: true,
       clean: true,
       reason: "Adopt the validated exact-SHA runtime worktree",
       actor: { type: "user", id: "local-board", runId: null },
     });
+
+    const reused = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: fixture.repoRoot,
+        source: "project_primary",
+        projectId: fixture.projectId,
+        workspaceId: fixture.projectWorkspaceId,
+        repoUrl: fixture.bareOrigin,
+        repoRef: "main",
+      },
+      workspace: {
+        id: fixture.executionWorkspaceId,
+        mode: result.workspace.mode,
+        strategyType: result.workspace.strategyType,
+        cwd: result.workspace.cwd,
+        providerRef: result.workspace.providerRef,
+        projectId: fixture.projectId,
+        projectWorkspaceId: fixture.projectWorkspaceId,
+        repoUrl: fixture.bareOrigin,
+        baseRef: fixture.headSha,
+        branchName: result.workspace.branchName,
+        metadata: fixture.metadata,
+      },
+      issue: {
+        id: fixture.issueId,
+        identifier: "STA-2004",
+        title: "Reuse accepted exact-SHA worktree",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Backend Engineer",
+        companyId: fixture.companyId,
+      },
+    });
+
+    expect(reused).toMatchObject({
+      cwd: fixture.worktreePath,
+      worktreePath: fixture.worktreePath,
+      strategy: "git_worktree",
+      created: false,
+    });
+  }, 20_000);
+
+  it("rejects a candidate registered only in the distinct bare origin without mutation or activity", async () => {
+    const fixture = await seedAdoptableGitWorktree({ registry: "bare_origin" });
+    const [before] = await db
+      .select()
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId));
+
+    await expect(svc.adoptGitWorktree(fixture.executionWorkspaceId, {
+      expectedHeadSha: fixture.headSha,
+      expectedTreeSha: fixture.treeSha,
+      reason: "Reject a non-authoritative registry",
+      actor: adoptionActor,
+    })).rejects.toMatchObject({
+      status: 422,
+      details: {
+        code: "execution_workspace_git_worktree_adoption_unregistered",
+        authoritativeRepoRoot: fixture.repoRoot,
+        registered: false,
+        reasonCode: "not_registered",
+      },
+    });
+
+    const [after] = await db
+      .select()
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId));
+    const adoptionActivities = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, fixture.executionWorkspaceId));
+
+    expect(after).toEqual(before);
+    expect(adoptionActivities).toEqual([]);
   }, 20_000);
 
   it("rejects adoption when the worktree has untracked files", async () => {
@@ -505,13 +595,14 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       cwd: repoRoot,
       expectedHeadSha: headSha,
       expectedTreeSha: null,
+      authoritativeProjectWorkspacePath: repoRoot,
       projectPrimaryPaths: [],
       gitRunner: async (args) => {
         if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
           return { stdout: repoRoot + "\n", stderr: "" };
         }
         if (args[0] === "worktree") {
-          return { stdout: "worktree /different/path\0HEAD " + headSha + "\0\0", stderr: "" };
+          return { stdout: "worktree /different/path\nHEAD " + headSha + "\n\n", stderr: "" };
         }
         throw new Error("Unexpected git command");
       },
@@ -530,6 +621,7 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       cwd: repoRoot,
       expectedHeadSha: headSha,
       expectedTreeSha: null,
+      authoritativeProjectWorkspacePath: repoRoot,
       projectPrimaryPaths: [repoRoot],
     })).rejects.toMatchObject({
       status: 422,

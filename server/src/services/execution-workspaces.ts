@@ -35,6 +35,7 @@ import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { logActivity } from "./activity-log.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
+import { inspectManagedGitWorktreeBranch } from "./git-worktree-registry.js";
 import {
   listCurrentRuntimeServicesForExecutionWorkspaces,
   listCurrentRuntimeServicesForProjectWorkspaces,
@@ -69,6 +70,7 @@ export type ExecutionWorkspaceGitWorktreeAdoptionActor = {
 export type ExecutionWorkspaceGitWorktreeAdoptionInspection = {
   path: string;
   gitTopLevel: string;
+  authoritativeRepoRoot: string;
   registeredWorktree: true;
   clean: true;
   statusEntryCount: 0;
@@ -275,6 +277,7 @@ export async function inspectExecutionWorkspaceGitWorktreeAdoption(input: {
   cwd: string;
   expectedHeadSha: string;
   expectedTreeSha: string | null;
+  authoritativeProjectWorkspacePath: string;
   projectPrimaryPaths: string[];
   gitRunner?: typeof runGit;
 }): Promise<ExecutionWorkspaceGitWorktreeAdoptionInspection> {
@@ -302,25 +305,27 @@ export async function inspectExecutionWorkspaceGitWorktreeAdoption(input: {
       });
     }
 
-    const worktreeOutput = (await gitRunner(["worktree", "list", "--porcelain", "-z"], verifiedPath)).stdout;
-    const registeredPaths = worktreeOutput
-      .split("\0")
-      .filter((entry) => entry.startsWith("worktree "))
-      .map((entry) => entry.slice("worktree ".length));
-    const canonicalRegisteredPaths: string[] = [];
-    for (const registeredPath of registeredPaths) {
-      try {
-        canonicalRegisteredPaths.push(await fs.realpath(path.resolve(registeredPath)));
-      } catch {
-        canonicalRegisteredPaths.push(path.resolve(registeredPath));
-      }
-    }
-    const registeredIndex = canonicalRegisteredPaths.indexOf(verifiedPath);
-    if (registeredIndex < 0) {
-      throw unprocessable("Execution workspace cwd is not registered in git worktree list", {
-        code: "execution_workspace_git_worktree_adoption_unregistered",
+    const authoritativeProjectWorkspacePath = await fs.realpath(path.resolve(input.authoritativeProjectWorkspacePath));
+    const authoritativeRepoRootRaw = (
+      await gitRunner(["rev-parse", "--show-toplevel"], authoritativeProjectWorkspacePath)
+    ).stdout.trim();
+    const authoritativeRepoRoot = await fs.realpath(path.resolve(authoritativeRepoRootRaw));
+    const managedInspection = await inspectManagedGitWorktreeBranch({
+      repoRoot: authoritativeRepoRoot,
+      worktreePath: verifiedPath,
+      expectedBranchName: null,
+      gitRunner: async (args, cwd) => (await gitRunner(args, cwd)).stdout.trim(),
+    });
+    if (!managedInspection.valid) {
+      throw unprocessable("Execution workspace cwd is not reusable from the authoritative project Git registry", {
+        code: managedInspection.reasonCode === "not_registered"
+          ? "execution_workspace_git_worktree_adoption_unregistered"
+          : "execution_workspace_git_worktree_adoption_not_reusable",
         path: verifiedPath,
+        authoritativeRepoRoot,
         registered: false,
+        reason: managedInspection.reason,
+        reasonCode: managedInspection.reasonCode,
       });
     }
 
@@ -332,7 +337,7 @@ export async function inspectExecutionWorkspaceGitWorktreeAdoption(input: {
         canonicalPrimaryPaths.push(path.resolve(primaryPath));
       }
     }
-    if (registeredIndex === 0 || canonicalPrimaryPaths.includes(verifiedPath)) {
+    if (verifiedPath === authoritativeRepoRoot || canonicalPrimaryPaths.includes(verifiedPath)) {
       throw unprocessable("Project primary and Git root worktrees cannot be adopted as isolated workspaces", {
         code: "execution_workspace_git_worktree_adoption_project_root",
         path: verifiedPath,
@@ -370,6 +375,7 @@ export async function inspectExecutionWorkspaceGitWorktreeAdoption(input: {
     return {
       path: verifiedPath,
       gitTopLevel,
+      authoritativeRepoRoot,
       registeredWorktree: true,
       clean: true,
       statusEntryCount: 0,
@@ -2030,10 +2036,22 @@ export function executionWorkspaceService(db: Db) {
           });
         }
 
+        const authoritativeProjectWorkspace = lockedProjectWorkspaces.find(
+          (workspace) => workspace.id === lockedRow.projectWorkspaceId,
+        );
+        const authoritativeProjectWorkspacePath = readNullableString(authoritativeProjectWorkspace?.cwd);
+        if (!authoritativeProjectWorkspacePath) {
+          throw unprocessable("Execution workspace has no authoritative project Git registry checkout", {
+            code: "execution_workspace_git_worktree_adoption_authoritative_registry_missing",
+            projectWorkspaceId: lockedRow.projectWorkspaceId,
+          });
+        }
+
         const inspection = await inspectExecutionWorkspaceGitWorktreeAdoption({
           cwd,
           expectedHeadSha,
           expectedTreeSha,
+          authoritativeProjectWorkspacePath,
           projectPrimaryPaths: lockedProjectWorkspaces
             .filter((workspace) => workspace.isPrimary && workspace.cwd)
             .map((workspace) => workspace.cwd!),
@@ -2097,6 +2115,7 @@ export function executionWorkspaceService(db: Db) {
             actualTreeSha: inspection.actualTreeSha,
             verifiedPath: inspection.path,
             gitTopLevel: inspection.gitTopLevel,
+            authoritativeRepoRoot: inspection.authoritativeRepoRoot,
             registeredWorktree: inspection.registeredWorktree,
             clean: inspection.clean,
             statusEntryCount: inspection.statusEntryCount,

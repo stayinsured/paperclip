@@ -39,6 +39,11 @@ import { executionWorkspaceService, readExecutionWorkspaceConfig } from "./execu
 import { logActivity } from "./activity-log.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import {
+  formatManagedGitWorktreeBranchInspection,
+  inspectManagedGitWorktreeBranch,
+  type ManagedGitWorktreeBranchInspection,
+} from "./git-worktree-registry.js";
+import {
   cleanupWorktreeInstanceArtifacts,
   deriveWorktreeInstanceId,
   readWorktreeInstancePointer,
@@ -2128,21 +2133,11 @@ type GitWorktreeListEntry = {
   branch: string | null;
 };
 
-export type ManagedGitWorktreeBranchInspection = {
-  valid: boolean;
-  reason: string | null;
-  reasonCode:
-    | "missing_worktree"
-    | "not_a_git_checkout"
-    | "not_registered"
-    | "wrong_repository_root"
-    | "branch_mismatch"
-    | null;
-  repoRoot: string | null;
-  worktreePath: string;
-  expectedBranchName: string | null;
-  actualBranchName: string | null;
-};
+export {
+  formatManagedGitWorktreeBranchInspection,
+  inspectManagedGitWorktreeBranch,
+} from "./git-worktree-registry.js";
+export type { ManagedGitWorktreeBranchInspection } from "./git-worktree-registry.js";
 
 function parseGitWorktreeListPorcelain(raw: string): GitWorktreeListEntry[] {
   const entries: GitWorktreeListEntry[] = [];
@@ -2260,101 +2255,6 @@ async function resolvePathForWorktreeComparison(value: string): Promise<string> 
   return fs.realpath(resolved).then((realPath) => path.resolve(realPath)).catch(() => resolved);
 }
 
-async function listLinkedGitWorktreePaths(repoRoot: string): Promise<Set<string>> {
-  const output = await runGit(["worktree", "list", "--porcelain"], repoRoot);
-  const paths = new Set<string>();
-  for (const line of output.split("\n")) {
-    if (!line.startsWith("worktree ")) continue;
-    const worktree = line.slice("worktree ".length).trim();
-    if (!worktree) continue;
-    paths.add(await resolvePathForWorktreeComparison(worktree));
-  }
-  return paths;
-}
-
-export async function inspectManagedGitWorktreeBranch(input: {
-  worktreePath: string;
-  expectedBranchName: string | null | undefined;
-  repoRoot?: string | null;
-}): Promise<ManagedGitWorktreeBranchInspection> {
-  const worktreePath = await resolvePathForWorktreeComparison(input.worktreePath);
-  const expectedBranchName = asString(input.expectedBranchName, "").trim() || null;
-  const base = {
-    worktreePath,
-    expectedBranchName,
-    actualBranchName: null,
-  };
-
-  if (!await directoryExists(worktreePath)) {
-    return {
-      ...base,
-      valid: false,
-      reason: `worktree path "${worktreePath}" does not exist`,
-      reasonCode: "missing_worktree",
-      repoRoot: input.repoRoot ? path.resolve(input.repoRoot) : null,
-    };
-  }
-
-  const repoRoot = input.repoRoot
-    ? path.resolve(input.repoRoot)
-    : await resolveGitOwnerRepoRoot(worktreePath).catch(() => null);
-  if (!repoRoot) {
-    return {
-      ...base,
-      valid: false,
-      reason: "path is not a git checkout",
-      reasonCode: "not_a_git_checkout",
-      repoRoot: null,
-    };
-  }
-
-  const listedWorktrees = await listLinkedGitWorktreePaths(repoRoot).catch(() => null);
-  if (!listedWorktrees?.has(worktreePath)) {
-    return {
-      ...base,
-      valid: false,
-      reason: "path is not registered in `git worktree list`",
-      reasonCode: "not_registered",
-      repoRoot,
-    };
-  }
-
-  const worktreeTopLevel = await runGit(["rev-parse", "--show-toplevel"], worktreePath).catch(() => null);
-  if (!worktreeTopLevel || path.resolve(worktreeTopLevel) !== worktreePath) {
-    return {
-      ...base,
-      valid: false,
-      reason: "git resolves this path to a different repository root",
-      reasonCode: "wrong_repository_root",
-      repoRoot,
-    };
-  }
-
-  const actualBranchName = await runGit(
-    ["symbolic-ref", "--quiet", "--short", "HEAD"],
-    worktreePath,
-  ).catch(() => null);
-  if (expectedBranchName && actualBranchName !== expectedBranchName) {
-    return {
-      ...base,
-      valid: false,
-      reason: `worktree HEAD is on "${actualBranchName ?? "<detached>"}" instead of "${expectedBranchName}"`,
-      reasonCode: "branch_mismatch",
-      repoRoot,
-      actualBranchName,
-    };
-  }
-
-  return {
-    ...base,
-    valid: true,
-    reason: null,
-    reasonCode: null,
-    repoRoot,
-    actualBranchName,
-  };
-}
-
 async function validateLinkedGitWorktree(input: {
   repoRoot: string;
   worktreePath: string;
@@ -2381,18 +2281,6 @@ async function validateLinkedGitWorktree(input: {
         reasonCode: inspection.reasonCode ?? "not_a_git_checkout",
         actualBranchName: inspection.actualBranchName,
       };
-}
-
-export function formatManagedGitWorktreeBranchInspection(input: ManagedGitWorktreeBranchInspection) {
-  return {
-    valid: input.valid,
-    reason: input.reason,
-    reasonCode: input.reasonCode,
-    repoRoot: input.repoRoot,
-    worktreePath: input.worktreePath,
-    expectedBranchName: input.expectedBranchName,
-    actualBranchName: input.actualBranchName,
-  };
 }
 
 function terminateChildProcess(child: ChildProcess) {

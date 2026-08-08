@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "../errors.js";
 import { errorHandler } from "../middleware/index.js";
 import { executionWorkspaceRoutes } from "../routes/execution-workspaces.js";
 
@@ -180,6 +181,40 @@ describe.sequential("execution workspace routes", () => {
         agentApiKeyId: "key-1",
       },
     });
+  });
+
+  it("returns the fail-closed authoritative-registry rejection without an adoption response", async () => {
+    const expectedHeadSha = "1".repeat(40);
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      id: "workspace-1",
+      companyId: "company-1",
+      sourceIssueId: "issue-1",
+    });
+    mockExecutionWorkspaceService.adoptGitWorktree.mockRejectedValue(new HttpError(
+      422,
+      "Execution workspace cwd is not reusable from the authoritative project Git registry",
+      {
+        code: "execution_workspace_git_worktree_adoption_unregistered",
+        registered: false,
+        reasonCode: "not_registered",
+      },
+    ));
+
+    const res = await request(createApp())
+      .post("/api/execution-workspaces/workspace-1/adopt-git-worktree")
+      .send({ expectedHeadSha, reason: "require authoritative registration" });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({
+      error: "Execution workspace cwd is not reusable from the authoritative project Git registry",
+      code: "execution_workspace_git_worktree_adoption_unregistered",
+      details: {
+        code: "execution_workspace_git_worktree_adoption_unregistered",
+        registered: false,
+        reasonCode: "not_registered",
+      },
+    });
+    expect(mockExecutionWorkspaceService.adoptGitWorktree).toHaveBeenCalledTimes(1);
   });
 
   it("rejects Git worktree adoption without runtime-manage authorization", async () => {
