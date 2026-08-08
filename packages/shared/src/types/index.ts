@@ -194,6 +194,7 @@ export type {
   CompanySkillTestRunTemplateUpdateRequest,
   CompanySkillTestRunTemplateSnapshot,
   CompanySkillTestRunCostSummary,
+  CompanySkillTestExecutionMode,
   CompanySkillTestRun,
   CompanySkillTestRunCreateRequest,
   CompanySkillTestRunListQuery,

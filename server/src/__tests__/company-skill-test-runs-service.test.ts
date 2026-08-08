@@ -171,6 +171,7 @@ describeEmbeddedPostgres("companySkillService skill test runs", () => {
     );
 
     expect(run.inputSnapshot).toBe("test this skill");
+    expect(run.executionMode).toBe("agentic");
     expect(run.executionProfile).toBe("standard");
     expect(run.templateId).toBe("built-in:default-test-template");
     expect(run.templateName).toBe("Default test template");
@@ -188,22 +189,26 @@ describeEmbeddedPostgres("companySkillService skill test runs", () => {
     expect(issue?.description).toBe(run.harnessIssueDescription);
   });
 
-  it("persists an explicit output-only execution profile", async () => {
+  it("persists explicit response-only mode with a legacy output-only projection", async () => {
     const { companyId, skillId, agentId } = await seedSkillAndAgent();
     const run = await svc.createTestRun(
       companyId,
       skillId,
-      { content: "sealed output run", agentId, executionProfile: "output_only" },
+      { content: "sealed output run", agentId, executionMode: "response_only" },
       { type: "user", userId: "local-board" },
       runDeps(companyId),
     );
 
+    expect(run.executionMode).toBe("response_only");
     expect(run.executionProfile).toBe("output_only");
-    const persisted = await db.select({ executionProfile: companySkillTestRuns.executionProfile })
+    const persisted = await db.select({
+      executionMode: companySkillTestRuns.executionMode,
+      executionProfile: companySkillTestRuns.executionProfile,
+    })
       .from(companySkillTestRuns)
       .where(eq(companySkillTestRuns.id, run.id))
       .then((rows) => rows[0]);
-    expect(persisted?.executionProfile).toBe("output_only");
+    expect(persisted).toEqual({ executionMode: "response_only", executionProfile: "output_only" });
   });
 
   it("honors No template without weakening the clean run snapshot", async () => {

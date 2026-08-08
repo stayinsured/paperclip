@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult, type AdapterResponseOnlyExecutionContext } from "@paperclipai/adapter-utils";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
@@ -107,6 +107,12 @@ import {
 } from "./acp.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const RESPONSE_ONLY_INHERITED_ENV_KEYS = new Set([
+  "PATH", "LANG", "LC_ALL", "TZ", "TMPDIR", "TMP", "TEMP",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY",
+  "NO_PROXY", "ALL_PROXY",
+]);
 const executeCodexAcp = createCodexAcpExecutor();
 const CODEX_ROLLOUT_NOISE_RE =
   /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::rollout::list:\s+state db missing rollout path for thread\s+[a-z0-9-]+$/i;
@@ -539,8 +545,32 @@ export async function ensureCodexSkillsInjected(
   );
 }
 
+export async function executeResponseOnly(
+  ctx: AdapterResponseOnlyExecutionContext,
+): Promise<AdapterExecutionResult> {
+  const adapterConfig = parseObject(ctx.config);
+  return execute({
+    runId: ctx.runId,
+    agent: { ...ctx.agent, adapterConfig: {} },
+    runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+    config: { ...adapterConfig, cwd: ctx.scratchDir },
+    context: { paperclipResponseOnlyPrompt: ctx.prompt },
+    executionProfile: {
+      kind: "skill_test_response_only",
+      testRunId: ctx.testRunId,
+      issueId: ctx.issueId,
+      outputDocumentKey: "output",
+    },
+    onLog: ctx.onLog,
+    onMeta: ctx.onMeta,
+    onEvent: ctx.onEvent,
+    onSpawn: ctx.onSpawn,
+  });
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const outputOnly = ctx.executionProfile?.kind === "skill_test_output_only";
+  const outputOnly = ctx.executionProfile?.kind === "skill_test_output_only"
+    || ctx.executionProfile?.kind === "skill_test_response_only";
   const engineSelection = outputOnly
     ? { engine: "cli" as const, explicit: true, fallbackReason: null }
     : await resolveCodexExecutionEngineForRun(ctx);
@@ -959,7 +989,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
     const inheritedEnv = outputOnly
-      ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("PAPERCLIP_")))
+      ? Object.fromEntries(
+          Object.entries(process.env).filter(([key]) => RESPONSE_ONLY_INHERITED_ENV_KEYS.has(key)),
+        )
       : process.env;
     const effectiveEnv = Object.fromEntries(
       Object.entries({ ...inheritedEnv, ...env }).filter(
@@ -1169,9 +1201,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (preparedRuntimeConfig.notes.length > 0) {
       commandNotes.unshift(...preparedRuntimeConfig.notes);
     }
-    const renderedPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
-      ? ""
-      : renderTemplate(promptTemplate, templateData);
+    const renderedPrompt = outputOnly
+      ? asString(context.paperclipResponseOnlyPrompt, "")
+      : shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
+        ? ""
+        : renderTemplate(promptTemplate, templateData);
     const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
     const prompt = joinPromptSections([
       promptInstructionsPrefix,

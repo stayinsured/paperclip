@@ -205,6 +205,7 @@ export {
   companySkillTestRunTemplateUpdateSchema,
   companySkillTestRunTemplateSnapshotSchema,
   companySkillTestRunCostSummarySchema,
+  companySkillTestExecutionModeSchema,
   companySkillTestRunSchema,
   companySkillTestRunCreateSchema,
   companySkillTestRunListQuerySchema,

@@ -29,6 +29,7 @@ import { trackSkillImported } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import {
   accessService,
+  agentService,
   companySkillService,
   heartbeatService,
   issueService,
@@ -40,7 +41,7 @@ import {
   listCatalogSkillsOrEmpty,
   readCatalogSkillFile,
 } from "../services/skills-catalog.js";
-import { badRequest, forbidden, unauthorized } from "../errors.js";
+import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertAuthenticated, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { getTelemetryClient } from "../telemetry.js";
 import {
@@ -49,6 +50,7 @@ import {
   type SkillPolicyPrincipal,
 } from "../services/company-skill-policy.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
+import { findActiveServerAdapter } from "../adapters/index.js";
 import {
   normalizeSkillPolicySourceLocator,
   type SkillPolicyAction,
@@ -86,6 +88,7 @@ type SkillPolicyResourceInput =
 export function companySkillRoutes(db: Db) {
   const router = Router();
   const access = accessService(db);
+  const agentDirectory = agentService(db);
   const svc = companySkillService(db);
   const issues = issueService(db);
   const heartbeat = heartbeatService(db);
@@ -95,6 +98,33 @@ export function companySkillRoutes(db: Db) {
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+  }
+
+  function requestsResponseOnlyExecution(value: { executionMode?: unknown; executionProfile?: unknown }) {
+    return value.executionMode === "response_only" || value.executionProfile === "output_only";
+  }
+
+  async function assertResponseOnlyAdapterCapability(companyId: string, agentId: string) {
+    const agent = await agentDirectory.getById(agentId);
+    if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
+    const adapter = findActiveServerAdapter(agent.adapterType);
+    const requiredCapability = "skill_test_response_only" as const;
+    if (
+      !adapter
+      || !adapter.supportedExecutionProfiles?.includes(requiredCapability)
+      || typeof adapter.executeResponseOnly !== "function"
+    ) {
+      throw unprocessable(
+        "Adapter " + agent.adapterType + " does not support response-only Skill Studio execution.",
+        {
+          code: "skill_test_response_only_unsupported_adapter",
+          adapterType: agent.adapterType,
+          requestedExecutionMode: "response_only",
+          requiredCapability,
+          supportedExecutionProfiles: adapter?.supportedExecutionProfiles ?? [],
+        },
+      );
+    }
   }
 
   function deriveTrackedSkillRef(skill: SkillTelemetryInput): string | null {
@@ -585,6 +615,9 @@ export function companySkillRoutes(db: Db) {
       await assertCanOrchestrateSkillTestHarness(req, companyId, {
         assigneeAgentId: req.body.agentId,
       });
+      if (requestsResponseOnlyExecution(req.body)) {
+        await assertResponseOnlyAdapterCapability(companyId, req.body.agentId);
+      }
       const actor = getActorInfo(req);
       const result = await svc.createTestRun(companyId, skillId, req.body, skillActor(req), {
         createHarnessIssue: async (harnessIssue) => {
@@ -625,7 +658,7 @@ export function companySkillRoutes(db: Db) {
           contextSnapshot: {
             issueId,
             source: "company.skill_test_run",
-            ...(req.body.executionProfile === "output_only" ? { skipIssueComment: true } : {}),
+            ...(requestsResponseOnlyExecution(req.body) ? { skipIssueComment: true } : {}),
           },
         }),
         cleanupHarnessIssue: async (issueId) => {
@@ -668,6 +701,7 @@ export function companySkillRoutes(db: Db) {
           skillVersionId: result.skillVersionId,
           agentId: result.agentId,
           issueId: result.issueId,
+          executionMode: result.executionMode,
         },
       });
       res.status(201).json(result);

@@ -15,6 +15,7 @@ export type {
   ServerAdapterModule,
   AcpTargetDescriptor,
   AdapterExecutionContext,
+  AdapterResponseOnlyExecutionContext,
   AdapterExecutionResult,
   AdapterInvocationMeta,
   AdapterRuntimeEvent,

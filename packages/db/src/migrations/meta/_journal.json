@@ -1450,6 +1450,13 @@
       "when": 1786140405438,
       "tag": "0208_skill_test_execution_profile",
       "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1786190836925,
+      "tag": "0209_skill_test_response_only_mode",
+      "breakpoints": true
     }
   ]
 }

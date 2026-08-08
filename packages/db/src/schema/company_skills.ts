@@ -8,6 +8,7 @@ import {
   index,
   integer,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { CompanySkillFileInventoryEntry, CompanySkillSharingScope } from "@paperclipai/shared";
@@ -213,6 +214,9 @@ export const companySkillTestRuns = pgTable(
     renderedTemplateBody: text("rendered_template_body"),
     harnessIssueDescription: text("harness_issue_description").notNull().default(""),
     status: text("status").notNull().default("queued"),
+    executionMode: text("execution_mode").notNull().default("agentic"),
+    // Compatibility projection for pre-response-only Skill Studio clients.
+    // New execution decisions use executionMode exclusively.
     executionProfile: text("execution_profile").notNull().default("standard"),
     outputDocumentKey: text("output_document_key").notNull().default("output"),
     outputSnapshot: text("output_snapshot").notNull().default(""),
@@ -240,6 +244,10 @@ export const companySkillTestRuns = pgTable(
     companyHarnessIssueExpiresIdx: index("company_skill_test_runs_company_harness_expires_idx").on(
       table.companyId,
       table.harnessIssueExpiresAt,
+    ),
+    executionModeCheck: check(
+      "company_skill_test_runs_execution_mode_check",
+      sql`${table.executionMode} in ('agentic', 'response_only')`,
     ),
   }),
 );

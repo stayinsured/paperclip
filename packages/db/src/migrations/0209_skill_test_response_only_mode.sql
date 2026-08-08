@@ -1,0 +1,3 @@
+ALTER TABLE "company_skill_test_runs" ADD COLUMN "execution_mode" text DEFAULT 'agentic' NOT NULL;--> statement-breakpoint
+UPDATE "company_skill_test_runs" SET "execution_mode" = 'response_only' WHERE "execution_profile" = 'output_only';--> statement-breakpoint
+ALTER TABLE "company_skill_test_runs" ADD CONSTRAINT "company_skill_test_runs_execution_mode_check" CHECK ("company_skill_test_runs"."execution_mode" in ('agentic', 'response_only'));

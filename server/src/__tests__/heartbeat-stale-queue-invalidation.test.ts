@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   agents,
   agentWakeupRequests,
+  agentTaskSessions,
   activityLog,
   companies,
   companySkillTestRuns,
@@ -13,9 +14,13 @@ import {
   createDb,
   documentRevisions,
   documents,
+  executionWorkspaces,
   heartbeatRuns,
+  issueAttachments,
   issueComments,
   issueDocuments,
+  issueThreadInteractions,
+  issueWorkProducts,
   issues,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
@@ -44,6 +49,18 @@ const mockAdapterExecute = vi.hoisted(() =>
   })),
 );
 
+const mockAdapterExecuteResponseOnly = vi.hoisted(() =>
+  vi.fn(async () => ({
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    errorMessage: null,
+    summary: "Response-only test result.",
+    provider: "test",
+    model: "test-model",
+  })),
+);
+
 vi.mock("../adapters/index.ts", async () => {
   const actual = await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts");
   return {
@@ -52,6 +69,7 @@ vi.mock("../adapters/index.ts", async () => {
       supportsLocalAgentJwt: false,
       supportedExecutionProfiles: mockSupportedExecutionProfiles,
       execute: mockAdapterExecute,
+      executeResponseOnly: mockAdapterExecuteResponseOnly,
     })),
   };
 });
@@ -148,6 +166,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
 
   const countExecuteCallsForRun = (runId: string) =>
     mockAdapterExecute.mock.calls.filter(([context]) => context?.runId === runId).length;
+  const countResponseOnlyCallsForRun = (runId: string) =>
+    mockAdapterExecuteResponseOnly.mock.calls.filter(([context]) => context?.runId === runId).length;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-stale-queue-");
@@ -167,6 +187,11 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       summary: "Stale-queue invalidation test run.",
       provider: "test",
       model: "test-model",
+    }));
+    mockAdapterExecuteResponseOnly.mockReset();
+    mockAdapterExecuteResponseOnly.mockImplementation(async () => ({
+      exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+      summary: "Response-only test result.", provider: "test", model: "test-model",
     }));
     runningProcesses.clear();
     let idlePolls = 0;
@@ -269,6 +294,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     companyId: string;
     agentId: string;
     executionProfile: "standard" | "output_only";
+    executionMode?: "agentic" | "response_only";
+    agentConfigSnapshot?: Record<string, unknown>;
   }) {
     const skillId = randomUUID();
     const versionId = randomUUID();
@@ -313,10 +340,12 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       inputSnapshot: "Transform this input",
       skillVersionId: versionId,
       agentId: input.agentId,
-      agentConfigSnapshot: {},
+      agentConfigSnapshot: input.agentConfigSnapshot ?? {},
       issueId,
+      renderedTemplateBody: "Persisted response template",
       harnessIssueDescription: "Transform this input",
       status: "queued",
+      ...(input.executionMode ? { executionMode: input.executionMode } : {}),
       executionProfile: input.executionProfile,
       outputDocumentKey: "output",
     });
@@ -2017,6 +2046,152 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     ]);
   }, 20_000);
 
+
+  it("dispatches response-only runs through the sealed adapter entry with no agentic context", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    await db.update(agents).set({
+      adapterConfig: {
+        command: "untrusted-command",
+        cwd: "/untrusted/repository",
+        instructionsFilePath: "/untrusted/AGENTS.md",
+        paperclipSkillSync: { desiredSkills: ["live-skill"] },
+        mcpServers: { unsafe: { url: "https://example.invalid" } },
+        env: { UNRELATED_SECRET: "must-not-pass" },
+      },
+    }).where(eq(agents.id, agentId));
+    const harness = await seedSkillTestHarness({
+      companyId,
+      agentId,
+      executionMode: "response_only",
+      executionProfile: "output_only",
+      agentConfigSnapshot: {
+        adapterType: "codex_local",
+        adapterConfig: {
+          model: "pinned-model",
+          instructionsFilePath: "/snapshot/AGENTS.md",
+          cwd: "/snapshot/repository",
+          paperclipSkillSync: { desiredSkills: ["snapshot-skill"] },
+          env: { SNAPSHOT_SECRET: "must-not-pass" },
+        },
+      },
+    });
+    mockSupportedExecutionProfiles.push("skill_test_response_only");
+    let responseInput: any = null;
+    mockAdapterExecuteResponseOnly.mockImplementationOnce(async (input) => {
+      responseInput = input;
+      return {
+        exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Sealed response body.", provider: "test", model: "pinned-model",
+        usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 0 },
+        usageBasis: "per_run", costUsd: 0.01,
+      };
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => {
+      const [row] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, harness.runId));
+      return row?.status === "succeeded";
+    }, 10_000);
+    await heartbeat.waitForRunExecutionDrain(harness.runId);
+
+    expect(countExecuteCallsForRun(harness.runId)).toBe(0);
+    expect(countResponseOnlyCallsForRun(harness.runId)).toBe(1);
+    expect(responseInput).toEqual(expect.objectContaining({
+      runId: harness.runId,
+      testRunId: harness.testRunId,
+      issueId: harness.issueId,
+      config: { model: "pinned-model" },
+    }));
+    expect(responseInput.runtime).toBeUndefined();
+    expect(responseInput.context).toBeUndefined();
+    expect(responseInput.executionTarget).toBeUndefined();
+    expect(responseInput.runtimeMcp).toBeUndefined();
+    expect(responseInput.authToken).toBeUndefined();
+    expect(responseInput.sessionId).toBeUndefined();
+    expect(JSON.parse(responseInput.prompt)).toEqual({
+      renderedTemplateBody: "Persisted response template",
+      inputSnapshot: "Transform this input",
+      fileInventory: [{ path: "SKILL.md", kind: "skill", content: "# PINNED OUTPUT ONLY" }],
+    });
+
+    const [persistedRun] = await db.select({ context: heartbeatRuns.contextSnapshot }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, harness.runId));
+    expect(persistedRun?.context).toEqual({
+      issueId: harness.issueId,
+      source: "company.skill_test_run",
+      skipIssueComment: true,
+      paperclipExecutionProfile: {
+        kind: "skill_test_response_only",
+        testRunId: harness.testRunId,
+        issueId: harness.issueId,
+        outputDocumentKey: "output",
+      },
+    });
+    const documentRows = await db.select({ key: issueDocuments.key, body: documents.latestBody })
+      .from(issueDocuments).innerJoin(documents, eq(issueDocuments.documentId, documents.id))
+      .where(eq(issueDocuments.issueId, harness.issueId));
+    expect(documentRows).toEqual([{ key: "output", body: "Sealed response body." }]);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, agentId))).toHaveLength(0);
+    expect(await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.sourceIssueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, harness.runId))).toHaveLength(1);
+    const [testRun] = await db.select({ status: companySkillTestRuns.status, mode: companySkillTestRuns.executionMode })
+      .from(companySkillTestRuns).where(eq(companySkillTestRuns.id, harness.testRunId));
+    expect(testRun).toEqual({ status: "succeeded", mode: "response_only" });
+    const [issue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, harness.issueId));
+    expect(issue?.status).toBe("done");
+  }, 20_000);
+
+  it("discards a late response-only result when cancellation wins", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const harness = await seedSkillTestHarness({
+      companyId,
+      agentId,
+      executionMode: "response_only",
+      executionProfile: "output_only",
+    });
+    mockSupportedExecutionProfiles.push("skill_test_response_only");
+    let releaseResponse = () => {};
+    mockAdapterExecuteResponseOnly.mockImplementationOnce(async () => new Promise((resolve) => {
+      releaseResponse = () => resolve({
+        exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Late response that must be discarded.", provider: "test", model: "test-model",
+      });
+    }));
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => countResponseOnlyCallsForRun(harness.runId) === 1, 10_000);
+    const cancellation = await heartbeat.cancelOutputOnlySkillTestRun({
+      companyId,
+      skillId: harness.skillId,
+      testRunId: harness.testRunId,
+      issueId: harness.issueId,
+      agentId,
+      reason: "Cancelled by operator",
+      options: { errorCode: "skill_test_cancelled" },
+    });
+    expect(cancellation).toBe("cancelled");
+    releaseResponse();
+    await heartbeat.waitForRunExecutionDrain(harness.runId);
+
+    const [run] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, harness.runId));
+    const [testRun] = await db.select({ status: companySkillTestRuns.status, output: companySkillTestRuns.outputSnapshot })
+      .from(companySkillTestRuns).where(eq(companySkillTestRuns.id, harness.testRunId));
+    const [issue] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, harness.issueId));
+    expect(run?.status).toBe("cancelled");
+    expect(testRun).toEqual({ status: "cancelled", output: "" });
+    expect(issue?.status).toBe("cancelled");
+    expect(await db.select().from(issueDocuments).where(eq(issueDocuments.issueId, harness.issueId))).toHaveLength(0);
+    expect(await db.select().from(documentRevisions).where(eq(documentRevisions.createdByRunId, harness.runId))).toHaveLength(0);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, harness.testRunId))).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+    expect(countExecuteCallsForRun(harness.runId)).toBe(0);
+  }, 20_000);
 
   it("dispatches output-only runs with zero external capabilities and server-finalizes only output", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();

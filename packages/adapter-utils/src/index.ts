@@ -10,6 +10,7 @@ export type {
   AdapterRuntimeMcpServer,
   AdapterRuntimeMcpAccess,
   AdapterExecutionContext,
+  AdapterResponseOnlyExecutionContext,
   AdapterEnvironmentCheckLevel,
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestStatus,

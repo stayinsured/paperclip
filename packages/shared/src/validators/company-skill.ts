@@ -471,6 +471,7 @@ export const companySkillTestRunCostSummarySchema = z.object({
 });
 
 export const companySkillTestExecutionProfileSchema = z.enum(["standard", "output_only"]);
+export const companySkillTestExecutionModeSchema = z.enum(["agentic", "response_only"]);
 
 export const companySkillTestRunSchema = z.object({
   id: z.string().uuid(),
@@ -488,6 +489,7 @@ export const companySkillTestRunSchema = z.object({
   renderedTemplateBody: z.string().nullable(),
   harnessIssueDescription: z.string(),
   status: companySkillTestRunStatusSchema,
+  executionMode: companySkillTestExecutionModeSchema,
   executionProfile: companySkillTestExecutionProfileSchema,
   outputDocumentKey: z.string().min(1),
   outputSnapshot: z.string(),
@@ -511,10 +513,23 @@ export const companySkillTestRunCreateSchema = z.object({
   // Re-run pins the viewed run's skill version instead of the live head, so the
   // new run reproduces the same snapshots (golden-path step 5).
   skillVersionId: z.string().uuid().nullable().optional(),
+  executionMode: companySkillTestExecutionModeSchema.optional(),
   executionProfile: companySkillTestExecutionProfileSchema.optional().default("standard"),
-}).refine((value) => Boolean(value.inputId) || Boolean(value.content?.trim()), {
-  message: "inputId or content is required",
-});
+}).superRefine((value, ctx) => {
+  if (!value.inputId && !value.content?.trim()) {
+    ctx.addIssue({ code: "custom", message: "inputId or content is required" });
+  }
+  if (value.executionMode === "agentic" && value.executionProfile === "output_only") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["executionMode"],
+      message: "executionMode conflicts with legacy executionProfile",
+    });
+  }
+}).transform((value) => ({
+  ...value,
+  executionMode: value.executionMode ?? (value.executionProfile === "output_only" ? "response_only" : "agentic"),
+}));
 
 export const companySkillTestRunListQuerySchema = z.object({
   inputId: z.string().uuid().optional(),

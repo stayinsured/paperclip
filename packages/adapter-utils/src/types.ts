@@ -201,10 +201,24 @@ export interface AdapterExecutionContext {
 }
 
 export interface AdapterExecutionProfile {
-  kind: "skill_test_output_only";
+  kind: "skill_test_output_only" | "skill_test_response_only";
   testRunId: string;
   issueId: string;
   outputDocumentKey: "output";
+}
+
+export interface AdapterResponseOnlyExecutionContext {
+  runId: string;
+  agent: AdapterAgent;
+  config: Record<string, unknown>;
+  prompt: string;
+  scratchDir: string;
+  testRunId: string;
+  issueId: string;
+  onLog: AdapterExecutionContext["onLog"];
+  onMeta?: AdapterExecutionContext["onMeta"];
+  onEvent?: AdapterExecutionContext["onEvent"];
+  onSpawn?: AdapterExecutionContext["onSpawn"];
 }
 
 export interface AdapterModel {
@@ -427,6 +441,7 @@ export interface AcpTargetDescriptor {
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
+  executeResponseOnly?: (ctx: AdapterResponseOnlyExecutionContext) => Promise<AdapterExecutionResult>;
   supportedExecutionProfiles?: AdapterExecutionProfile["kind"][];
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;
   acp?: AcpTargetDescriptor;

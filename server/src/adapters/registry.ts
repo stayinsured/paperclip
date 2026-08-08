@@ -27,6 +27,7 @@ import {
 } from "@paperclipai/adapter-claude-local";
 import {
   execute as codexExecute,
+  executeResponseOnly as codexExecuteResponseOnly,
   listCodexSkills,
   syncCodexSkills,
   testEnvironment as codexTestEnvironment,
@@ -256,8 +257,9 @@ const acpxLocalAdapter: ServerAdapterModule = {
 
 const codexLocalAdapter: ServerAdapterModule = {
   type: "codex_local",
-  supportedExecutionProfiles: ["skill_test_output_only"],
+  supportedExecutionProfiles: ["skill_test_output_only", "skill_test_response_only"],
   execute: codexExecute,
+  executeResponseOnly: codexExecuteResponseOnly,
   testEnvironment: codexTestEnvironment,
   acp: {
     agentId: "codex",

@@ -817,11 +817,13 @@ Platform-invariant failures are not policy denials and MUST use stable machine-r
 
 Core Skill Studio and Paperclip EE MUST treat those codes as hard platform failures, not as prompts to loosen policy.
 
-### Skill test execution profiles
+### Skill test execution modes
 
-A Skill Studio test run persists its execution profile as part of the immutable run contract. The default `standard` profile retains ordinary adapter capabilities. The `output_only` profile is valid only for the linked `skill_test` harness and MUST fail before adapter invocation unless the adapter explicitly supports `skill_test_output_only`.
+A Skill Studio test run persists immutable `executionMode` as `agentic | response_only`. Omitted create values normalize to `agentic`, which retains ordinary adapter capabilities. The legacy `executionProfile` field remains a compatibility projection for existing clients (`standard | output_only`) but is not the execution source of truth.
 
-For `output_only`, the adapter exposes no shell, filesystem or source inspection, MCP, browser or broad network tooling, session reuse, repository instructions, or unrelated Paperclip mutation credentials. The only durable effects are a server-owned write to document key `output` and the linked harness/test-run terminal transition. Those effects are atomic with respect to cancellation: the first terminal disposition wins, and a cancelled or superseded run cannot accept a late output.
+`response_only` dispatches through an adapter capability distinct from ordinary heartbeat execution. The adapter request contains only the persisted rendered template, input snapshot, and pinned file inventory. It exposes no shell, filesystem or source inspection, MCP, browser, Paperclip bridge, workspace, skill sync, agent or repository instructions, or task-session reuse. Unsupported adapters return a deterministic `422` before harness creation or provider invocation.
+
+The control plane persists the final assistant text as document key `output` and applies the linked harness/test-run terminal transition. Those effects are atomic with respect to cancellation: the first terminal disposition wins, and a cancelled or superseded run cannot accept a late result, output, activity, or cancelled-to-done mutation.
 
 ### Core API and ownership boundary
 

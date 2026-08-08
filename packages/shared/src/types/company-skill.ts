@@ -526,6 +526,8 @@ export interface CompanySkillTestRunCostSummary {
   outputTokens: number;
 }
 
+export type CompanySkillTestExecutionMode = "agentic" | "response_only";
+
 export interface CompanySkillTestRun {
   id: string;
   companyId: string;
@@ -542,6 +544,9 @@ export interface CompanySkillTestRun {
   renderedTemplateBody: string | null;
   harnessIssueDescription: string;
   status: CompanySkillTestRunStatus;
+  /** Immutable canonical execution contract for this test run. */
+  executionMode: CompanySkillTestExecutionMode;
+  /** Compatibility projection; use executionMode. */
   executionProfile: CompanySkillTestExecutionProfile;
   outputDocumentKey: string;
   outputSnapshot: string;
@@ -577,6 +582,8 @@ export interface CompanySkillTestRunCreateRequest {
    * Re-run to reproduce the viewed run's `skillVersionId` snapshot.
    */
   skillVersionId?: string | null;
+  /** Omitted requests remain agentic for backward compatibility. */
+  executionMode?: CompanySkillTestExecutionMode;
   /** Restricts adapter capabilities for this persisted run. */
   executionProfile?: CompanySkillTestExecutionProfile;
 }

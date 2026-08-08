@@ -7,6 +7,7 @@ import {
   companySkillInstallCatalogSchema,
   companySkillInstallUpdateSchema,
   companySkillResetSchema,
+  companySkillTestRunCreateSchema,
   companySkillUpdateStatusSchema,
 } from "./company-skill.js";
 
@@ -134,6 +135,27 @@ describe("company skill catalog validators", () => {
         source: catalogSkill.source,
       },
     });
+  });
+
+  it("defaults Skill Studio runs to agentic and validates explicit response-only mode", () => {
+    const base = {
+      content: "test input",
+      agentId: "55555555-5555-4555-8555-555555555555",
+    };
+    expect(companySkillTestRunCreateSchema.parse(base)).toMatchObject({
+      executionMode: "agentic",
+      executionProfile: "standard",
+    });
+    expect(companySkillTestRunCreateSchema.parse({ ...base, executionMode: "response_only" })).toMatchObject({
+      executionMode: "response_only",
+      executionProfile: "standard",
+    });
+    expect(() => companySkillTestRunCreateSchema.parse({
+      ...base,
+      executionMode: "agentic",
+      executionProfile: "output_only",
+    })).toThrow("executionMode conflicts with legacy executionProfile");
+    expect(() => companySkillTestRunCreateSchema.parse({ ...base, executionMode: "tools_optional" })).toThrow();
   });
 
   it("accepts update status, audit, update, and reset contract shapes", () => {

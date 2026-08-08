@@ -2014,6 +2014,7 @@ function toCompanySkillTestRun(
     renderedTemplateBody: row.renderedTemplateBody ?? null,
     harnessIssueDescription: row.harnessIssueDescription || row.inputSnapshot,
     status: normalizeTestRunStatus(row.status),
+    executionMode: row.executionMode === "response_only" ? "response_only" : "agentic",
     executionProfile: row.executionProfile === "output_only" ? "output_only" : "standard",
     outputDocumentKey: row.outputDocumentKey || "output",
     outputSnapshot: row.outputSnapshot ?? "",
@@ -6371,6 +6372,9 @@ export function companySkillService(db: Db) {
     const agent = await agents.getById(input.agentId);
     if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
     if (agent.status === "paused") throw unprocessable("Paused agents cannot run skill tests.");
+    const executionMode = input.executionMode === "response_only" || input.executionProfile === "output_only"
+      ? "response_only"
+      : "agentic";
 
     const sourceInput = input.inputId
       ? await db
@@ -6475,7 +6479,8 @@ export function companySkillService(db: Db) {
           renderedTemplateBody,
           harnessIssueDescription,
           status: "queued",
-          executionProfile: input.executionProfile === "output_only" ? "output_only" : "standard",
+          executionMode,
+          executionProfile: executionMode === "response_only" ? "output_only" : "standard",
           outputDocumentKey,
         })
         .returning()
@@ -6783,9 +6788,9 @@ export function companySkillService(db: Db) {
     if (["succeeded", "failed", "cancelled"].includes(existing.status)) {
       return (await hydrateTestRuns(companyId, [existing]))[0] ?? null;
     }
-    if (existing.executionProfile === "output_only") {
+    if (existing.executionMode === "response_only" || existing.executionProfile === "output_only") {
       if (!deps.cancelOutputOnlyLinkedRun) {
-        throw new Error("Output-only Skill Studio cancellation requires linked terminal coordination.");
+        throw new Error("Response-only Skill Studio cancellation requires linked terminal coordination.");
       }
       await deps.cancelOutputOnlyLinkedRun({
         companyId,

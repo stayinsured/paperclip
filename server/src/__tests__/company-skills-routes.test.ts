@@ -2211,6 +2211,45 @@ describe("company skill mutation permissions", () => {
     }));
   });
 
+  it("rejects unsupported response-only adapters before creating a harness", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      id: "55555555-5555-4555-8555-555555555555",
+      companyId: "company-1",
+      adapterType: "process",
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/skills/skill-1/test-runs")
+      .send({
+        content: "response only",
+        agentId: "55555555-5555-4555-8555-555555555555",
+        executionMode: "response_only",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body).toEqual({
+      error: "Adapter process does not support response-only Skill Studio execution.",
+      code: "skill_test_response_only_unsupported_adapter",
+      details: {
+        code: "skill_test_response_only_unsupported_adapter",
+        adapterType: "process",
+        requestedExecutionMode: "response_only",
+        requiredCapability: "skill_test_response_only",
+        supportedExecutionProfiles: [],
+      },
+    });
+    expect(mockCompanySkillService.createTestRun).not.toHaveBeenCalled();
+    expect(mockIssueService.create).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["create", "post", "/api/companies/company-1/skills/skill-1/test-runs"],
     ["cancel", "post", "/api/companies/company-1/skills/skill-1/test-runs/22222222-2222-4222-8222-222222222222/cancel"],

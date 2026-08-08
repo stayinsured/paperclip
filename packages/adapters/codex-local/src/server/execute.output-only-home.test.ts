@@ -39,7 +39,7 @@ vi.mock("./runtime-config.js", async () => {
 });
 
 import { CODEX_OUTPUT_ONLY_CREDENTIAL_ERROR_CODE } from "./codex-home.js";
-import { execute } from "./execute.js";
+import { execute, executeResponseOnly } from "./execute.js";
 
 type InvocationCapture = {
   command: string;
@@ -49,6 +49,9 @@ type InvocationCapture = {
   authIsSymlink: boolean;
   authMode: number;
   authPayload: unknown;
+  cwd: string;
+  stdin: string;
+  envKeys: string[];
 };
 
 describe("codex output-only credential home", () => {
@@ -64,7 +67,7 @@ describe("codex output-only credential home", () => {
         _target: unknown,
         command: string,
         args: string[],
-        options: { env: Record<string, string> },
+        options: { env: Record<string, string>; cwd: string; stdin: string },
       ) => {
         const codexHome = options.env.CODEX_HOME;
         const authPath = path.join(codexHome, "auth.json");
@@ -76,6 +79,9 @@ describe("codex output-only credential home", () => {
           authIsSymlink: (await fs.lstat(authPath)).isSymbolicLink(),
           authMode: (await fs.stat(authPath)).mode & 0o777,
           authPayload: JSON.parse(await fs.readFile(authPath, "utf8")),
+          cwd: options.cwd,
+          stdin: options.stdin,
+          envKeys: Object.keys(options.env).sort(),
         };
         return {
           exitCode: 0,
@@ -173,6 +179,62 @@ describe("codex output-only credential home", () => {
       onLog: vi.fn(async () => undefined),
     };
   }
+
+  it("executes the dedicated response-only entry with the exact sealed prompt and zero tool surfaces", async () => {
+    const fx = await makeFixture();
+    await fs.writeFile(path.join(fx.sharedCodexHome, "auth.json"), JSON.stringify({
+      tokens: { account_id: "acct-response-only", access_token: "access", refresh_token: "refresh" },
+    }), { mode: 0o600 });
+    const onMeta = vi.fn(async () => undefined);
+    const prompt = JSON.stringify({
+      renderedTemplateBody: "Persisted template",
+      inputSnapshot: "Persisted input",
+      fileInventory: [{ path: "SKILL.md", kind: "skill", content: "Pinned content" }],
+    });
+
+    const result = await executeResponseOnly({
+      runId: "run-response-only",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Codex Response Renderer",
+        adapterType: "codex_local",
+        adapterConfig: { instructionsFilePath: "/must/not/load" },
+      },
+      config: {
+        model: "gpt-test",
+        command: "untrusted-command",
+        instructionsFilePath: "/must/not/load",
+        paperclipSkillSync: { desiredSkills: ["must-not-sync"] },
+        mcpServers: { unsafe: { url: "https://example.invalid" } },
+      },
+      prompt,
+      scratchDir: fx.workspaceDir,
+      testRunId: "test-run-1",
+      issueId: "issue-1",
+      onLog: vi.fn(async () => undefined),
+      onMeta,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(capture).toMatchObject({ command: "codex", cwd: fx.workspaceDir, stdin: prompt });
+    expect(capture?.args).toEqual(expect.arrayContaining([
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--ephemeral",
+      "--strict-config",
+      "unified_exec",
+      "shell_tool",
+      "plugins",
+    ]));
+    expect(capture?.args).not.toContain("untrusted-command");
+    expect(capture?.envKeys.some((key) => key.startsWith("PAPERCLIP_"))).toBe(false);
+    expect(onMeta).toHaveBeenCalledWith(expect.objectContaining({
+      prompt,
+      context: { paperclipResponseOnlyPrompt: prompt },
+    }));
+    expect(prepareCodexRuntimeConfig).not.toHaveBeenCalled();
+  });
 
   it("launches subscription mode without reading inherited config or runtime entries", async () => {
     const fx = await makeFixture();

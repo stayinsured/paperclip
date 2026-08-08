@@ -7081,6 +7081,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         entityId: input.testRunId,
         details: {
           issueId: input.issueId,
+          executionMode: "response_only",
           executionProfile: "output_only",
           outputDocumentKey: "output",
           status: "staged",
@@ -7169,7 +7170,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (
         !heartbeatRun
         || readNonEmptyString(heartbeatContext.issueId) !== input.issueId
-        || readNonEmptyString(heartbeatProfile.kind) !== "skill_test_output_only"
+        || !["skill_test_output_only", "skill_test_response_only"].includes(readNonEmptyString(heartbeatProfile.kind) ?? "")
         || readNonEmptyString(heartbeatProfile.testRunId) !== input.testRunId
         || readNonEmptyString(heartbeatProfile.issueId) !== input.issueId
         || readNonEmptyString(heartbeatProfile.outputDocumentKey) !== "output"
@@ -7389,6 +7390,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         entityId: input.testRunId,
         details: {
           issueId: input.issueId,
+          executionMode: "response_only",
           executionProfile: "output_only",
           outputDocumentKey: "output",
           status: "failed",
@@ -7666,7 +7668,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         skillId: companySkillTestRuns.skillId,
         inputId: companySkillTestRuns.inputId,
         skillVersionId: companySkillTestRuns.skillVersionId,
+        inputSnapshot: companySkillTestRuns.inputSnapshot,
+        renderedTemplateBody: companySkillTestRuns.renderedTemplateBody,
+        agentConfigSnapshot: companySkillTestRuns.agentConfigSnapshot,
         outputDocumentKey: companySkillTestRuns.outputDocumentKey,
+        executionMode: companySkillTestRuns.executionMode,
         executionProfile: companySkillTestRuns.executionProfile,
         fileInventory: companySkillVersions.fileInventory,
         revisionNumber: companySkillVersions.revisionNumber,
@@ -7704,6 +7710,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       revisionNumber: row.revisionNumber,
       label: row.label ?? null,
       outputDocumentKey: row.outputDocumentKey,
+      executionMode: row.executionMode === "response_only" ? "response_only" as const : "agentic" as const,
+      inputSnapshot: row.inputSnapshot,
+      renderedTemplateBody: row.renderedTemplateBody ?? null,
+      agentConfigSnapshot: parseObject(row.agentConfigSnapshot),
       executionProfile: row.executionProfile === "output_only" ? "output_only" as const : "standard" as const,
       fileInventory,
     };
@@ -7717,6 +7727,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         workMode: issues.workMode,
         testRunId: companySkillTestRuns.id,
         testRunStatus: companySkillTestRuns.status,
+        executionMode: companySkillTestRuns.executionMode,
         executionProfile: companySkillTestRuns.executionProfile,
         outputDocumentKey: companySkillTestRuns.outputDocumentKey,
         testRunDeletedAt: companySkillTestRuns.deletedAt,
@@ -14189,6 +14200,331 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return promise;
   }
 
+  function responseOnlyAdapterConfig(agent: typeof agents.$inferSelect, snapshot: Awaited<ReturnType<typeof getPinnedSkillTestContext>>) {
+    const pinnedAdapterConfig = parseObject(parseObject(snapshot?.agentConfigSnapshot).adapterConfig);
+    const liveAdapterConfig = parseObject(agent.adapterConfig);
+    const config: Record<string, unknown> = {};
+    for (const key of ["model", "modelReasoningEffort", "reasoningEffort", "fastMode", "timeoutSec", "graceSec", "outputInactivityTimeoutMs"]) {
+      if (pinnedAdapterConfig[key] !== undefined) config[key] = pinnedAdapterConfig[key];
+    }
+    const pinnedEnv = parseObject(pinnedAdapterConfig.env);
+    const liveEnv = parseObject(liveAdapterConfig.env);
+    const env: Record<string, unknown> = {};
+    for (const key of ["CODEX_HOME", "OPENAI_API_KEY"]) {
+      const value = liveEnv[key] ?? pinnedEnv[key];
+      if (typeof value === "string") env[key] = value;
+    }
+    if (Object.keys(env).length > 0) config.env = env;
+    return config;
+  }
+
+  function buildResponseOnlyPrompt(snapshot: NonNullable<Awaited<ReturnType<typeof getPinnedSkillTestContext>>>) {
+    return JSON.stringify({
+      renderedTemplateBody: snapshot.renderedTemplateBody,
+      inputSnapshot: snapshot.inputSnapshot,
+      fileInventory: snapshot.fileInventory.map((entry) => ({ path: entry.path, kind: entry.kind, content: entry.content })),
+    });
+  }
+
+  async function executeResponseOnlySkillTestRun(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    agent: typeof agents.$inferSelect;
+    issueId: string;
+    snapshot: NonNullable<Awaited<ReturnType<typeof getPinnedSkillTestContext>>>;
+  }) {
+    let { run } = input;
+    const { agent, issueId, snapshot } = input;
+    const adapter = getServerAdapter(agent.adapterType);
+    const requiredCapability = "skill_test_response_only" as const;
+    if (!adapter.supportedExecutionProfiles?.includes(requiredCapability) || typeof adapter.executeResponseOnly !== "function") {
+      throw new UnsupportedExecutionProfileFailure(
+        "Adapter " + agent.adapterType + " does not support " + requiredCapability + ".",
+        {
+          code: "skill_test_response_only_unsupported_adapter",
+          adapterType: agent.adapterType,
+          requestedExecutionMode: "response_only",
+          requiredCapability,
+          supportedExecutionProfiles: adapter.supportedExecutionProfiles ?? [],
+        },
+      );
+    }
+
+    const state = await getPersistedSkillTestHarnessState(run.companyId, issueId);
+    if (!state?.active || state.executionMode !== "response_only") {
+      await cancelRunInternal(run.id, "Cancelled before response-only invocation because the Skill Studio test is terminal", {
+        errorCode: "skill_test_terminal",
+      });
+      return;
+    }
+    if (state.outputDocumentKey !== "output") {
+      throw new UnsupportedExecutionProfileFailure("Response-only Skill Studio runs require output document key `output`.", {
+        code: "skill_test_response_only_invalid_output",
+        adapterType: agent.adapterType,
+        requestedExecutionMode: "response_only",
+        testRunId: snapshot.testRunId,
+      });
+    }
+
+    const sealedContext = {
+      issueId,
+      source: "company.skill_test_run",
+      skipIssueComment: true,
+      paperclipExecutionProfile: {
+        kind: requiredCapability,
+        testRunId: snapshot.testRunId,
+        issueId,
+        outputDocumentKey: "output",
+      },
+    };
+    const updatedRun = await db.update(heartbeatRuns).set({
+      contextSnapshot: sealedContext,
+      sessionIdBefore: null,
+      updatedAt: new Date(),
+    }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running"))).returning().then((rows) => rows[0] ?? null);
+    if (!updatedRun) return;
+    run = updatedRun;
+
+    const runningAgent = await db.update(agents).set({ status: "running", updatedAt: new Date() })
+      .where(and(eq(agents.id, agent.id), notInArray(agents.status, [...DIRECT_NON_INVOKABLE_STATUSES])))
+      .returning().then((rows) => rows[0] ?? null);
+    if (!runningAgent) {
+      await cancelRunInternal(run.id, "Cancelled: agent not invokable at response-only execution start", { errorCode: "agent_not_invokable" });
+      return;
+    }
+    publishLiveEvent({
+      companyId: agent.companyId,
+      type: "agent.status",
+      payload: { agentId: agent.id, status: "running", outcome: "running" },
+    });
+
+    let scratch: HeartbeatRunScratch | null = null;
+    let handle: RunLogHandle | null = null;
+    let stdoutExcerpt = "";
+    let stderrExcerpt = "";
+    let seq = 1;
+    try {
+      scratch = await prepareHeartbeatRunScratch({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        runId: run.id,
+        issueId,
+        issueIdentifier: null,
+      });
+      await appendRunEvent(run, seq++, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "response-only run started",
+        payload: { executionMode: "response_only", capability: requiredCapability },
+      });
+      handle = await runLogStore.begin({ companyId: run.companyId, agentId: run.agentId, runId: run.id });
+      await db.update(heartbeatRuns).set({ logStore: handle.store, logRef: handle.logRef, updatedAt: new Date() })
+        .where(eq(heartbeatRuns.id, run.id));
+      const redactionOptions = await getCurrentUserRedactionOptions();
+      const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const sanitized = compactRunLogChunk(redactCurrentUserText(chunk, redactionOptions));
+        if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitized);
+        else stderrExcerpt = appendExcerpt(stderrExcerpt, sanitized);
+        if (handle) await runLogStore.append(handle, { stream, chunk: sanitized, ts: new Date().toISOString(), seq: seq++ });
+      };
+      const result = await adapter.executeResponseOnly({
+        runId: run.id,
+        agent: { id: agent.id, companyId: agent.companyId, name: agent.name, adapterType: agent.adapterType, adapterConfig: {} },
+        config: responseOnlyAdapterConfig(agent, snapshot),
+        prompt: buildResponseOnlyPrompt(snapshot),
+        scratchDir: scratch.dir,
+        testRunId: snapshot.testRunId,
+        issueId,
+        onLog,
+        onMeta: async (meta) => {
+          await appendRunEvent(run, seq++, {
+            eventType: "adapter.invoke",
+            stream: "system",
+            level: "info",
+            message: "response-only adapter invocation",
+            payload: {
+              adapterType: meta.adapterType,
+              command: meta.command,
+              cwd: meta.cwd,
+              commandArgs: meta.commandArgs,
+              commandNotes: meta.commandNotes,
+              promptMetrics: meta.promptMetrics,
+              executionMode: "response_only",
+            },
+          });
+        },
+        onEvent: async (event) => {
+          await appendRunEvent(run, seq++, {
+            eventType: event.eventType.slice(0, 120),
+            stream: event.stream,
+            level: event.level,
+            color: event.color,
+            message: event.message,
+            payload: event.payload,
+          });
+        },
+        onSpawn: async (meta) => {
+          await persistRunProcessMetadata(run.id, { pid: meta.pid, processGroupId: meta.processGroupId, startedAt: meta.startedAt });
+        },
+      });
+
+      const latest = await getRun(run.id);
+      if (!latest || latest.status !== "running") return;
+      const succeeded = !result.timedOut && (result.exitCode ?? 0) === 0 && !result.errorMessage;
+      const rawUsage = normalizeUsageTotals(result.usage);
+      const cacheAdjustedCostUsd = resolveCacheAdjustedCostUsd(result);
+      const usageJson = rawUsage || result.costUsd != null || cacheAdjustedCostUsd != null
+        ? {
+            ...(rawUsage ?? {}),
+            usageSource: "per_run",
+            sessionReused: false,
+            taskSessionReused: false,
+            freshSession: true,
+            provider: readNonEmptyString(result.provider) ?? "unknown",
+            biller: resolveLedgerBiller(result),
+            model: readNonEmptyString(result.model) ?? "unknown",
+            ...(result.costUsd != null ? { costUsd: result.costUsd } : {}),
+            ...(cacheAdjustedCostUsd != null ? { cacheAdjustedCostUsd } : {}),
+            billingType: normalizeLedgerBillingType(result.billingType),
+          }
+        : null;
+      const logSummary = handle ? await runLogStore.finalize(handle) : null;
+      handle = null;
+      const errorMessage = succeeded
+        ? null
+        : redactCurrentUserText(result.errorMessage ?? (result.timedOut ? "Timed out" : "Response-only adapter failed"), redactionOptions);
+      const errorCode = succeeded ? null : result.timedOut ? "timeout" : result.errorCode ?? "adapter_failed";
+      const resultJson = mergeHeartbeatRunResultJson(
+        mergeRunStopMetadataForAgent(agent, succeeded ? "succeeded" : result.timedOut ? "timed_out" : "failed", {
+          resultJson: { ...parseObject(result.resultJson), executionMode: "response_only" },
+          errorCode,
+          errorMessage,
+        }),
+        result.summary ?? null,
+      );
+      const heartbeatPatch = {
+        finishedAt: new Date(),
+        error: errorMessage,
+        errorCode,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        usageJson,
+        resultJson,
+        sessionIdAfter: null,
+        stdoutExcerpt,
+        stderrExcerpt,
+        logBytes: logSummary?.bytes,
+        logSha256: logSummary?.sha256,
+        logCompressed: logSummary?.compressed ?? false,
+      };
+
+      let finalizedRun: typeof heartbeatRuns.$inferSelect | null = null;
+      if (succeeded && result.summary?.trim()) {
+        const staged = await stageOutputOnlySkillTestRun({
+          companyId: run.companyId,
+          issueId,
+          testRunId: snapshot.testRunId,
+          agentId: agent.id,
+          heartbeatRunId: run.id,
+          output: result.summary,
+        });
+        if (staged === "terminal") return;
+        await options.testHooks?.afterOutputOnlySkillTestOutputStaged?.({
+          companyId: run.companyId,
+          issueId,
+          testRunId: snapshot.testRunId,
+          heartbeatRunId: run.id,
+        });
+        const finalized = await finalizeStagedOutputOnlySkillTestRun({
+          companyId: run.companyId,
+          issueId,
+          testRunId: snapshot.testRunId,
+          agentId: agent.id,
+          heartbeatRunId: run.id,
+          heartbeatPatch,
+        });
+        if (!finalized.updated) return;
+        finalizedRun = finalized.run;
+        if (finalizedRun) publishPersistedRunStatus(finalizedRun);
+      } else {
+        const missingOutput = succeeded && !result.summary?.trim();
+        const finalError = missingOutput ? "Response-only Skill Studio execution returned no final output." : errorMessage!;
+        const finalCode = missingOutput ? "skill_test_response_only_missing_output" : errorCode!;
+        const status = result.timedOut ? "timed_out" : "failed";
+        const failed = await setRunStatusIfRunning(run.id, status, { ...heartbeatPatch, error: finalError, errorCode: finalCode });
+        if (!failed.updated) return;
+        finalizedRun = failed.run;
+        await setWakeupStatus(run.wakeupRequestId, "failed", { finishedAt: new Date(), error: finalError });
+        await finalizeFailedOutputOnlySkillTestRun({
+          companyId: run.companyId,
+          issueId,
+          testRunId: snapshot.testRunId,
+          agentId: agent.id,
+          heartbeatRunId: run.id,
+          error: finalError,
+          errorCode: finalCode,
+        });
+      }
+
+      if (finalizedRun) {
+        await appendRunEvent(finalizedRun, seq++, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: succeeded ? "info" : "error",
+          message: succeeded ? "response-only run succeeded" : "response-only run failed",
+        });
+        await updateRuntimeState(agent, finalizedRun, result, { legacySessionId: null }, rawUsage);
+        await releaseIssueExecutionAndPromote(finalizedRun);
+      }
+      await finalizeAgentStatus(agent.id, succeeded ? "succeeded" : result.timedOut ? "timed_out" : "failed", errorMessage, {
+        wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+      });
+    } catch (error) {
+      if (handle) await runLogStore.finalize(handle).catch(() => undefined);
+      handle = null;
+      const message = redactCurrentUserText(
+        error instanceof Error ? error.message : "Unknown response-only adapter failure",
+        await getCurrentUserRedactionOptions(),
+      );
+      const code = readNonEmptyString(parseObject(error).code) ?? "adapter_failed";
+      const failed = await setRunStatusIfRunning(run.id, "failed", {
+        finishedAt: new Date(),
+        error: message,
+        errorCode: code,
+        stdoutExcerpt,
+        stderrExcerpt,
+        resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
+          resultJson: { executionMode: "response_only" },
+          errorCode: code,
+          errorMessage: message,
+        }),
+      });
+      if (failed.updated && failed.run) {
+        await setWakeupStatus(run.wakeupRequestId, "failed", { finishedAt: new Date(), error: message });
+        await finalizeFailedOutputOnlySkillTestRun({
+          companyId: run.companyId,
+          issueId,
+          testRunId: snapshot.testRunId,
+          agentId: agent.id,
+          heartbeatRunId: run.id,
+          error: message,
+          errorCode: code,
+        });
+        await appendRunEvent(failed.run, seq++, { eventType: "error", stream: "system", level: "error", message });
+        await releaseIssueExecutionAndPromote(failed.run);
+        await finalizeAgentStatus(agent.id, "failed", message, { wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run) });
+      }
+    } finally {
+      if (handle) await runLogStore.finalize(handle).catch(() => undefined);
+      handle = null;
+      const latest = await getRun(run.id).catch(() => null);
+      if (scratch && latest && isHeartbeatRunTerminalStatus(latest.status)) {
+        await cleanupHeartbeatRunScratch({ scratch, processGroupId: latest.processGroupId, isProcessGroupAlive }).catch(() => undefined);
+      }
+      await startNextQueuedRunForAgent(agent.id);
+    }
+  }
+
   async function executeRun(runId: string) {
     if ((await getSchedulingSuppression()).suppressed) return;
 
@@ -14254,6 +14590,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
       }
       issueContext = await getIssueExecutionContext(agent.companyId, issueId);
+    }
+    const responseOnlySnapshot =
+      issueId && (issueContext?.workMode === "skill_test" || issueContext?.harnessKind === "skill_test")
+        ? await getPinnedSkillTestContext(agent.companyId, issueId)
+        : null;
+    if (responseOnlySnapshot?.executionMode === "response_only") {
+      await executeResponseOnlySkillTestRun({ run, agent, issueId: issueId!, snapshot: responseOnlySnapshot });
+      return;
     }
     const wakeCommentId = deriveCommentId(context, null);
     const wakeCommentContext =
