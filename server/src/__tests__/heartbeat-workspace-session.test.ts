@@ -1683,6 +1683,7 @@ describe("effective run execution workspace config freshness", () => {
     const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: "d4446c7e-8746-4664-bf50-20a0677c04d3",
       issueExecutionWorkspacePreference: "isolated_workspace",
+      preserveBoundWorkspaceForContinuation: true,
       existingExecutionWorkspaceStatus: "active",
       existingExecutionWorkspaceClosedAt: null,
       existingExecutionWorkspaceAccessible: true,
@@ -1692,6 +1693,22 @@ describe("effective run execution workspace config freshness", () => {
       requestedExecutionWorkspaceId: "d4446c7e-8746-4664-bf50-20a0677c04d3",
       requestedShouldReuseExisting: true,
       existingExecutionWorkspaceAvailable: true,
+    });
+  });
+
+  it("does not reuse a stale isolated workspace binding for an ordinary assignment", () => {
+    const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: "d4446c7e-8746-4664-bf50-20a0677c04d3",
+      issueExecutionWorkspacePreference: "isolated_workspace",
+      existingExecutionWorkspaceStatus: "active",
+      existingExecutionWorkspaceClosedAt: null,
+      existingExecutionWorkspaceAccessible: true,
+    });
+
+    expect(reuseRequest).toEqual({
+      requestedExecutionWorkspaceId: "d4446c7e-8746-4664-bf50-20a0677c04d3",
+      requestedShouldReuseExisting: false,
+      existingExecutionWorkspaceAvailable: false,
     });
   });
 
@@ -1705,6 +1722,7 @@ describe("effective run execution workspace config freshness", () => {
     const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: "workspace-old",
       issueExecutionWorkspacePreference: "isolated_workspace",
+      preserveBoundWorkspaceForContinuation: true,
       existingExecutionWorkspaceStatus: status,
       existingExecutionWorkspaceClosedAt: closedAt,
       existingExecutionWorkspaceAccessible: accessible,

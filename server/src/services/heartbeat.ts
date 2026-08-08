@@ -4335,16 +4335,21 @@ export type ExecutionWorkspaceReuseRequestForIssue = {
 export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   issueExecutionWorkspaceId?: string | null;
   issueExecutionWorkspacePreference?: string | null;
+  preserveBoundWorkspaceForContinuation?: boolean;
   existingExecutionWorkspaceStatus?: string | null;
   existingExecutionWorkspaceClosedAt?: Date | string | null;
   existingExecutionWorkspaceAccessible?: boolean;
 }): ExecutionWorkspaceReuseRequestForIssue {
   const requestedExecutionWorkspaceId = readNonEmptyString(input.issueExecutionWorkspaceId);
-  // An issue-level executionWorkspaceId is an explicit binding, regardless of
-  // which mode originally selected it. Treating only `reuse_existing` as
-  // binding allowed a structured resume wake to realize the project-primary
-  // default and silently replace an operator-selected isolated worktree.
-  const requestedShouldReuseExisting = requestedExecutionWorkspaceId !== null;
+  // `reuse_existing` is the durable preference. Structured continuation wakes
+  // also preserve an exact issue-level binding even when the originating mode
+  // was `isolated_workspace`; ordinary assignment runs must not reinterpret a
+  // leftover workspace id as reuse because fresh realization/containment owns
+  // that path.
+  const requestedShouldReuseExisting =
+    requestedExecutionWorkspaceId !== null &&
+    (input.issueExecutionWorkspacePreference === "reuse_existing" ||
+      input.preserveBoundWorkspaceForContinuation === true);
   const existingExecutionWorkspaceOpen =
     input.existingExecutionWorkspaceStatus === "active" ||
     input.existingExecutionWorkspaceStatus === "idle" ||
@@ -14879,6 +14884,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
       issueExecutionWorkspacePreference: issueRef?.executionWorkspacePreference ?? null,
+      preserveBoundWorkspaceForContinuation:
+        acceptedPlanContinuationWake || context.resumeIntent === true || context.followUpRequested === true,
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
       existingExecutionWorkspaceClosedAt: existingExecutionWorkspace?.closedAt ?? null,
       existingExecutionWorkspaceAccessible:
@@ -18966,6 +18973,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
             issueExecutionWorkspaceId: issue.executionWorkspaceId,
             issueExecutionWorkspacePreference: issue.executionWorkspacePreference,
+            preserveBoundWorkspaceForContinuation:
+              enrichedContextSnapshot.resumeIntent === true ||
+              enrichedContextSnapshot.followUpRequested === true ||
+              (
+                readNonEmptyString(enrichedContextSnapshot.workspaceRefreshReason) === "accepted_plan_confirmation" &&
+                Object.keys(parseObject(enrichedContextSnapshot.acceptedPlanWakeRouting)).length === 0
+              ),
             existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
             existingExecutionWorkspaceClosedAt: existingExecutionWorkspace?.closedAt ?? null,
             existingExecutionWorkspaceAccessible:
