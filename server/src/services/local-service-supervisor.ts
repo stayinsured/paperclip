@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -229,15 +230,62 @@ export function isPidAlive(pid: number) {
   }
 }
 
+function readLinuxProcessStat(pid: number) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const state = fields[0] ?? "";
+    const processGroupId = Number.parseInt(fields[2] ?? "", 10);
+    if (!state || !Number.isInteger(processGroupId) || processGroupId <= 0) return null;
+    return { state, processGroupId };
+  } catch {
+    return null;
+  }
+}
+
+function hasNonZombieLinuxProcessGroupMember(processGroupId: number) {
+  let entries: string[];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return null;
+  }
+
+  let foundProcessGroupMember = false;
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const stat = readLinuxProcessStat(Number.parseInt(entry, 10));
+    if (!stat) continue;
+    if (stat.processGroupId !== processGroupId) continue;
+    foundProcessGroupMember = true;
+    if (
+      stat.state !== "Z"
+      && stat.state !== "X"
+      && stat.state !== "x"
+    ) {
+      return true;
+    }
+  }
+
+  return foundProcessGroupMember ? false : null;
+}
+
 export function isProcessGroupAlive(processGroupId: number | null | undefined) {
   if (process.platform === "win32") return false;
   if (typeof processGroupId !== "number" || !Number.isInteger(processGroupId) || processGroupId <= 0) return false;
   try {
     process.kill(-processGroupId, 0);
-    return true;
   } catch {
     return false;
   }
+
+  // Linux kill(0) also succeeds for zombie-only groups. Those members cannot execute
+  // or handle another signal, but may remain visible under an unreaping PID 1.
+  if (process.platform === "linux") {
+    const hasNonZombieMember = hasNonZombieLinuxProcessGroupMember(processGroupId);
+    if (hasNonZombieMember !== null) return hasNonZombieMember;
+  }
+  return true;
 }
 
 async function isLikelyMatchingCommand(record: LocalServiceRegistryRecord) {

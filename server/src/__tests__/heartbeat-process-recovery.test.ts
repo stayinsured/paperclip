@@ -155,6 +155,54 @@ async function waitForPidExit(pid: number, timeoutMs = 2_000) {
   return !isPidAlive(pid);
 }
 
+type LinuxProcessSnapshot = {
+  pid: number;
+  ppid: number;
+  processGroupId: number;
+  state: string;
+};
+
+async function readLinuxProcessSnapshot(pid: number): Promise<LinuxProcessSnapshot | null> {
+  try {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const state = fields[0] ?? "";
+    const ppid = Number.parseInt(fields[1] ?? "", 10);
+    const processGroupId = Number.parseInt(fields[2] ?? "", 10);
+    if (!state || !Number.isInteger(ppid) || !Number.isInteger(processGroupId)) return null;
+    return { pid, ppid, processGroupId, state };
+  } catch {
+    return null;
+  }
+}
+
+async function readLinuxProcessGroupSnapshots(processGroupId: number) {
+  const entries = await fs.readdir("/proc");
+  const snapshots = await Promise.all(
+    entries
+      .filter((entry) => /^\d+$/.test(entry))
+      .map((entry) => readLinuxProcessSnapshot(Number.parseInt(entry, 10))),
+  );
+  return snapshots.filter(
+    (snapshot): snapshot is LinuxProcessSnapshot => snapshot?.processGroupId === processGroupId,
+  );
+}
+
+function isNonZombieLinuxProcess(snapshot: LinuxProcessSnapshot) {
+  return snapshot.state !== "Z" && snapshot.state !== "X" && snapshot.state !== "x";
+}
+
+async function waitForNoNonZombieLinuxProcessGroupMember(processGroupId: number, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  let snapshots: LinuxProcessSnapshot[] = [];
+  while (Date.now() < deadline) {
+    snapshots = await readLinuxProcessGroupSnapshots(processGroupId);
+    if (!snapshots.some(isNonZombieLinuxProcess)) return snapshots;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return await readLinuxProcessGroupSnapshots(processGroupId);
+}
+
 async function waitForRunToSettle(
   heartbeat: ReturnType<typeof heartbeatService>,
   runId: string,
@@ -2367,10 +2415,17 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(lease?.releasedAt).toBeTruthy();
   });
 
-  it.skipIf(process.platform === "win32")("reaps orphaned descendant process groups when the parent pid is already gone", async () => {
+  it.skipIf(process.platform !== "linux")("reaps orphaned descendant process groups when the parent pid is already gone", async () => {
     const orphan = await spawnOrphanedProcessGroup();
     cleanupPids.add(orphan.descendantPid);
     expect(isPidAlive(orphan.descendantPid)).toBe(true);
+    const beforeCleanup = await readLinuxProcessSnapshot(orphan.descendantPid);
+    expect(beforeCleanup).toMatchObject({
+      pid: orphan.descendantPid,
+      processGroupId: orphan.processGroupId,
+    });
+    expect(beforeCleanup?.state).not.toBe("Z");
+    expect(beforeCleanup?.ppid).toBeGreaterThan(0);
 
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "idle",
@@ -2379,11 +2434,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     const heartbeat = heartbeatService(db);
 
+    const cleanupStartedAt = Date.now();
     const result = await heartbeat.reapOrphanedRuns();
     expect(result.reaped).toBe(1);
     expect(result.runIds).toEqual([runId]);
+    expect(Date.now() - cleanupStartedAt).toBeLessThan(2_000);
 
-    expect(await waitForPidExit(orphan.descendantPid, 2_000)).toBe(true);
+    const afterCleanup = await waitForNoNonZombieLinuxProcessGroupMember(orphan.processGroupId, 2_000);
+    expect(afterCleanup.filter(isNonZombieLinuxProcess)).toEqual([]);
+    const descendantAfterCleanup = afterCleanup.find((entry) => entry.pid === orphan.descendantPid);
+    expect(descendantAfterCleanup === undefined || descendantAfterCleanup.state === "Z").toBe(true);
 
     const runs = await db
       .select()
