@@ -106,6 +106,7 @@ function registerRouteMocks() {
     issueService: () => mockIssueService,
     logActivity: mockLogActivity,
     projectService: () => ({}),
+    resolveWorkProductHandoff: vi.fn(() => null),
     routineService: () => ({
       syncRunStatusForIssue: vi.fn(async () => undefined),
     }),
@@ -438,25 +439,37 @@ describe("issue attachment routes", () => {
   });
 
   it("enforces the process-level issue attachment limit even when the company limit allows more", async () => {
-    const storage = createStorageService();
-    mockIssueService.getById.mockResolvedValue({
-      id: "11111111-1111-4111-8111-111111111111",
-      companyId: "company-1",
-      identifier: "PAP-1",
-    });
-    mockIssueService.createAttachment.mockResolvedValue(makeAttachment("application/octet-stream", "large.bin"));
-
-    const app = await createApp(storage);
-    const res = await request(app)
-      .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
-      .attach("file", Buffer.alloc(10 * 1024 * 1024 + 1), {
-        filename: "large.bin",
-        contentType: "application/octet-stream",
+    const previous = process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES;
+    delete process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES;
+    vi.resetModules();
+    try {
+      const storage = createStorageService();
+      mockIssueService.getById.mockResolvedValue({
+        id: "11111111-1111-4111-8111-111111111111",
+        companyId: "company-1",
+        identifier: "PAP-1",
       });
+      mockIssueService.createAttachment.mockResolvedValue(makeAttachment("application/octet-stream", "large.bin"));
 
-    expect(res.status).toBe(422);
-    expect(res.body.error).toBe("Attachment exceeds 10485760 bytes");
-    expect(storage.__calls.putFile).toBeUndefined();
+      const app = await createApp(storage);
+      const res = await request(app)
+        .post("/api/companies/company-1/issues/11111111-1111-4111-8111-111111111111/attachments")
+        .attach("file", Buffer.alloc(10 * 1024 * 1024 + 1), {
+          filename: "large.bin",
+          contentType: "application/octet-stream",
+        });
+
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("Attachment exceeds 10485760 bytes");
+      expect(storage.__calls.putFile).toBeUndefined();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES;
+      } else {
+        process.env.PAPERCLIP_ATTACHMENT_MAX_BYTES = previous;
+      }
+      vi.resetModules();
+    }
   });
 
   it("enforces the configured per-company issue attachment limit", async () => {
