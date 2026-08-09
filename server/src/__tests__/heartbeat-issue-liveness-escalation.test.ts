@@ -70,11 +70,16 @@ import { heartbeatService } from "../services/heartbeat.ts";
 import { attentionService } from "../services/attention.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { issueService } from "../services/issues.ts";
-import { runningProcesses } from "../adapters/index.ts";
+import {
+  registerServerAdapter,
+  runningProcesses,
+  unregisterServerAdapter,
+} from "../adapters/index.ts";
 import { DEFAULT_LIVENESS_REESCALATION_COOLDOWN_MS } from "../services/recovery/service.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+const TEST_ADAPTER_TYPE = "test_adapter";
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -89,6 +94,17 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-issue-liveness-");
     db = createDb(tempDb.connectionString);
+    registerServerAdapter({
+      type: TEST_ADAPTER_TYPE,
+      supportsLocalAgentJwt: false,
+      execute: mockAdapterExecute,
+      testEnvironment: async () => ({
+        adapterType: TEST_ADAPTER_TYPE,
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
   }, 30_000);
 
   afterEach(async () => {
@@ -131,6 +147,7 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
   });
 
   afterAll(async () => {
+    unregisterServerAdapter(TEST_ADAPTER_TYPE);
     await tempDb?.cleanup();
   }, 30_000);
 
@@ -263,7 +280,7 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
       name: "Priya",
       role: "engineer",
       status: "idle",
-      adapterType: "test_adapter",
+      adapterType: TEST_ADAPTER_TYPE,
       adapterConfig: {},
       runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
       permissions: {},
