@@ -14,21 +14,41 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
 const durationsManifest = path.join(repoRoot, "scripts", "general-server-shard-durations.json");
 
-function dryRun(args) {
+function dryRun(args, env = {}) {
   const result = spawnSync(process.execPath, [script, ...args, "--dry-run"], {
     cwd: repoRoot,
     encoding: "utf8",
+    env: { ...process.env, ...env },
   });
   return result;
 }
 
-function dryRunJson(args) {
-  const result = dryRun(args);
+function dryRunJson(args, env = {}) {
+  const result = dryRun(args, env);
   assert.equal(result.status, 0, `expected success for ${args.join(" ")}: ${result.stderr}`);
   return JSON.parse(result.stdout);
 }
 
 const SHARD_COUNT = 4;
+
+test("only PAPERCLIP_VITEST_TEMP_PARENT overrides the compact Unix temp parent", {
+  skip: process.platform === "win32",
+}, () => {
+  const args = ["--mode", "general", "--group", "general-server"];
+  const explicitParent = path.join(repoRoot, ".executable-test-tmp");
+
+  const defaultRun = dryRunJson(args, {
+    PAPERCLIP_VITEST_TEMP_PARENT: "",
+    TMPDIR: "/generic-tmpdir-must-not-control-the-stable-runner",
+  });
+  const explicitRun = dryRunJson(args, {
+    PAPERCLIP_VITEST_TEMP_PARENT: explicitParent,
+    TMPDIR: "/generic-tmpdir-must-not-control-the-stable-runner",
+  });
+
+  assert.equal(defaultRun.tempRootParent, "/tmp");
+  assert.equal(explicitRun.tempRootParent, explicitParent);
+});
 
 test("the general-server shards form a complete, non-overlapping partition", () => {
   const shards = Array.from({ length: SHARD_COUNT }, (_, index) =>

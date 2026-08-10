@@ -69,6 +69,7 @@ const originalEnv: Record<string, string | undefined> = {
   PAPERCLIP_HOME: process.env.PAPERCLIP_HOME,
   PAPERCLIP_INSTANCE_ID: process.env.PAPERCLIP_INSTANCE_ID,
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
 };
 
 function setNodeVersion(version: string): void {
@@ -412,6 +413,7 @@ describe("claude_local ACP lane", () => {
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v22.12.0");
+    delete process.env.ANTHROPIC_API_KEY;
 
     const result = await testClaudeAcpEnvironment({
       adapterType: "claude_local",

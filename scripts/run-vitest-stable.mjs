@@ -75,6 +75,15 @@ const serializedUiVitestArgs = [
   "--maxWorkers=1",
 ];
 
+function resolveTempRootParent() {
+  const explicitParent = process.env.PAPERCLIP_VITEST_TEMP_PARENT?.trim();
+  if (explicitParent) {
+    return path.resolve(explicitParent);
+  }
+
+  return process.platform === "win32" ? os.tmpdir() : "/tmp";
+}
+
 function walk(dir) {
   const entries = readdirSync(dir);
   const files = [];
@@ -260,7 +269,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
 function runVitest(args, label) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
-  const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
+  const tempRootParent = resolveTempRootParent();
   const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
   // Keep per-run paths compact so Unix socket fixtures stay under macOS path limits.
   const env = {
@@ -415,6 +424,7 @@ if (options.dryRun) {
         shardIndex: options.shardIndex,
         shardCount: options.shardCount,
         group: options.group,
+        tempRootParent: resolveTempRootParent(),
         availableGeneralGroups: generalGroupNames,
         serializedSuiteCount: routeTests.length,
         selectedSerializedSuites: serializedSuites.map((routeTest) => routeTest.repoPath),

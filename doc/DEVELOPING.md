@@ -247,6 +247,19 @@ pnpm test
 pnpm test:watch
 ```
 
+The stable Vitest runner keeps its generated roots directly under `/tmp` on
+Unix so Unix-socket fixture paths remain compact. If `/tmp` is mounted
+`noexec`, select an existing writable, executable, and preferably short parent
+explicitly:
+
+```sh
+PAPERCLIP_VITEST_TEMP_PARENT=/path/to/executable-tmp pnpm test:run
+```
+
+The runner intentionally does not use the caller's generic `TMPDIR` for this
+outer root. It sets an isolated `TMPDIR` inside each generated test root;
+`PAPERCLIP_VITEST_TEMP_PARENT` is the only override for the parent.
+
 Browser suites stay separate:
 
 ```sh
