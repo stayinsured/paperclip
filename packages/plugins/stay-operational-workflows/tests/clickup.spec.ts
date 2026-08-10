@@ -27,6 +27,7 @@ import type {
 const companyId = "00000000-0000-4000-8000-000000000001";
 const projectId = "00000000-0000-4000-8000-000000000002";
 const issueId = "00000000-0000-4000-8000-000000000003";
+const proofValidNow = () => new Date("2026-08-07T11:00:00.000Z");
 
 const config: ClickUpDestinationConfig = {
   apiBaseUrl: "https://api.clickup.example/api/v2",
@@ -390,6 +391,7 @@ describe("ClickUp opt-in intake and health", () => {
       companyId, projectId, candidate: candidate(), config,
       authorization: authorization({ intakeEnabled: false }),
       issues: new MemoryIssues(), repository: new MemoryLinks(),
+      now: proofValidNow(),
     })).rejects.toEqual(expect.objectContaining({ code: "clickup_intake_disabled" }));
   });
 
@@ -399,10 +401,12 @@ describe("ClickUp opt-in intake and health", () => {
     const outside = await intakeClickUpTask({
       companyId, projectId, candidate: candidate({ listId: "other-list" }), config,
       authorization: authorization(), issues, repository,
+      now: proofValidNow(),
     });
     const unmarked = await intakeClickUpTask({
       companyId, projectId, candidate: candidate({ customFields: {} }), config,
       authorization: authorization(), issues, repository,
+      now: proofValidNow(),
     });
     expect(outside).toMatchObject({ action: "skipped", reason: "outside_approved_clickup_boundary" });
     expect(unmarked).toMatchObject({ action: "skipped", reason: "intake_opt_in_missing" });
@@ -413,7 +417,10 @@ describe("ClickUp opt-in intake and health", () => {
   it("creates one Paperclip issue and mapping across repeated opted-in intake", async () => {
     const issues = new MemoryIssues();
     const repository = new MemoryLinks();
-    const input = { companyId, projectId, candidate: candidate(), config, authorization: authorization(), issues, repository };
+    const input = {
+      companyId, projectId, candidate: candidate(), config, authorization: authorization(), issues, repository,
+      now: proofValidNow(),
+    };
     const first = await intakeClickUpTask(input);
     const replay = await intakeClickUpTask(input);
     expect(first.action).toBe("created");
@@ -427,6 +434,7 @@ describe("ClickUp opt-in intake and health", () => {
     await expect(intakeClickUpTask({
       companyId, projectId, candidate: candidate({ statusId: "unknown" }), config,
       authorization: authorization(), issues: new MemoryIssues(), repository: new MemoryLinks(),
+      now: proofValidNow(),
     })).rejects.toEqual(expect.objectContaining({ code: "clickup_intake_status_unmapped" }));
   });
 
