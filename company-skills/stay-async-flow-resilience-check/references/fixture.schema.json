@@ -1,0 +1,108 @@
+{
+  "$id": "stay.async-flow-fixture/v1",
+  "title": "Stay async-flow resilience fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "fixtureId", "title", "scenario", "target", "sourceOfTruth", "initialState", "deliveries", "expected"],
+  "properties": {
+    "schemaVersion": { "const": "stay.async-flow-fixture/v1" },
+    "fixtureId": { "type": "string", "pattern": "^AFR-[0-9]{3}$" },
+    "title": { "type": "string", "minLength": 1 },
+    "scenario": {
+      "enum": [
+        "duplicate_delivery", "out_of_order_delivery", "retry_after_timeout",
+        "partial_downstream_failure", "invalid_payload", "idempotency",
+        "terminal_state", "cleanup", "replay", "recovery",
+        "missing_idempotency_identity", "ambiguous_terminal_state",
+        "unsafe_cleanup", "production_target_mismatch"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "system", "surface", "synthetic"],
+      "properties": {
+        "environment": { "enum": ["non_production", "production"] },
+        "system": { "enum": ["web-platform-bff", "hubspot-forms-service", "instant-call-orchestrator"] },
+        "surface": { "enum": ["webhook", "retry", "queue", "callback", "form_ingestion", "hubspot_form_handoff", "instant_call"] },
+        "synthetic": { "const": true }
+      }
+    },
+    "sourceOfTruth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventIdentity", "terminalState", "retryPolicy"],
+      "properties": {
+        "eventIdentity": { "$ref": "#/$defs/identityStateAuthorityRule" },
+        "terminalState": { "$ref": "#/$defs/identityStateAuthorityRule" },
+        "retryPolicy": { "$ref": "#/$defs/retryAuthorityRule" }
+      }
+    },
+    "initialState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operationKey", "status", "completedEffects", "pendingEffects"],
+      "properties": {
+        "operationKey": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "completedEffects": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "pendingEffects": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "deliveries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deliveryId", "arrivalIndex", "attempt", "event", "simulatedOutcome"],
+        "properties": {
+          "deliveryId": { "type": "string" },
+          "arrivalIndex": { "type": "integer", "minimum": 1 },
+          "attempt": { "type": "integer", "minimum": 1 },
+          "event": { "type": "object" },
+          "simulatedOutcome": {
+            "enum": ["accepted", "duplicate", "stale", "timeout_ambiguous", "partial_failure", "invalid", "replayed", "recovered", "not_executed"]
+          }
+        }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "reasonCodes", "finalStatus", "sideEffectCounts", "cleanupAllowed", "replaySafe"],
+      "properties": {
+        "verdict": { "enum": ["pass", "blocked"] },
+        "reasonCodes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "finalStatus": { "type": ["string", "null"] },
+        "sideEffectCounts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "cleanupAllowed": { "type": "boolean" },
+        "replaySafe": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "identityStateAuthorityRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceKind", "ref", "rule", "fields"],
+      "properties": {
+        "evidenceKind": { "enum": ["code", "contract"] },
+        "ref": { "type": ["string", "null"] },
+        "rule": { "type": ["string", "null"] },
+        "fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "retryAuthorityRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceKind", "ref", "rule", "fields"],
+      "properties": {
+        "evidenceKind": { "enum": ["code", "contract", "test"] },
+        "ref": { "type": ["string", "null"] },
+        "rule": { "type": ["string", "null"] },
+        "fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    }
+  }
+}

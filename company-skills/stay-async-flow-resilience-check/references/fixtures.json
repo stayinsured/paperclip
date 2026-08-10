@@ -1,0 +1,246 @@
+[
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-001",
+    "title": "Duplicate webhook delivery is idempotent",
+    "scenario": "duplicate_delivery",
+    "target": { "environment": "non_production", "system": "hubspot-forms-service", "surface": "webhook", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-handoff-v1#event-identity", "rule": "flowId plus eventId", "fields": ["flowId", "eventId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-handoff-v1#terminal-states", "rule": "succeeded and rejected are terminal", "fields": ["succeeded", "rejected"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/form-handoff-retry#duplicate", "rule": "reuse the same operation key for redelivery", "fields": ["operationKey"] }
+    },
+    "initialState": { "operationKey": "flow-001:evt-001", "status": "pending", "completedEffects": [], "pendingEffects": ["form_recorded"] },
+    "deliveries": [
+      { "deliveryId": "delivery-001-a", "arrivalIndex": 1, "attempt": 1, "event": { "flowId": "flow-001", "eventId": "evt-001", "sequence": 1 }, "simulatedOutcome": "accepted" },
+      { "deliveryId": "delivery-001-b", "arrivalIndex": 2, "attempt": 2, "event": { "flowId": "flow-001", "eventId": "evt-001", "sequence": 1 }, "simulatedOutcome": "duplicate" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "succeeded", "sideEffectCounts": { "form_recorded": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-002",
+    "title": "Out-of-order callback does not regress state",
+    "scenario": "out_of_order_delivery",
+    "target": { "environment": "non_production", "system": "instant-call-orchestrator", "surface": "callback", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "code", "ref": "synthetic-code/callback-ledger#identity", "rule": "callId plus eventId", "fields": ["callId", "eventId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-state-v1#terminal", "rule": "completed and failed are terminal", "fields": ["completed", "failed"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/callback-ordering#stale", "rule": "lower sequence is stale after higher sequence", "fields": ["sequence"] }
+    },
+    "initialState": { "operationKey": "call-002:evt-final", "status": "queued", "completedEffects": [], "pendingEffects": ["callback_recorded"] },
+    "deliveries": [
+      { "deliveryId": "delivery-002-final", "arrivalIndex": 1, "attempt": 1, "event": { "callId": "call-002", "eventId": "evt-final", "sequence": 2, "state": "completed" }, "simulatedOutcome": "accepted" },
+      { "deliveryId": "delivery-002-start", "arrivalIndex": 2, "attempt": 1, "event": { "callId": "call-002", "eventId": "evt-start", "sequence": 1, "state": "started" }, "simulatedOutcome": "stale" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "completed", "sideEffectCounts": { "callback_recorded": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-003",
+    "title": "Timeout retry reuses authoritative identity",
+    "scenario": "retry_after_timeout",
+    "target": { "environment": "non_production", "system": "instant-call-orchestrator", "surface": "retry", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-dispatch-v1#operation-key", "rule": "requestId is the operation identity", "fields": ["requestId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-dispatch-v1#terminal", "rule": "dispatched and rejected are terminal", "fields": ["dispatched", "rejected"] },
+      "retryPolicy": { "evidenceKind": "code", "ref": "synthetic-code/call-retry#ambiguous-timeout", "rule": "retry timeout with the same requestId after ledger lookup", "fields": ["requestId", "attempt"] }
+    },
+    "initialState": { "operationKey": "request-003", "status": "pending", "completedEffects": [], "pendingEffects": ["call_dispatched"] },
+    "deliveries": [
+      { "deliveryId": "delivery-003-a", "arrivalIndex": 1, "attempt": 1, "event": { "requestId": "request-003" }, "simulatedOutcome": "timeout_ambiguous" },
+      { "deliveryId": "delivery-003-b", "arrivalIndex": 2, "attempt": 2, "event": { "requestId": "request-003" }, "simulatedOutcome": "accepted" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "dispatched", "sideEffectCounts": { "call_dispatched": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-004",
+    "title": "Partial failure retries only incomplete effect",
+    "scenario": "partial_downstream_failure",
+    "target": { "environment": "non_production", "system": "web-platform-bff", "surface": "queue", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "code", "ref": "synthetic-code/form-queue#identity", "rule": "submissionId is the operation identity", "fields": ["submissionId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-queue-v1#terminal", "rule": "succeeded and rejected are terminal", "fields": ["succeeded", "rejected"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/form-queue#partial-recovery", "rule": "retry pending effects only", "fields": ["completedEffects", "pendingEffects"] }
+    },
+    "initialState": { "operationKey": "submission-004", "status": "processing", "completedEffects": [], "pendingEffects": ["record_persisted", "callback_emitted"] },
+    "deliveries": [
+      { "deliveryId": "delivery-004-a", "arrivalIndex": 1, "attempt": 1, "event": { "submissionId": "submission-004" }, "simulatedOutcome": "partial_failure" },
+      { "deliveryId": "delivery-004-b", "arrivalIndex": 2, "attempt": 2, "event": { "submissionId": "submission-004" }, "simulatedOutcome": "recovered" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "succeeded", "sideEffectCounts": { "record_persisted": 1, "callback_emitted": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-005",
+    "title": "Invalid form payload is rejected before effects",
+    "scenario": "invalid_payload",
+    "target": { "environment": "non_production", "system": "hubspot-forms-service", "surface": "form_ingestion", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-ingestion-v1#identity", "rule": "submissionId is required", "fields": ["submissionId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-ingestion-v1#terminal", "rule": "rejected is terminal for invalid input", "fields": ["rejected"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/form-ingestion#invalid", "rule": "invalid payload is not retried", "fields": ["validationResult"] }
+    },
+    "initialState": { "operationKey": null, "status": "received", "completedEffects": [], "pendingEffects": [] },
+    "deliveries": [
+      { "deliveryId": "delivery-005", "arrivalIndex": 1, "attempt": 1, "event": { "submissionId": null, "fields": {} }, "simulatedOutcome": "invalid" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "rejected", "sideEffectCounts": {}, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-006",
+    "title": "Queue attempts share one idempotency key",
+    "scenario": "idempotency",
+    "target": { "environment": "non_production", "system": "web-platform-bff", "surface": "queue", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "code", "ref": "synthetic-code/bff-queue#identity", "rule": "tenantFlowId plus requestId", "fields": ["tenantFlowId", "requestId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/bff-queue-v1#terminal", "rule": "queued and rejected are terminal intake outcomes", "fields": ["queued", "rejected"] },
+      "retryPolicy": { "evidenceKind": "code", "ref": "synthetic-code/bff-queue#retry", "rule": "reuse the derived operation key", "fields": ["operationKey"] }
+    },
+    "initialState": { "operationKey": "flow-006:request-006", "status": "pending", "completedEffects": [], "pendingEffects": ["job_enqueued"] },
+    "deliveries": [
+      { "deliveryId": "delivery-006-a", "arrivalIndex": 1, "attempt": 1, "event": { "tenantFlowId": "flow-006", "requestId": "request-006" }, "simulatedOutcome": "accepted" },
+      { "deliveryId": "delivery-006-b", "arrivalIndex": 2, "attempt": 2, "event": { "tenantFlowId": "flow-006", "requestId": "request-006" }, "simulatedOutcome": "replayed" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "queued", "sideEffectCounts": { "job_enqueued": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-007",
+    "title": "Terminal state rejects late regression",
+    "scenario": "terminal_state",
+    "target": { "environment": "non_production", "system": "instant-call-orchestrator", "surface": "callback", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-state-v1#identity", "rule": "callId plus eventId", "fields": ["callId", "eventId"] },
+      "terminalState": { "evidenceKind": "code", "ref": "synthetic-code/call-state-machine#terminal", "rule": "completed and failed cannot transition to running", "fields": ["completed", "failed"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/call-state#late-event", "rule": "record late delivery as stale", "fields": ["sequence"] }
+    },
+    "initialState": { "operationKey": "call-007:evt-complete", "status": "running", "completedEffects": [], "pendingEffects": ["completion_recorded"] },
+    "deliveries": [
+      { "deliveryId": "delivery-007-a", "arrivalIndex": 1, "attempt": 1, "event": { "callId": "call-007", "eventId": "evt-complete", "sequence": 2, "state": "completed" }, "simulatedOutcome": "accepted" },
+      { "deliveryId": "delivery-007-b", "arrivalIndex": 2, "attempt": 1, "event": { "callId": "call-007", "eventId": "evt-running", "sequence": 1, "state": "running" }, "simulatedOutcome": "stale" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "completed", "sideEffectCounts": { "completion_recorded": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-008",
+    "title": "Cleanup preserves durable replay evidence",
+    "scenario": "cleanup",
+    "target": { "environment": "non_production", "system": "hubspot-forms-service", "surface": "retry", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "code", "ref": "synthetic-code/form-ledger#identity", "rule": "submissionId is the ledger key", "fields": ["submissionId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-ledger-v1#terminal", "rule": "succeeded is terminal", "fields": ["succeeded"] },
+      "retryPolicy": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-ledger-v1#cleanup", "rule": "remove retry timer but retain ledger and terminal receipt", "fields": ["retryTimer", "ledger", "terminalReceipt"] }
+    },
+    "initialState": { "operationKey": "submission-008", "status": "succeeded", "completedEffects": ["form_handoff"], "pendingEffects": ["retry_timer"] },
+    "deliveries": [
+      { "deliveryId": "delivery-008", "arrivalIndex": 1, "attempt": 1, "event": { "submissionId": "submission-008", "action": "cleanup" }, "simulatedOutcome": "accepted" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "succeeded", "sideEffectCounts": { "form_handoff": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-009",
+    "title": "Replay preserves terminal outcome and effects",
+    "scenario": "replay",
+    "target": { "environment": "non_production", "system": "web-platform-bff", "surface": "webhook", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/bff-webhook-v1#identity", "rule": "eventId is stable across replay", "fields": ["eventId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/bff-webhook-v1#terminal", "rule": "accepted is terminal intake state", "fields": ["accepted"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/bff-webhook#replay", "rule": "replay returns stored logical result", "fields": ["eventId"] }
+    },
+    "initialState": { "operationKey": "evt-009", "status": "accepted", "completedEffects": ["job_enqueued"], "pendingEffects": [] },
+    "deliveries": [
+      { "deliveryId": "delivery-009", "arrivalIndex": 1, "attempt": 2, "event": { "eventId": "evt-009" }, "simulatedOutcome": "replayed" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "accepted", "sideEffectCounts": { "job_enqueued": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-010",
+    "title": "Recovery resumes pending effect only",
+    "scenario": "recovery",
+    "target": { "environment": "non_production", "system": "instant-call-orchestrator", "surface": "instant_call", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "code", "ref": "synthetic-code/call-recovery#identity", "rule": "requestId is the durable operation key", "fields": ["requestId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-recovery-v1#terminal", "rule": "succeeded and failed are terminal", "fields": ["succeeded", "failed"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/call-recovery#resume", "rule": "resume pending callback after durable dispatch", "fields": ["completedEffects", "pendingEffects"] }
+    },
+    "initialState": { "operationKey": "request-010", "status": "recovering", "completedEffects": ["call_dispatched"], "pendingEffects": ["callback_recorded"] },
+    "deliveries": [
+      { "deliveryId": "delivery-010", "arrivalIndex": 1, "attempt": 2, "event": { "requestId": "request-010" }, "simulatedOutcome": "recovered" }
+    ],
+    "expected": { "verdict": "pass", "reasonCodes": ["resilience_contract_satisfied"], "finalStatus": "succeeded", "sideEffectCounts": { "call_dispatched": 1, "callback_recorded": 1 }, "cleanupAllowed": true, "replaySafe": true }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-011",
+    "title": "Missing idempotency identity fails closed",
+    "scenario": "missing_idempotency_identity",
+    "target": { "environment": "non_production", "system": "web-platform-bff", "surface": "webhook", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": null, "rule": null, "fields": [] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/bff-webhook-v1#terminal", "rule": "accepted is terminal", "fields": ["accepted"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/bff-webhook#retry", "rule": "identity is required before retry", "fields": ["operationKey"] }
+    },
+    "initialState": { "operationKey": null, "status": "received", "completedEffects": [], "pendingEffects": ["job_enqueued"] },
+    "deliveries": [
+      { "deliveryId": "delivery-011", "arrivalIndex": 1, "attempt": 1, "event": { "opaque": "synthetic" }, "simulatedOutcome": "not_executed" }
+    ],
+    "expected": { "verdict": "blocked", "reasonCodes": ["missing_event_identity_authority"], "finalStatus": null, "sideEffectCounts": {}, "cleanupAllowed": false, "replaySafe": false }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-012",
+    "title": "Ambiguous terminal state fails closed",
+    "scenario": "ambiguous_terminal_state",
+    "target": { "environment": "non_production", "system": "hubspot-forms-service", "surface": "hubspot_form_handoff", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-handoff-v1#identity", "rule": "submissionId is the operation key", "fields": ["submissionId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": null, "rule": null, "fields": [] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/form-handoff#retry", "rule": "terminal authority is required before retry", "fields": ["status"] }
+    },
+    "initialState": { "operationKey": "submission-012", "status": "unknown", "completedEffects": [], "pendingEffects": ["form_handoff"] },
+    "deliveries": [
+      { "deliveryId": "delivery-012", "arrivalIndex": 1, "attempt": 1, "event": { "submissionId": "submission-012", "state": "done_like" }, "simulatedOutcome": "not_executed" }
+    ],
+    "expected": { "verdict": "blocked", "reasonCodes": ["missing_terminal_state_authority"], "finalStatus": null, "sideEffectCounts": {}, "cleanupAllowed": false, "replaySafe": false }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-013",
+    "title": "Unsafe cleanup request fails closed",
+    "scenario": "unsafe_cleanup",
+    "target": { "environment": "non_production", "system": "instant-call-orchestrator", "surface": "retry", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "code", "ref": "synthetic-code/call-ledger#identity", "rule": "requestId is the ledger key", "fields": ["requestId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-ledger-v1#terminal", "rule": "succeeded is terminal", "fields": ["succeeded"] },
+      "retryPolicy": { "evidenceKind": "contract", "ref": "synthetic-contracts/call-ledger-v1#retention", "rule": "retain ledger and terminal receipt for replay", "fields": ["ledger", "terminalReceipt"] }
+    },
+    "initialState": { "operationKey": "request-013", "status": "succeeded", "completedEffects": ["call_dispatched"], "pendingEffects": [] },
+    "deliveries": [
+      { "deliveryId": "delivery-013", "arrivalIndex": 1, "attempt": 1, "event": { "requestId": "request-013", "cleanup": "delete_ledger_and_receipt" }, "simulatedOutcome": "not_executed" }
+    ],
+    "expected": { "verdict": "blocked", "reasonCodes": ["unsafe_cleanup_requested"], "finalStatus": "succeeded", "sideEffectCounts": { "call_dispatched": 1 }, "cleanupAllowed": false, "replaySafe": false }
+  },
+  {
+    "schemaVersion": "stay.async-flow-fixture/v1",
+    "fixtureId": "AFR-014",
+    "title": "Production target mismatch stops offline validation",
+    "scenario": "production_target_mismatch",
+    "target": { "environment": "production", "system": "hubspot-forms-service", "surface": "webhook", "synthetic": true },
+    "sourceOfTruth": {
+      "eventIdentity": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-webhook-v1#identity", "rule": "eventId is the operation key", "fields": ["eventId"] },
+      "terminalState": { "evidenceKind": "contract", "ref": "synthetic-contracts/form-webhook-v1#terminal", "rule": "accepted and rejected are terminal", "fields": ["accepted", "rejected"] },
+      "retryPolicy": { "evidenceKind": "test", "ref": "synthetic-tests/form-webhook#offline-only", "rule": "production targets are never executed by this skill", "fields": ["environment"] }
+    },
+    "initialState": { "operationKey": "evt-014", "status": "received", "completedEffects": [], "pendingEffects": ["form_recorded"] },
+    "deliveries": [
+      { "deliveryId": "delivery-014", "arrivalIndex": 1, "attempt": 1, "event": { "eventId": "evt-014" }, "simulatedOutcome": "not_executed" }
+    ],
+    "expected": { "verdict": "blocked", "reasonCodes": ["production_target_mismatch"], "finalStatus": null, "sideEffectCounts": {}, "cleanupAllowed": false, "replaySafe": false }
+  }
+]

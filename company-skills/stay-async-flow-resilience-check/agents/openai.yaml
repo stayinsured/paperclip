@@ -1,0 +1,4 @@
+interface:
+  display_name: "Async Flow Resilience Check"
+  short_description: "Validate async-flow resilience offline"
+  default_prompt: "Use $stay-async-flow-resilience-check to validate these sanitized async-flow fixtures without external calls."

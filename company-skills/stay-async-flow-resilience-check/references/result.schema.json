@@ -1,0 +1,84 @@
+{
+  "$id": "stay.async-flow-result/v1",
+  "title": "Stay async-flow resilience result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "skillKey", "fixtureId", "scenario", "verdict", "reasonCodes", "authoritativeEvidence", "checks", "observed", "safety", "missingEvidence", "summary"],
+  "properties": {
+    "schemaVersion": { "const": "stay.async-flow-result/v1" },
+    "skillKey": { "type": "string", "minLength": 1 },
+    "fixtureId": { "type": "string", "pattern": "^AFR-[0-9]{3}$" },
+    "scenario": { "type": "string" },
+    "verdict": { "enum": ["pass", "fail", "blocked"] },
+    "reasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "resilience_contract_satisfied", "authoritative_expectation_mismatch",
+          "missing_event_identity_authority", "missing_terminal_state_authority",
+          "missing_retry_authority", "contradictory_authority",
+          "unsafe_source_content", "unsafe_cleanup_requested",
+          "production_target_mismatch", "external_access_required", "fixture_invalid"
+        ]
+      }
+    },
+    "authoritativeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventIdentityRef", "terminalStateRef", "retryPolicyRef", "logsUsedAsAuthority"],
+      "properties": {
+        "eventIdentityRef": { "type": ["string", "null"] },
+        "terminalStateRef": { "type": ["string", "null"] },
+        "retryPolicyRef": { "type": ["string", "null"] },
+        "logsUsedAsAuthority": { "const": false }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "expected", "observed", "evidenceRefs"],
+        "properties": {
+          "name": {
+            "enum": ["event_identity", "delivery_order", "retry", "partial_failure", "invalid_payload", "idempotency", "terminal_state", "cleanup", "replay", "recovery", "safety_boundary"]
+          },
+          "status": { "enum": ["pass", "fail", "blocked", "not_applicable"] },
+          "expected": { "type": "string" },
+          "observed": { "type": "string" },
+          "evidenceRefs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        }
+      }
+    },
+    "observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deliveryDecisions", "finalStatus", "sideEffectCounts", "cleanupDecision", "replayDecision", "recoveryDecision"],
+      "properties": {
+        "deliveryDecisions": { "type": "array", "items": { "type": "string" } },
+        "finalStatus": { "type": ["string", "null"] },
+        "sideEffectCounts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "cleanupDecision": { "type": "string" },
+        "replayDecision": { "type": "string" },
+        "recoveryDecision": { "type": "string" }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["externalCallsMade", "liveTargetsAccessed", "credentialsUsed", "customerDataUsed", "providerBehaviorInferred", "deploymentsOrRolloutsPerformed"],
+      "properties": {
+        "externalCallsMade": { "const": false },
+        "liveTargetsAccessed": { "const": false },
+        "credentialsUsed": { "const": false },
+        "customerDataUsed": { "const": false },
+        "providerBehaviorInferred": { "const": false },
+        "deploymentsOrRolloutsPerformed": { "const": false }
+      }
+    },
+    "missingEvidence": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "summary": { "type": "string", "minLength": 1 }
+  }
+}
