@@ -8,7 +8,7 @@ import {
   outlineConfigurationFingerprint,
   publishOutlinePreview,
   renderOutlineShadowPreview,
-  type OutlineApiPort,
+  type OutlineMcpPort,
   type OutlineCompletionSource,
   type OutlineDestinationConfig,
   type OutlineDocument,
@@ -27,9 +27,14 @@ const source: OutlineCompletionSource = {
 };
 
 const destination: OutlineDestinationConfig = {
-  apiBaseUrl: "https://docs.example/api",
-  tokenSecretId: "00000000-0000-4000-8000-000000000003",
-  tokenSecretVersion: 1,
+  accessMode: "mcp",
+  connectionId: "outline-sandbox",
+  connectionRevision: "oauth-v1",
+  tools: {
+    documentsInfo: "outline:documents_info",
+    documentsCreate: "outline:documents_create",
+    documentsUpdate: "outline:documents_update",
+  },
   targets: {
     architecture: {
       collectionId: "10000000-0000-4000-8000-000000000001",
@@ -100,19 +105,21 @@ function authorization(overrides: Partial<OutlinePublishingAuthorization> = {}):
       acceptedAt: "2026-08-07T10:30:00.000Z",
     },
     writerProofs: [{
+      accessMode: "mcp",
+      connectionId: destination.connectionId,
       collectionId: destination.targets.architecture.collectionId,
       permission: "read_write",
       allowedParentDocumentIds: [destination.targets.architecture.parentDocumentId],
       configurationFingerprint: fingerprint,
       verifiedAt: "2026-08-07T10:40:00.000Z",
       expiresAt: "2026-08-08T10:40:00.000Z",
-      endpoints: { documentsInfo: true, documentsCreate: true, documentsUpdate: true },
+      tools: { ...destination.tools },
     }],
     ...overrides,
   };
 }
 
-class MemoryOutlineApi implements OutlineApiPort {
+class MemoryOutlineMcp implements OutlineMcpPort {
   documents = new Map<string, OutlineDocument>();
   calls: string[] = [];
   ambiguousCreate = false;
@@ -203,8 +210,48 @@ describe("Outline shadow preview", () => {
 });
 
 describe("Outline publishing gate", () => {
+  it("rejects any non-MCP destination before provider access", () => {
+    const nonMcpDestination = { ...destination, accessMode: "http" as "mcp" };
+    expect(() => outlineConfigurationFingerprint(nonMcpDestination))
+      .toThrow("outline_mcp_access_required");
+  });
+
+  it("binds writer proof to the exact MCP connection and tool set", async () => {
+    const api = new MemoryOutlineMcp();
+    const auth = authorization();
+    auth.writerProofs = auth.writerProofs!.map((proof) => ({
+      ...proof,
+      connectionId: "another-outline-connection",
+    }));
+    await expect(publishOutlinePreview({
+      preview: preview(),
+      destination,
+      authorization: auth,
+      api,
+      now: new Date("2026-08-07T11:00:00.000Z"),
+    })).rejects.toEqual(expect.objectContaining({ code: "outline_writer_proof_mcp_connection_mismatch" }));
+    expect(api.calls).toEqual([]);
+  });
+
+  it("fails closed when writer proof names a different MCP tool", async () => {
+    const api = new MemoryOutlineMcp();
+    const auth = authorization();
+    auth.writerProofs = auth.writerProofs!.map((proof) => ({
+      ...proof,
+      tools: { ...proof.tools, documentsUpdate: "outline:other_update_tool" },
+    }));
+    await expect(publishOutlinePreview({
+      preview: preview(),
+      destination,
+      authorization: auth,
+      api,
+      now: new Date("2026-08-07T11:00:00.000Z"),
+    })).rejects.toEqual(expect.objectContaining({ code: "outline_writer_mcp_tool_scope_incomplete" }));
+    expect(api.calls).toEqual([]);
+  });
+
   it("makes a write impossible while read-only mode is active", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     await expect(publishOutlinePreview({
       preview: preview(),
       destination,
@@ -216,7 +263,7 @@ describe("Outline publishing gate", () => {
   });
 
   it("fails before provider access when approval does not match exact config", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     const auth = authorization();
     auth.exactConfigurationApproval = {
       ...auth.exactConfigurationApproval!,
@@ -233,7 +280,7 @@ describe("Outline publishing gate", () => {
   });
 
   it("fails closed before provider access when the writer proof is not current", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     const auth = authorization();
     auth.writerProofs = auth.writerProofs!.map((proof) => ({
       ...proof,
@@ -252,7 +299,7 @@ describe("Outline publishing gate", () => {
 
 describe("Outline idempotent upsert", () => {
   it("creates once, then treats a rerun as already current", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     const now = new Date("2026-08-07T11:00:00.000Z");
     const first = await publishOutlinePreview({ preview: preview(), destination, authorization: authorization(), api, now });
     const second = await publishOutlinePreview({ preview: preview(), destination, authorization: authorization(), api, now });
@@ -264,7 +311,7 @@ describe("Outline idempotent upsert", () => {
   });
 
   it("updates the same canonical document after a policy reassessment", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     const firstPreview = preview("materiality-v1");
     await publishOutlinePreview({
       preview: firstPreview, destination, authorization: authorization(), api,
@@ -293,7 +340,7 @@ describe("Outline idempotent upsert", () => {
   });
 
   it("reconciles an ambiguous create before deciding whether to retry", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     api.ambiguousCreate = true;
     api.commitAmbiguousCreate = true;
     const result = await publishOutlinePreview({
@@ -309,7 +356,7 @@ describe("Outline idempotent upsert", () => {
   });
 
   it("returns one exception identity without touching source completion", async () => {
-    const api = new MemoryOutlineApi();
+    const api = new MemoryOutlineMcp();
     api.ambiguousCreate = true;
     const first = await publishOutlinePreview({
       preview: preview(), destination, authorization: authorization(), api,

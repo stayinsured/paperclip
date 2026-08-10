@@ -13,14 +13,21 @@ export class OutlinePublishingDeniedError extends Error {
 }
 
 export function outlineConfigurationFingerprint(config: OutlineDestinationConfig): string {
-  const url = new URL(config.apiBaseUrl);
-  if (url.protocol !== "https:" || url.username || url.password) {
-    throw new OutlinePublishingDeniedError("outline_api_url_not_https");
+  if (config.accessMode !== "mcp") {
+    throw new OutlinePublishingDeniedError("outline_mcp_access_required");
+  }
+  if (!config.connectionId.trim()) {
+    throw new OutlinePublishingDeniedError("outline_mcp_connection_missing");
+  }
+  const toolNames = Object.values(config.tools);
+  if (toolNames.some((tool) => !tool.trim()) || new Set(toolNames).size !== toolNames.length) {
+    throw new OutlinePublishingDeniedError("outline_mcp_tool_set_invalid");
   }
   return configurationFingerprint({
-    apiBaseUrl: url.toString(),
-    tokenSecretId: config.tokenSecretId,
-    tokenSecretVersion: config.tokenSecretVersion ?? null,
+    accessMode: config.accessMode,
+    connectionId: config.connectionId,
+    connectionRevision: config.connectionRevision ?? null,
+    tools: config.tools,
     targets: config.targets,
   });
 }
@@ -55,14 +62,21 @@ export function assertOutlinePublishingAuthorized(input: {
   if (proof.configurationFingerprint !== fingerprint) {
     throw new OutlinePublishingDeniedError("outline_writer_proof_configuration_mismatch");
   }
+  if (proof.accessMode !== "mcp" || proof.connectionId !== destination.connectionId) {
+    throw new OutlinePublishingDeniedError("outline_writer_proof_mcp_connection_mismatch");
+  }
   if (proof.permission !== "read_write") {
     throw new OutlinePublishingDeniedError("outline_collection_not_writable");
   }
   if (!proof.allowedParentDocumentIds.includes(preview.parentDocumentId)) {
     throw new OutlinePublishingDeniedError("outline_parent_not_in_writer_proof");
   }
-  if (!proof.endpoints.documentsInfo || !proof.endpoints.documentsCreate || !proof.endpoints.documentsUpdate) {
-    throw new OutlinePublishingDeniedError("outline_writer_endpoint_scope_incomplete");
+  if (
+    proof.tools.documentsInfo !== destination.tools.documentsInfo ||
+    proof.tools.documentsCreate !== destination.tools.documentsCreate ||
+    proof.tools.documentsUpdate !== destination.tools.documentsUpdate
+  ) {
+    throw new OutlinePublishingDeniedError("outline_writer_mcp_tool_scope_incomplete");
   }
   const nowMs = (input.now ?? new Date()).getTime();
   const verifiedAtMs = Date.parse(proof.verifiedAt);

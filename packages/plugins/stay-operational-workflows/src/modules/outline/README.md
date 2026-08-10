@@ -22,16 +22,16 @@ The current plugin release is structurally shadow-only. The publishing service i
 1. the module, destination, and external-write switches are enabled;
 2. read-only mode is disabled;
 3. a board/user confirmation accepted the exact destination configuration fingerprint;
-4. the configured API endpoint is HTTPS and contains no URL credentials;
+4. the approved access mode is MCP and binds one exact Paperclip MCP connection plus exact document info/create/update tools;
 5. a current proof confirms `read_write` access to the exact collection and parent;
 6. the proof covers `documents.info`, `documents.create`, and `documents.update`;
 7. the preview still resolves to the approved collection and parent.
 
-Changing the endpoint, secret reference/version, collection, or any parent invalidates both approval and writer proof before provider access.
+Changing the MCP connection, connection revision, tool names, collection, or any parent invalidates both approval and writer proof before provider access.
 
 ## Idempotency and reconciliation
 
-Outline permits a caller-supplied document UUID. The module derives it deterministically from company plus canonical subject key, reads that identity before mutation, and then creates or updates it. An unchanged rerun is a no-op.
+The brokered Outline MCP tools permit a caller-supplied document UUID. The module derives it deterministically from company plus canonical subject key, reads that identity before mutation, and then creates or updates it. An unchanged rerun is a no-op.
 
 A transport failure, provider 5xx, invalid success response, verification mismatch, or document conflict after a write is ambiguous. The module reads the deterministic UUID before deciding whether to retry:
 
@@ -43,11 +43,11 @@ The stable exception key is company plus source issue, allowing the shared excep
 
 ## Failure and rollback
 
-- 401/403 and provider rejections are terminal.
-- 429 and read-side 5xx responses are retryable; `Retry-After` is preserved when supplied.
+- MCP authentication/scope denials and provider rejections are terminal.
+- MCP rate-limit and provider-unavailable responses are retryable; a broker-provided retry delay is preserved when supplied.
 - Receipts contain identity hashes and destination IDs, but never the title, body, token, or provider payload.
 - A publishing failure never reopens, rewrites, or falsely completes the Paperclip issue.
 
-Rollback is configuration-only: keep `readOnly=true`, `destinationEnabled=false`, and the external-write switch off. These defaults preserve reconciliation and preview inspection with zero external writes.
+The module contains no direct HTTP client, bearer token, or secret resolver; all provider access must arrive through the approved MCP port. Rollback is configuration-only: keep `readOnly=true`, `destinationEnabled=false`, and the external-write switch off. These defaults preserve reconciliation and preview inspection with zero external writes.
 
 Provider-connected validation belongs to the separately evidenced QA sandbox UAT lane. Never substitute a production Outline identity.

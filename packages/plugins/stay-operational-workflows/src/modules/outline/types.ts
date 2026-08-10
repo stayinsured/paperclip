@@ -44,9 +44,14 @@ export interface OutlineTargetDestination {
 }
 
 export interface OutlineDestinationConfig {
-  apiBaseUrl: string;
-  tokenSecretId: string;
-  tokenSecretVersion?: number | null;
+  accessMode: "mcp";
+  connectionId: string;
+  connectionRevision?: string | null;
+  tools: {
+    documentsInfo: string;
+    documentsCreate: string;
+    documentsUpdate: string;
+  };
   targets: Record<OutlineTarget, OutlineTargetDestination>;
 }
 
@@ -80,16 +85,18 @@ export interface OutlineExactConfigurationApproval {
 }
 
 export interface OutlineCollectionWriterProof {
+  accessMode: "mcp";
+  connectionId: string;
   collectionId: string;
   permission: "read_write";
   allowedParentDocumentIds: string[];
   configurationFingerprint: string;
   verifiedAt: string;
   expiresAt: string;
-  endpoints: {
-    documentsInfo: true;
-    documentsCreate: true;
-    documentsUpdate: true;
+  tools: {
+    documentsInfo: string;
+    documentsCreate: string;
+    documentsUpdate: string;
   };
 }
 
@@ -111,7 +118,7 @@ export interface OutlineDocument {
   updatedAt?: string | null;
 }
 
-export interface OutlineApiPort {
+export interface OutlineMcpPort {
   getDocument(id: string): Promise<OutlineDocument | null>;
   createDocument(input: {
     id: string;

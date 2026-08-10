@@ -1,8 +1,8 @@
 import { assertOutlinePublishingAuthorized } from "./authorization.js";
-import { OutlineAmbiguousWriteError, OutlineApiError } from "./api.js";
+import { OutlineAmbiguousWriteError, OutlineMcpError } from "./mcp.js";
 import { outlineExceptionKey, outlineOperationKey, sha256 } from "./identity.js";
 import type {
-  OutlineApiPort,
+  OutlineMcpPort,
   OutlineDestinationConfig,
   OutlineDocument,
   OutlinePublishingAuthorization,
@@ -50,12 +50,12 @@ function assertExistingDocumentDestination(document: OutlineDocument, preview: O
     document.collectionId !== preview.collectionId ||
     document.parentDocumentId !== preview.parentDocumentId
   ) {
-    throw new OutlineApiError("outline_deterministic_document_destination_conflict", false);
+    throw new OutlineMcpError("outline_deterministic_document_destination_conflict", false);
   }
 }
 
 async function reconcileAfterAmbiguousWrite(
-  api: OutlineApiPort,
+  api: OutlineMcpPort,
   preview: OutlineShadowPreview,
   error: OutlineAmbiguousWriteError,
 ): Promise<OutlinePublishReceipt> {
@@ -63,7 +63,7 @@ async function reconcileAfterAmbiguousWrite(
   try {
     reconciled = await api.getDocument(preview.deterministicDocumentId);
   } catch (readError) {
-    const typed = readError instanceof OutlineApiError ? readError : new OutlineApiError("outline_reconciliation_failed", true);
+    const typed = readError instanceof OutlineMcpError ? readError : new OutlineMcpError("outline_reconciliation_failed", true);
     return receipt(preview, {
       action: "failed",
       outcome: typed.retryable ? "retryable_failure" : "terminal_failure",
@@ -86,9 +86,9 @@ async function reconcileAfterAmbiguousWrite(
     try {
       assertExistingDocumentDestination(reconciled, preview);
     } catch (destinationError) {
-      const typed = destinationError instanceof OutlineApiError
+      const typed = destinationError instanceof OutlineMcpError
         ? destinationError
-        : new OutlineApiError("outline_reconciliation_destination_conflict", false);
+        : new OutlineMcpError("outline_reconciliation_destination_conflict", false);
       return receipt(preview, {
         action: "failed",
         outcome: "terminal_failure",
@@ -111,7 +111,7 @@ export async function publishOutlinePreview(input: {
   preview: OutlineShadowPreview;
   destination: OutlineDestinationConfig;
   authorization: OutlinePublishingAuthorization;
-  api: OutlineApiPort;
+  api: OutlineMcpPort;
   now?: Date;
 }): Promise<OutlinePublishReceipt> {
   const { preview, destination, authorization, api } = input;
@@ -173,7 +173,7 @@ export async function publishOutlinePreview(input: {
     if (error instanceof OutlineAmbiguousWriteError) {
       return reconcileAfterAmbiguousWrite(api, preview, error);
     }
-    const typed = error instanceof OutlineApiError ? error : new OutlineApiError("outline_publish_failed", false);
+    const typed = error instanceof OutlineMcpError ? error : new OutlineMcpError("outline_publish_failed", false);
     return receipt(preview, {
       action: "failed",
       outcome: typed.retryable ? "retryable_failure" : "terminal_failure",
