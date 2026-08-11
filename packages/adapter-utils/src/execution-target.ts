@@ -1278,6 +1278,8 @@ async function readBridgeForwardResponseBody(response: Response, maxBodyBytes: n
 const PROCESS_SESSION_PROXY_SCRIPT = "paperclip-process-session-proxy.mjs";
 const PROCESS_SESSION_REMOTE_SCRIPT = "paperclip-process-session-remote.mjs";
 const PROCESS_SESSION_AUTH_TIMEOUT_MS = 5_000;
+const PROCESS_SESSION_LIFECYCLE_POLL_ATTEMPTS = 100;
+const PROCESS_SESSION_LIFECYCLE_POLL_INTERVAL_SEC = "0.05";
 
 function jsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -1397,6 +1399,8 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   const sessionDir = path.posix.join(bridgeRuntimeDir, sessionId);
   const stdinDir = path.posix.join(sessionDir, "stdin");
   const eventsDir = path.posix.join(sessionDir, "events");
+  const readyPath = path.posix.join(sessionDir, "ready");
+  const stoppedPath = path.posix.join(sessionDir, "stopped");
   const remoteScriptPath = path.posix.join(bridgeRuntimeDir, PROCESS_SESSION_REMOTE_SCRIPT);
   const client = createCommandManagedSandboxCallbackBridgeQueueClient({
     runner,
@@ -1437,7 +1441,20 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
         `PAPERCLIP_PROCESS_SESSION_DIR=${shellQuote(sessionDir)} ` +
           `PAPERCLIP_PROCESS_SESSION_COMMAND_B64=${shellQuote(commandPayload)} ` +
           `nohup node ${shellQuote(remoteScriptPath)} >/dev/null 2>&1 < /dev/null &`,
-        "printf '%s\\n' \"$!\"",
+        "worker_pid=$!",
+        "attempt=0",
+        `while [ \"$attempt\" -lt ${PROCESS_SESSION_LIFECYCLE_POLL_ATTEMPTS} ]; do`,
+        `  if [ -f ${shellQuote(readyPath)} ]; then`,
+        "    printf '%s\\n' \"$worker_pid\"",
+        "    exit 0",
+        "  fi",
+        "  kill -0 \"$worker_pid\" 2>/dev/null || break",
+        "  attempt=$((attempt + 1))",
+        `  sleep ${PROCESS_SESSION_LIFECYCLE_POLL_INTERVAL_SEC}`,
+        "done",
+        "printf '%s\\n' 'Process session remote worker did not become ready.' >&2",
+        "kill -TERM \"$worker_pid\" 2>/dev/null || true",
+        "exit 1",
       ].join("\n"),
     ),
     cwd: target.remoteCwd,
@@ -1448,6 +1465,10 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   });
   if (startResult.timedOut || (startResult.exitCode ?? 1) !== 0) {
     throw new Error(`Failed to start sandbox ACP process session bridge: ${startResult.stderr || startResult.stdout}`);
+  }
+  const remoteWorkerPid = Number(startResult.stdout.trim());
+  if (!Number.isSafeInteger(remoteWorkerPid) || remoteWorkerPid <= 1) {
+    throw new Error(`Sandbox ACP process session bridge returned an invalid worker pid: ${startResult.stdout.trim()}`);
   }
 
   let socket: net.Socket | null = null;
@@ -1627,8 +1648,32 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
         path.posix.join(stdinDir, `${String(stdinSeq + 1).padStart(12, "0")}.json`),
         jsonLine({ type: "stdinEnd" }),
       ).catch(() => undefined);
+      const stopResult = await runner.execute({
+        command: shellCommand,
+        args: shellCommandArgs(
+          [
+            `worker_pid=${shellQuote(String(remoteWorkerPid))}`,
+            "attempt=0",
+            `while [ \"$attempt\" -lt ${PROCESS_SESSION_LIFECYCLE_POLL_ATTEMPTS} ]; do`,
+            `  [ -f ${shellQuote(stoppedPath)} ] && exit 0`,
+            "  kill -0 \"$worker_pid\" 2>/dev/null || exit 0",
+            "  attempt=$((attempt + 1))",
+            `  sleep ${PROCESS_SESSION_LIFECYCLE_POLL_INTERVAL_SEC}`,
+            "done",
+            "exit 1",
+          ].join("\n"),
+        ),
+        cwd: target.remoteCwd,
+        env: {
+          PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge",
+        },
+        timeoutMs,
+      }).catch(() => null);
       await client.remove(sessionDir).catch(() => undefined);
       await fs.rm(proxyDir, { recursive: true, force: true }).catch(() => undefined);
+      if (!stopResult || stopResult.timedOut || (stopResult.exitCode ?? 1) !== 0) {
+        throw new Error(`Sandbox ACP process session worker ${remoteWorkerPid} did not stop cleanly.`);
+      }
     },
   };
 }
@@ -1691,8 +1736,13 @@ if (!sessionDir || !commandPayload) throw new Error("Missing process session bri
 
 const stdinDir = path.posix.join(sessionDir, "stdin");
 const eventsDir = path.posix.join(sessionDir, "events");
+const readyPath = path.posix.join(sessionDir, "ready");
+const stoppedPath = path.posix.join(sessionDir, "stopped");
 let seq = 0;
 let stdinClosed = false;
+let childClosed = false;
+let terminateTimer = null;
+let forceKillTimer = null;
 
 const config = JSON.parse(Buffer.from(commandPayload, "base64").toString("utf8"));
 await fs.mkdir(stdinDir, { recursive: true });
@@ -1715,18 +1765,76 @@ const child = spawn(config.command, Array.isArray(config.args) ? config.args : [
   cwd: config.cwd || process.cwd(),
   env: { ...process.env, ...(config.env || {}) },
   stdio: ["pipe", "pipe", "pipe"],
+  detached: process.platform !== "win32",
 });
+
+function signalChild(signal) {
+  if (childClosed || typeof child.pid !== "number" || child.pid <= 0) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {}
+  }
+  try {
+    child.kill(signal);
+  } catch {}
+}
+
+function forceStopChild() {
+  if (childClosed || forceKillTimer) return;
+  if (terminateTimer) clearTimeout(terminateTimer);
+  stdinClosed = true;
+  if (!child.stdin.destroyed) child.stdin.end();
+  signalChild("SIGTERM");
+  forceKillTimer = setTimeout(() => signalChild("SIGKILL"), 1000);
+}
+
+function endChildGracefully() {
+  if (childClosed || stdinClosed) return;
+  stdinClosed = true;
+  if (!child.stdin.destroyed) child.stdin.end();
+  terminateTimer = setTimeout(() => {
+    terminateTimer = null;
+    forceStopChild();
+  }, 250);
+}
+
 
 child.stdout.on("data", (chunk) => void writeEvent({ type: "data", stream: "stdout", data: Buffer.from(chunk).toString("base64") }));
 child.stderr.on("data", (chunk) => void writeEvent({ type: "data", stream: "stderr", data: Buffer.from(chunk).toString("base64") }));
 child.on("error", (error) => void writeEvent({ type: "error", message: error.message }));
 // "close" (not "exit") so stdout/stderr fully drain before the exit event;
 // the write chain then guarantees the exit file lands after every data file.
-child.on("close", (code, signal) => void writeEvent({ type: "exit", code, signal }));
+child.on("close", (code, signal) => {
+  childClosed = true;
+  stdinClosed = true;
+  if (forceKillTimer) clearTimeout(forceKillTimer);
+  if (terminateTimer) clearTimeout(terminateTimer);
+  process.off("SIGTERM", forceStopChild);
+  process.off("SIGINT", forceStopChild);
+  void (async () => {
+    await writeEvent({ type: "exit", code, signal });
+    await fs.writeFile(stoppedPath, "\\n", "utf8");
+  })();
+});
+
+process.once("SIGTERM", forceStopChild);
+process.once("SIGINT", forceStopChild);
+await fs.writeFile(readyPath, "\\n", "utf8");
 
 async function pollStdin() {
   while (!stdinClosed) {
-    const entries = (await fs.readdir(stdinDir).catch(() => [])).filter((name) => name.endsWith(".json")).sort();
+    let entries;
+    try {
+      entries = (await fs.readdir(stdinDir)).filter((name) => name.endsWith(".json")).sort();
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") {
+        forceStopChild();
+        break;
+      }
+      throw error;
+    }
     for (const name of entries) {
       const file = path.posix.join(stdinDir, name);
       const raw = await fs.readFile(file, "utf8").catch(() => null);
@@ -1736,8 +1844,7 @@ async function pollStdin() {
       if (message.type === "stdin" && typeof message.data === "string") {
         child.stdin.write(Buffer.from(message.data, "base64"));
       } else if (message.type === "stdinEnd") {
-        stdinClosed = true;
-        child.stdin.end();
+        endChildGracefully();
         break;
       }
     }

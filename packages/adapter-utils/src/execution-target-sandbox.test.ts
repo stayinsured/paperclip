@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import net from "node:net";
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -32,14 +33,60 @@ const execFileAsync = promisify(execFile);
 
 describe("sandbox adapter execution targets", () => {
   const cleanupDirs: string[] = [];
+  const processSessionWorkerPids = new Set<number>();
+
+  function isExecutableProcess(pid: number): boolean {
+    if (process.platform === "linux") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+        if (state === "Z" || state === "X" || state === "x") return false;
+      } catch {
+        return false;
+      }
+    }
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    await waitForCondition(
+      () => Array.from(processSessionWorkerPids).every((pid) => !isExecutableProcess(pid)),
+      "An executable process-session worker survived test cleanup.",
+      2_000,
+    ).catch(() => undefined);
+    const survivingWorkerPids = Array.from(processSessionWorkerPids).filter(isExecutableProcess);
+    for (const pid of survivingWorkerPids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // The worker may exit between the liveness probe and cleanup signal.
+      }
+    }
+    await waitForCondition(
+      () => survivingWorkerPids.every((pid) => !isExecutableProcess(pid)),
+      "A leaked process-session worker survived emergency test cleanup.",
+      2_000,
+    ).catch(() => undefined);
+    for (const pid of survivingWorkerPids.filter(isExecutableProcess)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The worker may exit between the liveness probe and cleanup signal.
+      }
+    }
+    processSessionWorkerPids.clear();
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+    expect(survivingWorkerPids).toEqual([]);
   });
 
   function createLocalSandboxRunner() {
@@ -57,7 +104,7 @@ describe("sandbox adapter execution targets", () => {
       }) => {
         counter += 1;
         const command = input.command === "bash" ? "/bin/bash" : input.command;
-        return runChildProcess(`sandbox-run-${counter}`, command, input.args ?? [], {
+        const result = await runChildProcess(`sandbox-run-${counter}`, command, input.args ?? [], {
           cwd: input.cwd ?? process.cwd(),
           env: input.env ?? {},
           stdin: input.stdin,
@@ -68,6 +115,12 @@ describe("sandbox adapter execution targets", () => {
             ? async (meta) => input.onSpawn?.({ pid: meta.pid, startedAt: meta.startedAt })
             : undefined,
         });
+        const script = input.args?.join("\n") ?? "";
+        if (script.includes("paperclip-process-session-remote.mjs") && script.includes("nohup node")) {
+          const pid = Number(result.stdout.trim());
+          if (Number.isSafeInteger(pid) && pid > 1) processSessionWorkerPids.add(pid);
+        }
+        return result;
       },
     };
   }
