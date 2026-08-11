@@ -11,6 +11,7 @@ const SAFE_ID = /^[A-Za-z0-9._:-]{1,160}$/;
 const SAFE_SLUG = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const SAFE_CHANNEL = /^[CG][A-Z0-9]{8,20}$/;
 const SAFE_VERSION = /^[A-Za-z0-9._:-]{1,160}$/;
+const SLACK_ID_PLACEHOLDER = /^(?:T|C|G)(?:X{8,20}|0{8,20}|1{8,20}|12345678(?:90)?|EXAMPLE[A-Z0-9]*|PLACEHOLDER[A-Z0-9]*|TEST[A-Z0-9]*|YOUR[A-Z0-9]*)$/;
 const REQUIRED_SENTRY_SCOPES = ["event:read", "org:read", "project:read"] as const;
 const REQUIRED_SLACK_SCOPES = ["chat:write"] as const;
 const PROHIBITED_TEXT = [
@@ -68,8 +69,8 @@ export interface SentryPilotConfig {
   };
   slack: {
     apiBaseUrl: "https://slack.com";
-    teamId: string;
-    channelId: string;
+    teamId: string | null;
+    channelId: string | null;
     appId: string | null;
     botUserId: string | null;
     botId: string | null;
@@ -167,6 +168,18 @@ function requiredString(value: unknown, field: string, pattern = SAFE_ID): strin
 function optionalString(value: unknown, field: string, pattern = SAFE_ID): string | null {
   if (value == null || value === "") return null;
   return requiredString(value, field, pattern);
+}
+
+function slackIdentity(value: unknown, field: string, pattern: RegExp, required: boolean): string | null {
+  if (value == null) {
+    if (!required) return null;
+    throw new SentryWorkflowConfigError("invalid_schema", `${field} is invalid`);
+  }
+  const identity = requiredString(value, field, pattern);
+  if (SLACK_ID_PLACEHOLDER.test(identity)) {
+    throw new SentryWorkflowConfigError("invalid_schema", `${field} is invalid`);
+  }
+  return identity;
 }
 
 function positiveInteger(value: unknown, fallback: number, max: number, field: string): number {
@@ -275,8 +288,8 @@ export function parseSentryPilotConfig(input: Record<string, unknown>): SentryPi
     },
     slack: {
       apiBaseUrl: "https://slack.com",
-      teamId: requiredString(slackInput.teamId, "slack.teamId", /^T[A-Z0-9]{8,20}$/),
-      channelId: requiredString(slackInput.channelId, "slack.channelId", SAFE_CHANNEL),
+      teamId: slackIdentity(slackInput.teamId, "slack.teamId", /^T[A-Z0-9]{8,20}$/, slackEnabled),
+      channelId: slackIdentity(slackInput.channelId, "slack.channelId", SAFE_CHANNEL, slackEnabled),
       appId: optionalString(slackInput.appId, "slack.appId", /^A[A-Z0-9]{8,20}$/),
       botUserId: optionalString(slackInput.botUserId, "slack.botUserId", /^[UW][A-Z0-9]{8,20}$/),
       botId: optionalString(slackInput.botId, "slack.botId", /^B[A-Z0-9]{8,20}$/),

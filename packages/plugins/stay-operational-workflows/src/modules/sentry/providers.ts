@@ -272,7 +272,11 @@ export class SlackApiClient implements SlackNotifyPort {
       const unambiguous = response.status === 429 || body.error === "ratelimited";
       throw slackApiError(body, response.status, response, !unambiguous);
     }
-    if (body.channel !== input.config.slack.channelId || typeof body.ts !== "string") {
+    if (
+      typeof body.channel !== "string"
+      || body.channel !== input.config.slack.channelId
+      || typeof body.ts !== "string"
+    ) {
       throw new ProviderRequestError("slack", "ambiguous_destination_mismatch", response.status, null, true);
     }
     return { channelId: body.channel, timestamp: body.ts };

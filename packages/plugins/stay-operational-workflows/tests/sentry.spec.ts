@@ -208,6 +208,61 @@ describe("Sentry workflow contracts", () => {
       .toThrow(/expired/i);
   });
 
+  it("accepts absent or null Slack identities only while Slack notification is disabled", () => {
+    for (const identityFields of [
+      {},
+      { teamId: null, channelId: null },
+    ]) {
+      const input = rawConfig();
+      const slack = input.slack as Record<string, unknown>;
+      delete slack.teamId;
+      delete slack.channelId;
+      Object.assign(slack, identityFields);
+
+      const config = parseSentryPilotConfig(input);
+      expect(config.slackEnabled).toBe(false);
+      expect(config.slack.teamId).toBeNull();
+      expect(config.slack.channelId).toBeNull();
+    }
+
+    for (const [field, value] of [
+      ["teamId", ""],
+      ["teamId", "TXXXXXXXX"],
+      ["teamId", "workspace-name"],
+      ["channelId", ""],
+      ["channelId", "CXXXXXXXX"],
+      ["channelId", "channel-name"],
+    ] as const) {
+      const input = rawConfig();
+      (input.slack as Record<string, unknown>)[field] = value;
+      expect(() => parseSentryPilotConfig(input)).toThrow(new RegExp(`slack\\.${field} is invalid`, "i"));
+    }
+  });
+
+  it("requires exact syntactically valid Slack identities when notification is enabled", () => {
+    const valid = parseSentryPilotConfig(rawConfig({ polling: true, slack: true }));
+    expect(valid.slack.teamId).toBe("T08JDG82W2V");
+    expect(valid.slack.channelId).toBe("C0B6C5VUUUV");
+
+    for (const [field, value] of [
+      ["teamId", undefined],
+      ["teamId", null],
+      ["teamId", "TXXXXXXXX"],
+      ["teamId", "workspace-name"],
+      ["channelId", undefined],
+      ["channelId", null],
+      ["channelId", "CXXXXXXXX"],
+      ["channelId", "channel-name"],
+    ] as const) {
+      const input = rawConfig({ polling: true, slack: true });
+      const slack = input.slack as Record<string, unknown>;
+      if (value === undefined) delete slack[field];
+      else slack[field] = value;
+
+      expect(() => parseSentryPilotConfig(input)).toThrow(new RegExp(`slack\\.${field} is invalid`, "i"));
+    }
+  });
+
   it("sanitizes provider data and uses stable, revision-bound identities", () => {
     const config = activeConfig(true);
     const sanitized = sanitizeSentryIssue(rawSentryIssue(), config);
