@@ -1433,8 +1433,24 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
           },
           waitTimeoutMs: 2_000,
         },
-        runtimeConfig: { heartbeat: { wakeOnDemand: true } },
+        runtimeConfig: {
+          heartbeat: { wakeOnDemand: true },
+          admissionProfile: {
+            gatewayReachable: true,
+            verifiedAt: new Date().toISOString(),
+          },
+        },
       }).where(eq(agents.id, fixture.agents.standard.id));
+      // This fixture exercises a remote gateway and intentionally has no project
+      // workspace. Keep gateway admission enabled while opting out of only the
+      // unrelated workspace canary so the wake reaches the redaction assertions.
+      await db.update(issues).set({
+        executionPolicy: {
+          admission: {
+            requireWorkspaceAvailable: false,
+          },
+        },
+      }).where(eq(issues.id, fixture.issues.reviewRoot.id));
       await db.update(heartbeatRuns).set({
         status: "succeeded",
         finishedAt: new Date("2026-05-14T12:02:00.000Z"),
