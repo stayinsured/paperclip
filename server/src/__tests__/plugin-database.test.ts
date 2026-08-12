@@ -26,11 +26,13 @@ import {
   validatePluginRuntimeQuery,
 } from "../services/plugin-database.js";
 import { buildPluginWorkerEnv, pluginLoader } from "../services/plugin-loader.js";
+import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const multiMigrationPluginKey = "paperclip.dbfixture";
 const llmWikiPluginKey = "paperclipai.plugin-llm-wiki";
+const stayOperationalWorkflowsPluginKey = "staydigital.stay-operational-workflows";
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -215,11 +217,26 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
   }, 20_000);
 
   afterEach(async () => {
-    for (const pluginKey of ["paperclip.dbtest", "paperclip.escape", "paperclip.refresh", multiMigrationPluginKey, llmWikiPluginKey]) {
+    for (const pluginKey of [
+      "paperclip.dbtest",
+      "paperclip.escape",
+      "paperclip.refresh",
+      multiMigrationPluginKey,
+      llmWikiPluginKey,
+    ]) {
       const namespace = derivePluginDatabaseNamespace(pluginKey);
       await db.execute(sql.raw(`DROP SCHEMA IF EXISTS "${namespace}" CASCADE`));
     }
-    await db.execute(sql.raw(`DROP SCHEMA IF EXISTS "${derivePluginDatabaseNamespace(llmWikiPluginKey, "llm_wiki")}" CASCADE`));
+    await db.execute(
+      sql.raw(
+        `DROP SCHEMA IF EXISTS "${derivePluginDatabaseNamespace(llmWikiPluginKey, "llm_wiki")}" CASCADE`,
+      ),
+    );
+    await db.execute(
+      sql.raw(
+        `DROP SCHEMA IF EXISTS "${derivePluginDatabaseNamespace(stayOperationalWorkflowsPluginKey, "stay_operational_workflows")}" CASCADE`,
+      ),
+    );
     await db.delete(pluginMigrations);
     await db.delete(pluginDatabaseNamespaces);
     await db.delete(plugins);
@@ -407,6 +424,63 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     expect(uniqueColumnSets).not.toContain("paperclip_distillation_cursors:company_id,wiki_id,source_scope,scope_key,source_kind");
     expect(uniqueColumnSets).not.toContain("paperclip_distillation_work_items:company_id,wiki_id,idempotency_key");
     expect(uniqueColumnSets).not.toContain("paperclip_page_bindings:company_id,wiki_id,page_path");
+  });
+
+  it("reclaims an orphaned bundled workflow namespace and removes it on hard purge", async () => {
+    const repoRoot = path.basename(process.cwd()) === "server"
+      ? path.resolve(process.cwd(), "..")
+      : process.cwd();
+    const packageRoot = path.join(repoRoot, "packages", "plugins", "stay-operational-workflows");
+    const namespace = derivePluginDatabaseNamespace(
+      stayOperationalWorkflowsPluginKey,
+      "stay_operational_workflows",
+    );
+
+    // Reproduce the pre-fix rollback residue: the plugin row and migration
+    // ledger were purged, but the physical namespace and its first table were
+    // left behind. The next install previously failed on project_configs.
+    await db.execute(sql.raw(`CREATE SCHEMA "${namespace}"`));
+    await db.execute(
+      sql.raw(
+        `CREATE TABLE "${namespace}".project_configs (id uuid PRIMARY KEY)`,
+      ),
+    );
+
+    const loader = pluginLoader(db, {
+      enableLocalFilesystem: false,
+      enableNpmDiscovery: false,
+    });
+    const discovered = await loader.installPlugin({ localPath: packageRoot });
+    expect(discovered.manifest?.id).toBe(stayOperationalWorkflowsPluginKey);
+
+    const [installed] = await db
+      .select()
+      .from(plugins)
+      .where(eq(plugins.pluginKey, stayOperationalWorkflowsPluginKey));
+    expect(installed).toBeDefined();
+
+    const migrations = await db
+      .select()
+      .from(pluginMigrations)
+      .where(eq(pluginMigrations.pluginId, installed!.id));
+    expect(migrations.map((migration) => migration.migrationKey)).toEqual([
+      "001_shadow_foundation.sql",
+      "002_sentry_workflow.sql",
+      "003_clickup_projection.sql",
+      "004_outline_assessments.sql",
+    ]);
+
+    await pluginLifecycleManager(db, { loader }).unload(installed!.id, true);
+
+    const schemaRows = Array.from(
+      await db.execute(
+        sql<{ schema_name: string }>`SELECT schema_name FROM information_schema.schemata WHERE schema_name = ${namespace}`,
+      ) as Iterable<{ schema_name: string }>,
+    );
+    expect(schemaRows).toHaveLength(0);
+    await expect(
+      db.select().from(plugins).where(eq(plugins.id, installed!.id)),
+    ).resolves.toHaveLength(0);
   });
 
   it("applies migrations once and allows whitelisted core joins at runtime", async () => {

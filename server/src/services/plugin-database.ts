@@ -54,6 +54,11 @@ function quoteIdentifier(value: string): string {
   return `"${assertIdentifier(value).replaceAll("\"", "\"\"")}"`;
 }
 
+function advisoryLockKey(value: string): number {
+  const digest = createHash("sha256").update(value).digest("hex");
+  return Number.parseInt(digest.slice(0, 12), 16);
+}
+
 function splitSqlStatements(input: string): string[] {
   const statements: string[] = [];
   let start = 0;
@@ -343,7 +348,7 @@ function resolveMigrationsDir(packageRoot: string, migrationsDir: string): strin
   return resolvedDir;
 }
 
-type PluginDatabaseClient = Pick<Db, "select" | "insert" | "update" | "execute">;
+type PluginDatabaseClient = Pick<Db, "select" | "insert" | "update" | "delete" | "execute">;
 type PluginDatabaseRootClient = PluginDatabaseClient & Partial<Pick<Db, "transaction">>;
 
 export interface ApplyPluginMigrationsOptions {
@@ -457,8 +462,82 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
       .where(eq(pluginDatabaseNamespaces.pluginId, input.pluginId));
   }
 
+  async function purgePluginWithClient(
+    client: PluginDatabaseClient,
+    pluginId: string,
+  ) {
+    await client.execute(sql`SELECT pg_advisory_xact_lock(${advisoryLockKey(pluginId)})`);
+    const [namespace] = await client
+      .select()
+      .from(pluginDatabaseNamespaces)
+      .where(eq(pluginDatabaseNamespaces.pluginId, pluginId))
+      .limit(1);
+    if (namespace) {
+      await client.execute(
+        sql.raw(`DROP SCHEMA IF EXISTS ${quoteIdentifier(namespace.namespaceName)} CASCADE`),
+      );
+    }
+    const [deleted] = await client
+      .delete(plugins)
+      .where(eq(plugins.id, pluginId))
+      .returning();
+    return deleted ?? null;
+  }
+
   return {
     ensureNamespace,
+
+    /**
+     * Fresh hard installs may encounter a namespace orphaned by the historical
+     * purge path, which deleted ownership rows but not the physical schema.
+     * Reclaim only the deterministic namespace when no plugin or namespace
+     * ledger row owns it. The caller runs this inside the install transaction.
+     */
+    async reclaimOrphanedNamespaceForInstall(manifest: PaperclipPluginManifestV1) {
+      if (!manifest.database) return null;
+      await db.execute(
+        sql`SELECT pg_advisory_xact_lock(${advisoryLockKey(`install:${manifest.id}`)})`,
+      );
+      const [existingPlugin] = await db
+        .select()
+        .from(plugins)
+        .where(eq(plugins.pluginKey, manifest.id))
+        .limit(1);
+      if (existingPlugin) return null;
+
+      const namespaceName = derivePluginDatabaseNamespace(
+        manifest.id,
+        manifest.database.namespaceSlug,
+      );
+      const [namespaceOwner] = await db
+        .select()
+        .from(pluginDatabaseNamespaces)
+        .where(eq(pluginDatabaseNamespaces.namespaceName, namespaceName))
+        .limit(1);
+      if (namespaceOwner) {
+        throw new Error(
+          `Plugin database namespace "${namespaceName}" is owned by ${namespaceOwner.pluginKey}`,
+        );
+      }
+
+      await db.execute(
+        sql.raw(`DROP SCHEMA IF EXISTS ${quoteIdentifier(namespaceName)} CASCADE`),
+      );
+      return namespaceName;
+    },
+
+    /**
+     * Permanently remove a plugin and its physical namespace atomically.
+     * Soft uninstall intentionally preserves both.
+     */
+    async purgePlugin(pluginId: string) {
+      if (typeof db.transaction === "function") {
+        return db.transaction(async (tx) =>
+          purgePluginWithClient(tx as PluginDatabaseClient, pluginId),
+        );
+      }
+      return purgePluginWithClient(db, pluginId);
+    },
 
     async applyMigrations(
       pluginId: string,
@@ -473,7 +552,7 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
       const migrationDir = resolveMigrationsDir(packageRoot, manifest.database.migrationsDir);
       const migrationFiles = await listSqlMigrationFiles(migrationDir);
       const coreReadTables = manifest.database.coreReadTables ?? [];
-      const lockKey = Number.parseInt(createHash("sha256").update(pluginId).digest("hex").slice(0, 12), 16);
+      const lockKey = advisoryLockKey(pluginId);
       const persistFailure = options.persistFailure ?? true;
 
       const applyWithClient = async (client: PluginDatabaseClient) => {

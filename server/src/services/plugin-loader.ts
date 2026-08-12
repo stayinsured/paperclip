@@ -504,6 +504,13 @@ export interface PluginLoader {
   cleanupInstallArtifacts(plugin: PluginRecord): Promise<void>;
 
   /**
+   * Permanently remove the plugin registry row and physical database namespace.
+   * Uses the configured migration connection because namespace DDL may require
+   * privileges that are intentionally absent from the runtime connection.
+   */
+  purgePluginData?(pluginId: string): Promise<PluginRecord | null>;
+
+  /**
    * Get the local plugin directory this loader is configured to use.
    */
   getLocalPluginDir(): string;
@@ -1668,6 +1675,10 @@ export function pluginLoader(
       await installDb.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const txRegistry = pluginRegistryService(txDb);
+        const txPluginDatabase = pluginDatabaseService(txDb);
+        if (manifest.database) {
+          await txPluginDatabase.reclaimOrphanedNamespaceForInstall(manifest);
+        }
         const installed = await txRegistry.install(
           {
             packageName: discovered.packageName,
@@ -1681,7 +1692,7 @@ export function pluginLoader(
         }
 
         if (manifest.database) {
-          await pluginDatabaseService(txDb).applyMigrations(
+          await txPluginDatabase.applyMigrations(
             installed.id,
             manifest,
             discovered.packagePath,
@@ -1849,6 +1860,11 @@ export function pluginLoader(
         if (!existsSync(target)) continue;
         await rm(target, { recursive: true, force: true });
       }
+    },
+
+    async purgePluginData(pluginId: string): Promise<PluginRecord | null> {
+      const deleted = await pluginDatabaseService(migrationDb).purgePlugin(pluginId);
+      return deleted as PluginRecord | null;
     },
 
     // -----------------------------------------------------------------------
