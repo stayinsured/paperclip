@@ -47,7 +47,9 @@ from authenticated broker/run context. It must not accept caller-supplied
 identity flags. The core compares every claim to the sealed policy and then
 requires the adapter's broker-side verifier to attest it. A mismatch has one
 generic rejection response so an unauthorized caller cannot enumerate policy
-details. Only one retained-slot lease may exist at a time.
+details. Only one retained-slot lease may exist at a time; an in-flight lease
+reservation rejects overlapping creation attempts before either can receive
+control.
 
 Idle expiry, TTL expiry, explicit lease termination, and broker shutdown revoke
 browser/control access and close Chromium without deleting the slot. A clean
@@ -84,6 +86,29 @@ Do not activate on a shared host where agents and Chromium have the same OS file
 identity. File modes cannot protect the profile from another process owned by
 that identity. Do not expose the sealed slot through a workspace mount or host
 file path.
+
+## Existing-session migration guard
+
+The authenticated STA-2187 browser must not be terminated through the
+delete-on-terminate path before its profile is sealed. Wait for the named QA
+controller to detach and for the host owner to confirm the browser is no longer
+being used. Then, entirely inside the isolated broker boundary:
+
+1. revoke browser/control admission and gracefully stop Chromium;
+2. atomically rename the broker-owned profile into the fixed sealed slot on the
+   same broker volume; do not copy, inspect, archive, mount, or list its
+   contents;
+3. write the owner-approved policy metadata from privately derived broker
+   identity claims, without logging paths, lease/control values, or session
+   material;
+4. stage the persistence source, restart the broker, and request a new
+   authorized lease; and
+5. accept the migration only after the sanitized session probe and reuse smoke
+   pass.
+
+If migration or evidence reporting fails, keep the stopped profile in its
+broker-owned location and stop. Failure must not invoke ordinary lease cleanup
+or owner purge. Purge remains a separate, explicit owner action.
 
 ## Human handoff
 

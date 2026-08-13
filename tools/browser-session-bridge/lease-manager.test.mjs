@@ -65,6 +65,7 @@ async function fixture({
   root,
   persistentStates = new Map(),
   sessionValid = false,
+  sessionProbe,
   identityVerifier = async ({ identity }) => identity.attested === true,
   ownerVerifier = async ({ ownerIdentity }) => ownerIdentity.attested === true,
 } = {}) {
@@ -77,7 +78,7 @@ async function fixture({
     assertIsolation: () => {},
     identityVerifier,
     ownerVerifier,
-    sessionProbe: async () => sessionValid,
+    sessionProbe: sessionProbe ?? (async () => sessionValid),
     driverFactory: async ({ profileDir }) => {
       const state = persistentStates.get(profileDir) ?? { value: "neutral" };
       persistentStates.set(profileDir, state);
@@ -269,6 +270,35 @@ test("sealed profile rejects cross-company, portal, principal, agent, issue, and
   const lease = await manager.createSealed({ identity: SEALED_IDENTITY });
   await assert.rejects(manager.createSealed({ identity: SEALED_IDENTITY }), /already has an active lease/);
   assert.doesNotMatch(JSON.stringify(lease), /profileDir|principal|owner|cookie|storage|cdp/i);
+});
+
+test("sealed profile rejects a concurrent lease while the first lease is still starting", async () => {
+  let releaseProbe;
+  let markProbeStarted;
+  const probeStarted = new Promise((resolve) => {
+    markProbeStarted = resolve;
+  });
+  const probeReleased = new Promise((resolve) => {
+    releaseProbe = resolve;
+  });
+  const { manager } = await fixture({
+    sessionProbe: async () => {
+      markProbeStarted();
+      await probeReleased;
+      return true;
+    },
+  });
+  await provision(manager);
+
+  const firstLease = manager.createSealed({ identity: SEALED_IDENTITY });
+  await probeStarted;
+  await assert.rejects(
+    manager.createSealed({ identity: SEALED_IDENTITY }),
+    /already has an active lease/,
+  );
+  releaseProbe();
+  const lease = await firstLease;
+  await manager.terminate({ leaseId: lease.leaseId });
 });
 
 test("owner can authorize a future issue without changing the sealed identity", async () => {

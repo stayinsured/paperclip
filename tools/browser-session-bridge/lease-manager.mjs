@@ -173,14 +173,21 @@ export class BrowserLeaseManager {
     await this.#assertSealedIdentity(identity, slot);
     if (this.#activeSealedLeaseId) throw new Error("Sealed browser profile already has an active lease");
     const leaseId = randomUUID();
+    this.#activeSealedLeaseId = leaseId;
     const createdAtMs = this.#now();
-    const driver = await this.#driverFactory({
-      cdpHost: LOOPBACK_HOST,
-      issueId: identity.issueId,
-      leaseId,
-      profileDir: slot.profileDir,
-      profileMode: "sealed",
-    });
+    let driver;
+    try {
+      driver = await this.#driverFactory({
+        cdpHost: LOOPBACK_HOST,
+        issueId: identity.issueId,
+        leaseId,
+        profileDir: slot.profileDir,
+        profileMode: "sealed",
+      });
+    } catch (error) {
+      if (this.#activeSealedLeaseId === leaseId) this.#activeSealedLeaseId = null;
+      throw error;
+    }
     let sessionValid = false;
     try {
       sessionValid =
