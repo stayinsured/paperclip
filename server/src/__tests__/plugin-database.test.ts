@@ -426,7 +426,7 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     expect(uniqueColumnSets).not.toContain("paperclip_page_bindings:company_id,wiki_id,page_path");
   });
 
-  it("reclaims an orphaned bundled workflow namespace and removes it on hard purge", async () => {
+  it("reclaims an orphaned bundled workflow namespace and supports a clean repeated install", async () => {
     const repoRoot = path.basename(process.cwd()) === "server"
       ? path.resolve(process.cwd(), "..")
       : process.cwd();
@@ -481,6 +481,39 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     await expect(
       db.select().from(plugins).where(eq(plugins.id, installed!.id)),
     ).resolves.toHaveLength(0);
+
+    const repeatedInstall = await loader.installPlugin({ localPath: packageRoot });
+    expect(repeatedInstall.manifest?.id).toBe(stayOperationalWorkflowsPluginKey);
+
+    const [reinstalled] = await db
+      .select()
+      .from(plugins)
+      .where(eq(plugins.pluginKey, stayOperationalWorkflowsPluginKey));
+    expect(reinstalled).toBeDefined();
+    expect(reinstalled!.id).not.toBe(installed!.id);
+
+    const repeatedMigrations = await db
+      .select()
+      .from(pluginMigrations)
+      .where(eq(pluginMigrations.pluginId, reinstalled!.id));
+    expect(repeatedMigrations.map((migration) => migration.migrationKey)).toEqual([
+      "001_shadow_foundation.sql",
+      "002_sentry_workflow.sql",
+      "003_clickup_projection.sql",
+      "004_outline_assessments.sql",
+    ]);
+
+    const projectConfigTables = Array.from(
+      await db.execute(
+        sql<{ table_name: string }>`
+          SELECT table_name
+          FROM information_schema.tables
+          WHERE table_schema = ${namespace}
+            AND table_name = 'project_configs'
+        `,
+      ) as Iterable<{ table_name: string }>,
+    );
+    expect(projectConfigTables).toEqual([{ table_name: "project_configs" }]);
   });
 
   it("applies migrations once and allows whitelisted core joins at runtime", async () => {
