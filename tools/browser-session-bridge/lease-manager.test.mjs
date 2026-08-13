@@ -6,10 +6,29 @@ import test from "node:test";
 
 import {
   BrowserLeaseManager,
+  HUBSPOT_SANDBOX_PORTAL_ID,
   assertIsolatedRuntime,
   browserRuntimeContract,
   redactCapture,
 } from "./lease-manager.mjs";
+
+const SEALED_BINDING = Object.freeze({
+  companyId: "company-stay-digital-products",
+  portalId: HUBSPOT_SANDBOX_PORTAL_ID,
+  principalId: "marketing-editor",
+  controllerAgentId: "named-qa-agent",
+  authorizedIssueIds: ["STA-2187"],
+});
+const OWNER_IDENTITY = Object.freeze({ ownerId: "board-owner", attested: true });
+const RETENTION_POLICY = Object.freeze({ mode: "retain_until_owner_purge", ownerId: "board-owner" });
+const SEALED_IDENTITY = Object.freeze({
+  companyId: SEALED_BINDING.companyId,
+  portalId: SEALED_BINDING.portalId,
+  principalId: SEALED_BINDING.principalId,
+  agentId: SEALED_BINDING.controllerAgentId,
+  issueId: "STA-2187",
+  attested: true,
+});
 
 function fakeDriver(state = { value: "neutral" }) {
   return {
@@ -41,20 +60,42 @@ function fakeDriver(state = { value: "neutral" }) {
   };
 }
 
-async function fixture({ now = () => 1_000 } = {}) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-browser-lease-test-"));
+async function fixture({
+  now = () => 1_000,
+  root,
+  persistentStates = new Map(),
+  sessionValid = false,
+  identityVerifier = async ({ identity }) => identity.attested === true,
+  ownerVerifier = async ({ ownerIdentity }) => ownerIdentity.attested === true,
+} = {}) {
+  const stateRoot = root ?? (await mkdtemp(path.join(os.tmpdir(), "paperclip-browser-lease-test-")));
   const drivers = [];
+  const profileDirs = [];
   const manager = new BrowserLeaseManager({
-    stateRoot: root,
+    stateRoot,
     now,
     assertIsolation: () => {},
-    driverFactory: async () => {
-      const driver = fakeDriver();
+    identityVerifier,
+    ownerVerifier,
+    sessionProbe: async () => sessionValid,
+    driverFactory: async ({ profileDir }) => {
+      const state = persistentStates.get(profileDir) ?? { value: "neutral" };
+      persistentStates.set(profileDir, state);
+      profileDirs.push(profileDir);
+      const driver = fakeDriver(state);
       drivers.push(driver);
       return driver;
     },
   });
-  return { manager, drivers };
+  return { manager, drivers, root: stateRoot, profileDirs, persistentStates };
+}
+
+async function provision(manager) {
+  return manager.provisionSealedProfile({
+    ownerIdentity: OWNER_IDENTITY,
+    binding: SEALED_BINDING,
+    retentionPolicy: RETENTION_POLICY,
+  });
 }
 
 test("fails closed without an isolated-runtime attestation", () => {
@@ -129,7 +170,7 @@ test("captures are opt-in", async () => {
   assert.deepEqual(drivers[0].captures, configured.captures);
 });
 
-test("idle expiry revokes access and deletes the profile", async () => {
+test("idle expiry revokes access and deletes an ephemeral profile", async () => {
   let now = 1_000;
   const { manager } = await fixture({ now: () => now });
   const lease = await manager.create({ issueId: "STA-2208", controllerAgentId: "qa-agent", idleMs: 100, ttlMs: 1_000 });
@@ -141,7 +182,7 @@ test("idle expiry revokes access and deletes the profile", async () => {
   assert.throws(() => manager.get(lease.leaseId), /Unknown or revoked/);
 });
 
-test("explicit termination revokes access and reads profile deletion back", async () => {
+test("explicit termination revokes access and reads ephemeral profile deletion back", async () => {
   const { manager, drivers } = await fixture();
   const lease = await manager.create({ issueId: "STA-2208", controllerAgentId: "qa-agent" });
   const result = await manager.terminate({ leaseId: lease.leaseId });
@@ -155,4 +196,185 @@ test("capture redaction is recursive and strips URL query material", () => {
     redactCapture({ url: "https://example.test/a?code=123#x", nested: { accessToken: "x", ok: true } }),
     { url: "https://example.test/a", nested: { accessToken: "[REDACTED]", ok: true } },
   );
+});
+
+test("sealed provisioning requires explicit owner policy and only permits the approved sandbox portal", async () => {
+  const { manager } = await fixture();
+  await assert.rejects(
+    manager.provisionSealedProfile({
+      ownerIdentity: OWNER_IDENTITY,
+      binding: SEALED_BINDING,
+      retentionPolicy: { mode: "delete_on_terminate", ownerId: OWNER_IDENTITY.ownerId },
+    }),
+    /retain_until_owner_purge/,
+  );
+  await assert.rejects(
+    manager.provisionSealedProfile({
+      ownerIdentity: OWNER_IDENTITY,
+      binding: { ...SEALED_BINDING, portalId: "production" },
+      retentionPolicy: RETENTION_POLICY,
+    }),
+    /approved HubSpot sandbox portal/,
+  );
+  const status = await provision(manager);
+  assert.deepEqual(status, {
+    slotPresent: true,
+    provider: "hubspot",
+    environment: "sandbox",
+    portalId: HUBSPOT_SANDBOX_PORTAL_ID,
+    retained: true,
+    activeLease: false,
+    contractVersion: 2,
+  });
+  await assert.rejects(
+    manager.provisionSealedProfile({
+      ownerIdentity: OWNER_IDENTITY,
+      binding: { ...SEALED_BINDING, principalId: "different-principal" },
+      retentionPolicy: RETENTION_POLICY,
+    }),
+    /different sealed browser profile slot/,
+  );
+});
+
+test("owner and lease operations fail closed without broker-side identity attestation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-browser-lease-test-"));
+  const manager = new BrowserLeaseManager({
+    stateRoot: root,
+    assertIsolation: () => {},
+    driverFactory: async () => fakeDriver(),
+  });
+  await assert.rejects(
+    manager.provisionSealedProfile({
+      ownerIdentity: OWNER_IDENTITY,
+      binding: SEALED_BINDING,
+      retentionPolicy: RETENTION_POLICY,
+    }),
+    /Owner identity is not authorized/,
+  );
+});
+
+test("sealed profile rejects cross-company, portal, principal, agent, issue, and concurrent lease use", async () => {
+  const { manager } = await fixture();
+  await provision(manager);
+  for (const changed of [
+    { companyId: "other-company" },
+    { portalId: "other-portal" },
+    { principalId: "other-principal" },
+    { agentId: "other-agent" },
+    { issueId: "STA-unrelated" },
+    { attested: false },
+  ]) {
+    await assert.rejects(manager.createSealed({ identity: { ...SEALED_IDENTITY, ...changed } }), /not authorized/);
+  }
+  const lease = await manager.createSealed({ identity: SEALED_IDENTITY });
+  await assert.rejects(manager.createSealed({ identity: SEALED_IDENTITY }), /already has an active lease/);
+  assert.doesNotMatch(JSON.stringify(lease), /profileDir|principal|owner|cookie|storage|cdp/i);
+});
+
+test("sealed expiry revokes control but retains the slot for a new authorized lease", async () => {
+  let now = 1_000;
+  const shared = await fixture({ now: () => now, sessionValid: true });
+  await provision(shared.manager);
+  const first = await shared.manager.createSealed({ identity: SEALED_IDENTITY, idleMs: 100, ttlMs: 1_000 });
+  const control = await shared.manager.attach({
+    leaseId: first.leaseId,
+    issueId: SEALED_IDENTITY.issueId,
+    agentId: SEALED_IDENTITY.agentId,
+  });
+  await shared.manager.command({
+    leaseId: first.leaseId,
+    controlId: control.controlId,
+    name: "state.set",
+    payload: { value: "still-valid-session" },
+  });
+  now = 1_101;
+  const [expired] = await shared.manager.sweepExpired();
+  assert.equal(expired.accessRevoked, true);
+  assert.equal(expired.profileRetained, true);
+  assert.equal(expired.profileDeleted, false);
+
+  const second = await shared.manager.createSealed({ identity: SEALED_IDENTITY });
+  const secondControl = await shared.manager.attach({
+    leaseId: second.leaseId,
+    issueId: SEALED_IDENTITY.issueId,
+    agentId: SEALED_IDENTITY.agentId,
+  });
+  const observed = await shared.manager.command({
+    leaseId: second.leaseId,
+    controlId: secondControl.controlId,
+    name: "observe",
+  });
+  assert.equal(observed.value, "still-valid-session");
+});
+
+test("broker restart closes control, preserves the slot, and reuses session state", async () => {
+  const persistentStates = new Map();
+  const first = await fixture({ persistentStates, sessionValid: true });
+  await provision(first.manager);
+  const lease = await first.manager.createSealed({ identity: SEALED_IDENTITY });
+  const control = await first.manager.attach({
+    leaseId: lease.leaseId,
+    issueId: SEALED_IDENTITY.issueId,
+    agentId: SEALED_IDENTITY.agentId,
+  });
+  await first.manager.command({
+    leaseId: lease.leaseId,
+    controlId: control.controlId,
+    name: "state.set",
+    payload: { value: "restart-reuse" },
+  });
+  const [shutdown] = await first.manager.shutdown({ reason: "broker_restart" });
+  assert.equal(shutdown.accessRevoked, true);
+  assert.equal(shutdown.profileRetained, true);
+
+  const restarted = await fixture({
+    root: first.root,
+    persistentStates,
+    sessionValid: true,
+  });
+  const nextLease = await restarted.manager.createSealed({ identity: SEALED_IDENTITY });
+  assert.equal(nextLease.supervisedLoginRequired, false);
+  const nextControl = await restarted.manager.attach({
+    leaseId: nextLease.leaseId,
+    issueId: SEALED_IDENTITY.issueId,
+    agentId: SEALED_IDENTITY.agentId,
+  });
+  const observed = await restarted.manager.command({
+    leaseId: nextLease.leaseId,
+    controlId: nextControl.controlId,
+    name: "observe",
+  });
+  assert.equal(observed.value, "restart-reuse");
+});
+
+test("expired or unprovable HubSpot sessions require supervised human login", async () => {
+  const expired = await fixture({ sessionValid: false });
+  await provision(expired.manager);
+  const lease = await expired.manager.createSealed({ identity: SEALED_IDENTITY });
+  assert.equal(lease.supervisedLoginRequired, true);
+  assert.deepEqual(lease.captures, { console: false, network: false, screenshots: false });
+});
+
+test("only the owner can read or purge and purge returns zero-entry deletion readback", async () => {
+  const { manager } = await fixture();
+  await provision(manager);
+  await assert.rejects(
+    manager.readSealedProfile({ ownerIdentity: { ownerId: "qa-agent", attested: true } }),
+    /Owner identity is not authorized/,
+  );
+  await assert.rejects(
+    manager.purgeSealedProfile({ ownerIdentity: { ownerId: OWNER_IDENTITY.ownerId, attested: false } }),
+    /Owner identity is not authorized/,
+  );
+  const lease = await manager.createSealed({ identity: SEALED_IDENTITY });
+  const purged = await manager.purgeSealedProfile({ ownerIdentity: OWNER_IDENTITY });
+  assert.deepEqual(purged, {
+    slotPresent: false,
+    profileDeleted: true,
+    profileEntries: 0,
+    accessRevoked: true,
+    contractVersion: 2,
+  });
+  assert.throws(() => manager.get(lease.leaseId), /Unknown or revoked/);
+  await assert.rejects(manager.createSealed({ identity: SEALED_IDENTITY }), /No sealed browser profile slot/);
 });
