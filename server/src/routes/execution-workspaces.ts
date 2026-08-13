@@ -14,7 +14,11 @@ import {
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import { accessService, executionWorkspaceService, heartbeatService, logActivity, workspaceOperationService } from "../services/index.js";
-import { mergeExecutionWorkspaceConfig, readExecutionWorkspaceConfig } from "../services/execution-workspaces.js";
+import {
+  mergeExecutionWorkspaceConfig,
+  mergeExecutionWorkspaceRuntimeState,
+  readExecutionWorkspaceConfig,
+} from "../services/execution-workspaces.js";
 import { parseProjectExecutionWorkspacePolicy } from "../services/execution-workspace-policy.js";
 import { readProjectWorkspaceRuntimeConfig } from "../services/project-workspace-runtime-config.js";
 import {
@@ -430,7 +434,8 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
               action,
               serviceIndex: selectedServiceIndex,
             });
-        const metadata = mergeExecutionWorkspaceConfig(existing.metadata as Record<string, unknown> | null, {
+        const metadata = mergeExecutionWorkspaceRuntimeState(existing.metadata as Record<string, unknown> | null, {
+          workspaceRuntime: existing.config?.workspaceRuntime ?? undefined,
           desiredState: nextRuntimeState.desiredState,
           serviceStates: nextRuntimeState.serviceStates,
         });

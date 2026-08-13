@@ -29,6 +29,7 @@ import {
   executionWorkspaceService,
   inspectExecutionWorkspaceGitWorktreeAdoption,
   mergeExecutionWorkspaceConfig,
+  mergeExecutionWorkspaceRuntimeState,
   readExecutionWorkspaceConfig,
 } from "../services/execution-workspaces.ts";
 import {
@@ -100,6 +101,44 @@ describe("execution workspace config helpers", () => {
         workspaceRuntime: {
           services: [{ name: "web", command: "pnpm dev" }],
         },
+      },
+    });
+  });
+
+  it("preserves authoritative workspace commands when managed stop updates a partial metadata snapshot", () => {
+    const workspaceRuntime = {
+      commands: [{
+        id: "sta-1975-skill-studio-exact-91eccdf",
+        kind: "service",
+        command: "pnpm dev:once --bind lan",
+        port: 41715,
+      }],
+    };
+
+    expect(mergeExecutionWorkspaceRuntimeState(
+      {
+        source: "task_session",
+        config: {
+          desiredState: "manual",
+          serviceStates: { "0": "manual" },
+        },
+      },
+      {
+        workspaceRuntime,
+        desiredState: "manual",
+        serviceStates: { "0": "manual" },
+      },
+    )).toEqual({
+      source: "task_session",
+      config: {
+        environmentId: null,
+        provisionCommand: null,
+        runtimeProvisionCommand: null,
+        teardownCommand: null,
+        cleanupCommand: null,
+        workspaceRuntime,
+        desiredState: "manual",
+        serviceStates: { "0": "manual" },
       },
     });
   });

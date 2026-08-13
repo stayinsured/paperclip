@@ -17,6 +17,7 @@ import type {
   WorkspaceOverviewItem,
   WorkspaceOverviewLinkedIssue,
   WorkspaceRuntimeDesiredState,
+  WorkspaceRuntimeServiceStateMap,
   WorkspaceRuntimeService,
   WorkspaceOverviewPrimaryService,
   WorkspaceOverviewQuery,
@@ -954,6 +955,21 @@ export function mergeExecutionWorkspaceConfig(
   }
 
   return Object.keys(nextMetadata).length > 0 ? nextMetadata : null;
+}
+
+export function mergeExecutionWorkspaceRuntimeState(
+  metadata: Record<string, unknown> | null | undefined,
+  input: {
+    workspaceRuntime?: Record<string, unknown> | null;
+    desiredState: WorkspaceRuntimeDesiredState;
+    serviceStates: WorkspaceRuntimeServiceStateMap | null | undefined;
+  },
+): Record<string, unknown> | null {
+  return mergeExecutionWorkspaceConfig(metadata, {
+    ...(input.workspaceRuntime === undefined ? {} : { workspaceRuntime: input.workspaceRuntime }),
+    desiredState: input.desiredState,
+    serviceStates: input.serviceStates,
+  });
 }
 
 function toRuntimeService(
