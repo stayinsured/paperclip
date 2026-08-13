@@ -9,6 +9,8 @@ const SEALED_SLOT_DIRECTORY = "sealed-hubspot-sandbox";
 const SEALED_SLOT_METADATA = "policy.json";
 const SEALED_PROFILE_DIRECTORY = "profile";
 const SEALED_RETENTION_MODE = "retain_until_owner_purge";
+const SEALED_NAMED_AGENT_SCOPE = "named_agent";
+export const SEALED_COMPANY_AGENTS_SCOPE = "company_active_agents";
 
 export const HUBSPOT_SANDBOX_PORTAL_ID = "148038858";
 
@@ -403,11 +405,22 @@ export class BrowserLeaseManager {
       .map((issueId) => required(issueId, "binding.authorizedIssueIds[]"))
       .sort();
     if (authorizedIssueIds.length === 0) throw new Error("binding.authorizedIssueIds is required");
+    const controllerScope = binding?.controllerScope ?? SEALED_NAMED_AGENT_SCOPE;
+    if (![SEALED_NAMED_AGENT_SCOPE, SEALED_COMPANY_AGENTS_SCOPE].includes(controllerScope)) {
+      throw new Error("binding.controllerScope is invalid");
+    }
+    const controllerAgentId = controllerScope === SEALED_NAMED_AGENT_SCOPE
+      ? required(binding?.controllerAgentId, "binding.controllerAgentId")
+      : null;
+    if (controllerScope === SEALED_COMPANY_AGENTS_SCOPE && !authorizedIssueIds.includes("*")) {
+      throw new Error("company_active_agents requires the verified running-task wildcard");
+    }
     return {
       companyId,
       portalId,
       principalId: required(binding?.principalId, "binding.principalId"),
-      controllerAgentId: required(binding?.controllerAgentId, "binding.controllerAgentId"),
+      controllerScope,
+      controllerAgentId,
       authorizedIssueIds,
     };
   }
@@ -430,12 +443,18 @@ export class BrowserLeaseManager {
 
   async #assertSealedIdentity(identity, slot) {
     const binding = slot.binding;
+    const controllerMatch = binding.controllerScope === SEALED_COMPANY_AGENTS_SCOPE
+      ? typeof identity?.agentId === "string" && identity.agentId.length > 0
+      : identity?.agentId === binding.controllerAgentId;
+    const issueMatch = binding.authorizedIssueIds.includes("*")
+      ? typeof identity?.issueId === "string" && identity.issueId.length > 0
+      : binding.authorizedIssueIds.includes(identity?.issueId);
     const exactMatch =
       identity?.companyId === binding.companyId &&
       identity?.portalId === binding.portalId &&
       identity?.principalId === binding.principalId &&
-      identity?.agentId === binding.controllerAgentId &&
-      binding.authorizedIssueIds.includes(identity?.issueId);
+      controllerMatch &&
+      issueMatch;
     if (!exactMatch || (await this.#identityVerifier({ identity, binding })) !== true) {
       throw new Error("Browser profile identity is not authorized");
     }

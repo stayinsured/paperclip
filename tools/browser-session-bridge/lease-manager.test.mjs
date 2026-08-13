@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   BrowserLeaseManager,
   HUBSPOT_SANDBOX_PORTAL_ID,
+  SEALED_COMPANY_AGENTS_SCOPE,
   assertIsolatedRuntime,
   browserRuntimeContract,
   redactCapture,
@@ -270,6 +271,81 @@ test("sealed profile rejects cross-company, portal, principal, agent, issue, and
   const lease = await manager.createSealed({ identity: SEALED_IDENTITY });
   await assert.rejects(manager.createSealed({ identity: SEALED_IDENTITY }), /already has an active lease/);
   assert.doesNotMatch(JSON.stringify(lease), /profileDir|principal|owner|cookie|storage|cdp/i);
+});
+
+test("company-agent scope still requires independent run-token identity verification", async () => {
+  const valid = new Set([
+    "token-a:run-a:agent-a:STA-A",
+    "token-b:run-b:agent-b:STA-B",
+  ]);
+  const { manager } = await fixture({
+    identityVerifier: async ({ identity }) => valid.has(
+      [identity.token, identity.runId, identity.agentId, identity.issueId].join(":"),
+    ),
+  });
+  await manager.provisionSealedProfile({
+    ownerIdentity: OWNER_IDENTITY,
+    binding: {
+      companyId: SEALED_BINDING.companyId,
+      portalId: SEALED_BINDING.portalId,
+      principalId: SEALED_BINDING.principalId,
+      controllerScope: SEALED_COMPANY_AGENTS_SCOPE,
+      authorizedIssueIds: ["*"],
+    },
+    retentionPolicy: RETENTION_POLICY,
+  });
+
+  const firstIdentity = {
+    companyId: SEALED_BINDING.companyId,
+    portalId: SEALED_BINDING.portalId,
+    principalId: SEALED_BINDING.principalId,
+    agentId: "agent-a",
+    issueId: "STA-A",
+    runId: "run-a",
+    token: "token-a",
+    attested: true,
+  };
+  await assert.rejects(
+    manager.createSealed({ identity: { ...firstIdentity, token: "spoofed" } }),
+    /not authorized/,
+  );
+  await assert.rejects(
+    manager.createSealed({ identity: { ...firstIdentity, companyId: "other-company" } }),
+    /not authorized/,
+  );
+  const first = await manager.createSealed({ identity: firstIdentity });
+  await manager.terminate({ leaseId: first.leaseId });
+
+  const second = await manager.createSealed({
+    identity: {
+      ...firstIdentity,
+      agentId: "agent-b",
+      issueId: "STA-B",
+      runId: "run-b",
+      token: "token-b",
+    },
+  });
+  assert.equal(second.controllerAgentId, "agent-b");
+  assert.equal(second.issueId, "STA-B");
+  await manager.terminate({ leaseId: second.leaseId });
+});
+
+test("company-agent scope requires the verified running-task wildcard", async () => {
+  const { manager } = await fixture();
+  await assert.rejects(
+    manager.provisionSealedProfile({
+      ownerIdentity: OWNER_IDENTITY,
+      binding: {
+        companyId: SEALED_BINDING.companyId,
+        portalId: SEALED_BINDING.portalId,
+        principalId: SEALED_BINDING.principalId,
+        controllerScope: SEALED_COMPANY_AGENTS_SCOPE,
+        authorizedIssueIds: ["STA-2187"],
+      },
+      retentionPolicy: RETENTION_POLICY,
+    }),
+    /verified running-task wildcard/,
+  );
 });
 
 test("sealed profile rejects a concurrent lease while the first lease is still starting", async () => {

@@ -38,9 +38,16 @@ Provisioning requires an attested owner identity and the explicit
 - one named QA agent; and
 - an explicit allowlist of related Paperclip issue identities.
 
-Company, portal, principal, and named-agent bindings remain immutable. The
-attested owner may atomically replace only the issue allowlist before a future
-approved task; this neither exposes nor recreates the retained profile.
+Company, portal, and principal bindings remain immutable. The default policy
+continues to bind one named agent and an explicit issue allowlist. An owner may
+instead select the explicit `company_active_agents` scope with the verified
+running-task wildcard. That broader scope is valid only when the runtime adapter
+independently derives and verifies company, active agent, live run, assigned issue,
+and execution-run binding from the presented Paperclip run token. Caller-supplied
+identity flags never satisfy this check. The retained slot still permits only one
+lease/controller globally. The attested owner may atomically replace only the
+issue allowlist for named-agent mode; this neither exposes nor recreates the
+retained profile.
 
 The adapter derives owner, company, issue, agent, portal, and principal claims
 from authenticated broker/run context. It must not accept caller-supplied
