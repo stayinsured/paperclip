@@ -38,6 +38,10 @@ Provisioning requires an attested owner identity and the explicit
 - one named QA agent; and
 - an explicit allowlist of related Paperclip issue identities.
 
+Company, portal, principal, and named-agent bindings remain immutable. The
+attested owner may atomically replace only the issue allowlist before a future
+approved task; this neither exposes nor recreates the retained profile.
+
 The adapter derives owner, company, issue, agent, portal, and principal claims
 from authenticated broker/run context. It must not accept caller-supplied
 identity flags. The core compares every claim to the sealed policy and then
@@ -53,8 +57,11 @@ a valid sandbox session avoids another login; an expired, failed, or
 indeterminate probe falls back to the authenticated human viewer. The
 authenticator remains human-held.
 
-Only the attested retention owner can read sanitized slot status or purge the
-slot. Purge first revokes an active lease, recursively deletes the slot, and
+Only the attested retention owner can read sanitized slot status, atomically
+replace the issue allowlist, or purge the slot. The adapter exposes these as
+owner-only operations such as `browserLease.profile.authorizeIssues(issueIds)`;
+each future task requires explicit owner authorization before reuse. Purge first
+revokes an active lease, recursively deletes the slot, and
 reports success only after a zero-entry deletion readback. QA has no profile
 read, export, archive, mount, storage-state, cookie, or purge operation.
 
@@ -134,7 +141,8 @@ node --test tools/browser-session-bridge/lease-manager.test.mjs
 ```
 
 The focused suite proves ephemeral rollback compatibility, exact sealed binding,
-broker-side identity rejection, single-use enforcement, capture defaults,
+broker-side identity rejection, owner-scoped issue authorization, single-use
+enforcement, capture defaults,
 revocation with retention, broker restart reuse, supervised-login fallback, and
 owner-only zero-entry purge. The isolated owner smoke must additionally prove
 that QA and unrelated agents have no profile mount or host-file access and that
@@ -150,4 +158,5 @@ delete-on-terminate `create` path.
 
 - Added an experimental owner-sealed HubSpot sandbox profile contract with
   restart reuse, fail-closed identity checks, independent access revocation,
-  supervised-login fallback, and deletion readback (STA-2224).
+  supervised-login fallback, owner-scoped issue reuse, and deletion readback
+  (STA-2224).

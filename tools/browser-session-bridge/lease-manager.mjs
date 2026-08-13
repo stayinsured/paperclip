@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -220,6 +220,36 @@ export class BrowserLeaseManager {
     return this.#publicSealedSlot(slot);
   }
 
+  async authorizeSealedProfileIssues({ ownerIdentity, authorizedIssueIds }) {
+    this.#assertIsolation();
+    const slot = await this.#loadSealedSlot();
+    await this.#assertOwner({
+      action: "authorize_issues",
+      ownerIdentity,
+      policy: slot.retentionPolicy,
+    });
+    const binding = this.#normalizeSealedBinding({
+      ...slot.binding,
+      authorizedIssueIds,
+    });
+    const nextSlot = { ...slot, binding };
+    const temporaryMetadata = path.join(slot.slotDir, ".policy-" + randomUUID() + ".tmp");
+
+    try {
+      await writeFile(
+        temporaryMetadata,
+        JSON.stringify(this.#storedSealedSlot(nextSlot)),
+        { mode: 0o600, flag: "wx" },
+      );
+      await rename(temporaryMetadata, path.join(slot.slotDir, SEALED_SLOT_METADATA));
+    } finally {
+      await rm(temporaryMetadata, { force: true });
+    }
+
+    this.#sealedSlot = nextSlot;
+    return this.#publicSealedSlot(nextSlot);
+  }
+
   async purgeSealedProfile({ ownerIdentity }) {
     this.#assertIsolation();
     const slot = await this.#loadSealedSlot();
@@ -428,6 +458,17 @@ export class BrowserLeaseManager {
 
   #sealedSlotDirectory() {
     return path.join(this.#stateRoot, SEALED_SLOT_DIRECTORY);
+  }
+
+  #storedSealedSlot(slot) {
+    return {
+      schemaVersion: slot.schemaVersion,
+      provider: slot.provider,
+      environment: slot.environment,
+      binding: slot.binding,
+      retentionPolicy: slot.retentionPolicy,
+      createdAt: slot.createdAt,
+    };
   }
 
   #publicSealedSlot(slot) {

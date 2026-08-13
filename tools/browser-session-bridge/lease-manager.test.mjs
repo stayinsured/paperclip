@@ -271,6 +271,39 @@ test("sealed profile rejects cross-company, portal, principal, agent, issue, and
   assert.doesNotMatch(JSON.stringify(lease), /profileDir|principal|owner|cookie|storage|cdp/i);
 });
 
+test("owner can authorize a future issue without changing the sealed identity", async () => {
+  const { manager, root } = await fixture();
+  await provision(manager);
+  await assert.rejects(
+    manager.authorizeSealedProfileIssues({
+      ownerIdentity: { ownerId: "qa-agent", attested: true },
+      authorizedIssueIds: ["STA-2187", "STA-2224"],
+    }),
+    /Owner identity is not authorized/,
+  );
+  await manager.authorizeSealedProfileIssues({
+    ownerIdentity: OWNER_IDENTITY,
+    authorizedIssueIds: ["STA-2187", "STA-2224"],
+  });
+  const lease = await manager.createSealed({
+    identity: { ...SEALED_IDENTITY, issueId: "STA-2224" },
+  });
+  assert.equal(lease.issueId, "STA-2224");
+  await manager.terminate({ leaseId: lease.leaseId });
+  const restarted = await fixture({ root });
+  const reused = await restarted.manager.createSealed({
+    identity: { ...SEALED_IDENTITY, issueId: "STA-2224" },
+  });
+  assert.equal(reused.issueId, "STA-2224");
+  await restarted.manager.terminate({ leaseId: reused.leaseId });
+  await assert.rejects(
+    restarted.manager.createSealed({
+      identity: { ...SEALED_IDENTITY, issueId: "STA-unrelated" },
+    }),
+    /not authorized/,
+  );
+});
+
 test("sealed expiry revokes control but retains the slot for a new authorized lease", async () => {
   let now = 1_000;
   const shared = await fixture({ now: () => now, sessionValid: true });
