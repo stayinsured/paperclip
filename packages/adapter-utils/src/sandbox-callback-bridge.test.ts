@@ -13,12 +13,15 @@ import {
   createFileSystemSandboxCallbackBridgeQueueClient,
   createSandboxCallbackBridgeAsset,
   createSandboxCallbackBridgeToken,
+  DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES,
+  maxSandboxCallbackBridgeBase64PayloadBytes,
   sandboxCallbackBridgeDirectories,
   syncRemoteTextFileWithHashSkip,
   syncSandboxCallbackBridgeEntrypoint,
   startSandboxCallbackBridgeServer,
   startSandboxCallbackBridgeWorker,
 } from "./sandbox-callback-bridge.js";
+import { readBridgeForwardResponseBody } from "./execution-target.js";
 import type { RunProcessResult } from "./server-utils.js";
 
 const execFile = promisify(execFileCallback);
@@ -257,6 +260,191 @@ describe("sandbox callback bridge", () => {
     });
     expect(seenRequests[0]?.headers.authorization).toBeUndefined();
     expect(seenRequests[0]?.headers["x-paperclip-run-id"]).toBeUndefined();
+
+  });
+
+  it("serves binary and text attachment content byte-exact through the bridge via base64 transfer encoding", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-binary-"));
+    cleanupDirs.push(rootDir);
+
+    const localWorkspaceDir = path.join(rootDir, "local-workspace");
+    const remoteWorkspaceDir = path.join(rootDir, "remote-workspace");
+    await mkdir(localWorkspaceDir, { recursive: true });
+    await mkdir(remoteWorkspaceDir, { recursive: true });
+    await writeFile(path.join(localWorkspaceDir, "README.md"), "bridge binary test\n", "utf8");
+
+    // Binary fixture with real ZIP magic, every byte value, and bytes that
+    // have no valid UTF-8 decoding (standalone continuation bytes, surrogate
+    // halves, overlong encodings). If any hop transcoded the payload to UTF-8,
+    // U+FFFD (EF BF BD) sequences would appear and the byte-exact assertions
+    // below would fail.
+    const binaryFixture = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from(Array.from({ length: 256 }, (_, byte) => byte)),
+      Buffer.from([0xed, 0xa0, 0x80, 0xc0, 0xaf, 0xfe, 0xff]),
+    ]);
+    const textFixture = Buffer.from(
+      "attestation éü 中文 🚀 line 2\n",
+      "utf8",
+    );
+
+    const runner = createExecRunner();
+    const bridgeAsset = await createSandboxCallbackBridgeAsset();
+    cleanupFns.push(bridgeAsset.cleanup);
+    const prepared = await prepareCommandManagedRuntime({
+      runner,
+      spec: {
+        remoteCwd: remoteWorkspaceDir,
+        timeoutMs: 30_000,
+      },
+      adapterKey: "codex",
+      workspaceLocalDir: localWorkspaceDir,
+      assets: [{ key: "bridge", localDir: bridgeAsset.localDir }],
+    });
+
+    const queueDir = path.posix.join(prepared.runtimeRootDir, "paperclip-bridge");
+    const bridgeToken = createSandboxCallbackBridgeToken();
+
+    const worker = await startSandboxCallbackBridgeWorker({
+      client: createFileSystemSandboxCallbackBridgeQueueClient(),
+      queueDir,
+      handleRequest: async (request) => {
+        // Mirror the production host handler: decide utf8 vs base64 with the
+        // real forward helper so the queue receives exactly what a live
+        // run-scoped bridge route would write.
+        const isBinary = request.path.endsWith("/att-binary/content");
+        const bytes = isBinary ? binaryFixture : textFixture;
+        const upstream = new Response(new Uint8Array(bytes), {
+          status: 200,
+          headers: { "content-type": isBinary ? "application/zip" : "text/plain; charset=utf-8" },
+        });
+        return {
+          status: 200,
+          headers: {
+            "content-type": isBinary ? "application/zip" : "text/plain; charset=utf-8",
+          },
+          ...(await readBridgeForwardResponseBody(upstream, DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES)),
+        };
+      },
+    });
+    cleanupFns.push(async () => {
+      await worker.stop();
+    });
+
+    const bridge = await startSandboxCallbackBridgeServer({
+      runner,
+      remoteCwd: remoteWorkspaceDir,
+      assetRemoteDir: prepared.assetDirs.bridge,
+      queueDir,
+      bridgeToken,
+      timeoutMs: 30_000,
+    });
+    cleanupFns.push(async () => {
+      await bridge.stop();
+    });
+
+    const binaryResponse = await fetch(`${bridge.baseUrl}/api/attachments/att-binary/content`, {
+      headers: { authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(binaryResponse.status).toBe(200);
+    expect(binaryResponse.headers.get("content-type")).toBe("application/zip");
+    expect(binaryResponse.headers.get("content-length")).toBe(String(binaryFixture.length));
+    const binaryServed = Buffer.from(await binaryResponse.arrayBuffer());
+    expect(binaryServed.equals(binaryFixture)).toBe(true);
+    expect(binaryServed.includes(Buffer.from([0xef, 0xbf, 0xbd]))).toBe(false);
+
+    const textResponse = await fetch(`${bridge.baseUrl}/api/attachments/att-text/content`, {
+      headers: { authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(textResponse.status).toBe(200);
+    expect(textResponse.headers.get("content-length")).toBe(String(textFixture.length));
+    const textServed = Buffer.from(await textResponse.arrayBuffer());
+    expect(textServed.equals(textFixture)).toBe(true);
+
+  });
+
+  it("fails cleanly instead of truncating when a response body exceeds maxBodyBytes", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-limit-"));
+    cleanupDirs.push(rootDir);
+
+    const localWorkspaceDir = path.join(rootDir, "local-workspace");
+    const remoteWorkspaceDir = path.join(rootDir, "remote-workspace");
+    await mkdir(localWorkspaceDir, { recursive: true });
+    await mkdir(remoteWorkspaceDir, { recursive: true });
+    await writeFile(path.join(localWorkspaceDir, "README.md"), "bridge limit test\n", "utf8");
+
+    const runner = createExecRunner();
+    const bridgeAsset = await createSandboxCallbackBridgeAsset();
+    cleanupFns.push(bridgeAsset.cleanup);
+    const prepared = await prepareCommandManagedRuntime({
+      runner,
+      spec: {
+        remoteCwd: remoteWorkspaceDir,
+        timeoutMs: 30_000,
+      },
+      adapterKey: "codex",
+      workspaceLocalDir: localWorkspaceDir,
+      assets: [{ key: "bridge", localDir: bridgeAsset.localDir }],
+    });
+
+    const queueDir = path.posix.join(prepared.runtimeRootDir, "paperclip-bridge");
+    const bridgeToken = createSandboxCallbackBridgeToken();
+    const maxBodyBytes = 2_048;
+
+    const worker = await startSandboxCallbackBridgeWorker({
+      client: createFileSystemSandboxCallbackBridgeQueueClient(),
+      queueDir,
+      maxBodyBytes,
+      handleRequest: async (request) => {
+        if (request.path.endsWith("/att-binary/content")) {
+          const oversizedBinary = Buffer.alloc(maxBodyBytes * 2, 0xab);
+          return {
+            status: 200,
+            headers: { "content-type": "application/zip" },
+            body: oversizedBinary.toString("base64"),
+            bodyEncoding: "base64" as const,
+          };
+        }
+        return {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+          body: "x".repeat(maxBodyBytes * 2),
+        };
+      },
+    });
+    cleanupFns.push(async () => {
+      await worker.stop();
+    });
+
+    const bridge = await startSandboxCallbackBridgeServer({
+      runner,
+      remoteCwd: remoteWorkspaceDir,
+      assetRemoteDir: prepared.assetDirs.bridge,
+      queueDir,
+      bridgeToken,
+      timeoutMs: 30_000,
+    });
+    cleanupFns.push(async () => {
+      await bridge.stop();
+    });
+
+    const binaryResponse = await fetch(`${bridge.baseUrl}/api/attachments/att-binary/content`, {
+      headers: { authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(binaryResponse.status).toBe(502);
+    await expect(binaryResponse.json()).resolves.toMatchObject({
+      error: expect.stringContaining(
+        `base64-encoded binary; the losslessly servable binary payload limit is ${maxSandboxCallbackBridgeBase64PayloadBytes(maxBodyBytes)} bytes`,
+      ),
+    });
+
+    const textResponse = await fetch(`${bridge.baseUrl}/api/attachments/att-text/content`, {
+      headers: { authorization: `Bearer ${bridgeToken}` },
+    });
+    expect(textResponse.status).toBe(502);
+    await expect(textResponse.json()).resolves.toMatchObject({
+      error: `Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes.`,
+    });
 
   });
 

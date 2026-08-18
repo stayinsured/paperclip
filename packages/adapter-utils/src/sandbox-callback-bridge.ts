@@ -124,7 +124,8 @@ export interface SandboxCallbackBridgeRequest {
   headers: Record<string, string>;
   /**
    * UTF-8 body contents. The bridge rejects non-JSON request bodies; binary
-   * payloads are intentionally out of scope for this queue protocol.
+   * request payloads are intentionally out of scope for this queue protocol.
+   * Binary responses are supported via `SandboxCallbackBridgeResponse.bodyEncoding`.
    */
   body: string;
   createdAt: string;
@@ -134,7 +135,17 @@ export interface SandboxCallbackBridgeResponse {
   id: string;
   status: number;
   headers: Record<string, string>;
+  /**
+   * Response body contents on the queue wire: UTF-8 text by default, or
+   * base64 text when `bodyEncoding` is `"base64"`. The queue protocol carries
+   * UTF-8 JSON files, so a raw binary body (ZIP bundles, images) cannot cross
+   * it as text — UTF-8 transcoding replaces undecodable bytes with U+FFFD and
+   * destroys the payload. Base64 bodies are decoded back to the exact original
+   * bytes by the sandbox bridge server before the client response is written.
+   */
   body: string;
+  /** Content-transfer-encoding of `body`. Omitted means plain UTF-8 text. */
+  bodyEncoding?: "base64";
   completedAt: string;
 }
 
@@ -247,6 +258,12 @@ function base64Chunks(body: string): string[] {
     out.push(body.slice(offset, offset + REMOTE_WRITE_BASE64_CHUNK_SIZE));
   }
   return out;
+}
+
+// Largest binary payload that still fits `maxBodyBytes` once base64-encoded
+// (encoding inflates by 4/3). Documented hard limit for binary responses.
+export function maxSandboxCallbackBridgeBase64PayloadBytes(maxBodyBytes: number): number {
+  return Math.floor(maxBodyBytes / 4) * 3;
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -624,6 +641,7 @@ export async function startSandboxCallbackBridgeWorker(input: {
     status: number;
     headers?: Record<string, string>;
     body?: string;
+    bodyEncoding?: "base64";
   }>;
   maxBodyBytes?: number | null;
   // Return the current-run parent-context token. The worker reads it per request
@@ -701,14 +719,22 @@ export async function startSandboxCallbackBridgeWorker(input: {
     try {
       const result = await input.handleRequest(request);
       const responseBody = result.body ?? "";
+      // The limit bounds the wire payload the queue carries, so for a
+      // base64-encoded binary body it applies to the encoded length. Anything
+      // larger is a clean 502 — never a silent truncate or transcode.
       if (Buffer.byteLength(responseBody, "utf8") > maxBodyBytes) {
-        throw new Error(`Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes.`);
+        throw new Error(
+          result.bodyEncoding === "base64"
+            ? `Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes (base64-encoded binary; the losslessly servable binary payload limit is ${maxSandboxCallbackBridgeBase64PayloadBytes(maxBodyBytes)} bytes).`
+            : `Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes.`,
+        );
       }
       await writeBridgeResponse(input.client, requestPath, responsePath, {
         id: request.id,
         status: result.status,
         headers: result.headers ?? {},
         body: responseBody,
+        ...(result.bodyEncoding === "base64" ? { bodyEncoding: result.bodyEncoding } : {}),
         completedAt: new Date().toISOString(),
       });
     } catch (error) {
@@ -1244,12 +1270,25 @@ const server = createServer(async (req, res) => {
     await fs.rename(tempPath, requestPath);
 
     const response = await waitForResponse(requestId);
+    // Decode before touching res so an invalid payload fails into the 502
+    // handler with no partial headers on the wire. base64 bodies carry binary
+    // content that cannot cross the UTF-8 JSON queue as text (STA-2368);
+    // re-encoding guards against silently serving a short/garbled decode.
+    let bodyBytes = Buffer.from(typeof response.body === "string" ? response.body : "", "utf8");
+    if (response.bodyEncoding === "base64") {
+      const encoded = typeof response.body === "string" ? response.body : "";
+      bodyBytes = Buffer.from(encoded, "base64");
+      if (bodyBytes.toString("base64") !== encoded.replace(/\\s+/g, "")) {
+        throw new Error("Bridge response carried an invalid base64-encoded body.");
+      }
+    }
     res.statusCode = typeof response.status === "number" ? response.status : 200;
     for (const [key, value] of Object.entries(response.headers || {})) {
       if (typeof value !== "string" || key.toLowerCase() === "content-length") continue;
       res.setHeader(key, value);
     }
-    res.end(typeof response.body === "string" ? response.body : "");
+    res.setHeader("content-length", String(bodyBytes.length));
+    res.end(bodyBytes);
   } catch (error) {
     res.statusCode = 502;
     res.setHeader("content-type", "application/json");

@@ -4,10 +4,56 @@ import * as serverUtils from "./server-utils.js";
 import {
   adapterExecutionTargetUsesManagedHome,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
+  readBridgeForwardResponseBody,
   resolveAdapterExecutionTargetCwd,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
 } from "./execution-target.js";
+import { maxSandboxCallbackBridgeBase64PayloadBytes } from "./sandbox-callback-bridge.js";
+
+describe("readBridgeForwardResponseBody", () => {
+  it("carries UTF-8 round-trippable bodies as plain text with no encoding", async () => {
+    const text = "attestation éü 中文 🚀\n";
+    const body = await readBridgeForwardResponseBody(new Response(text), 262_144);
+    expect(body).toEqual({ body: text });
+  });
+
+  it("base64-encodes binary bodies that UTF-8 transcoding would destroy", async () => {
+    const bytes = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from(Array.from({ length: 256 }, (_, byte) => byte)),
+      Buffer.from([0xed, 0xa0, 0x80, 0xc0, 0xaf, 0xfe, 0xff]),
+    ]);
+    const body = await readBridgeForwardResponseBody(
+      new Response(new Uint8Array(bytes)),
+      262_144,
+    );
+    expect(body.bodyEncoding).toBe("base64");
+    expect(Buffer.from(body.body, "base64").equals(bytes)).toBe(true);
+  });
+
+  it("fails with a documented binary limit when the base64 wire form exceeds maxBodyBytes", async () => {
+    const maxBodyBytes = 2_048;
+    const bytes = Buffer.alloc(maxBodyBytes, 0xab);
+    await expect(
+      readBridgeForwardResponseBody(new Response(new Uint8Array(bytes)), maxBodyBytes),
+    ).rejects.toThrow(
+      `Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes (base64-encoded binary; the losslessly servable binary payload limit is ${maxSandboxCallbackBridgeBase64PayloadBytes(maxBodyBytes)} bytes).`,
+    );
+  });
+
+  it("fails up front when the upstream content-length already exceeds maxBodyBytes", async () => {
+    const maxBodyBytes = 1_024;
+    await expect(
+      readBridgeForwardResponseBody(
+        new Response("{}", { headers: { "content-length": String(maxBodyBytes + 1) } }),
+        maxBodyBytes,
+      ),
+    ).rejects.toThrow(
+      `Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes.`,
+    );
+  });
+});
 
 describe("runAdapterExecutionTargetShellCommand", () => {
   afterEach(() => {

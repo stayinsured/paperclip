@@ -27,6 +27,7 @@ import {
   createSandboxCallbackBridgeAsset,
   createSandboxCallbackBridgeToken,
   DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES,
+  maxSandboxCallbackBridgeBase64PayloadBytes,
   sandboxCallbackBridgeDirectories,
   startSandboxCallbackBridgeServer,
   startSandboxCallbackBridgeWorker,
@@ -1245,7 +1246,29 @@ function bridgeResponseBodyLimitError(maxBodyBytes: number): Error {
   return new Error(`Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes.`);
 }
 
-async function readBridgeForwardResponseBody(response: Response, maxBodyBytes: number): Promise<string> {
+export interface BridgeForwardResponseBody {
+  body: string;
+  bodyEncoding?: "base64";
+}
+
+// The sandbox callback bridge queue carries UTF-8 JSON files, so a raw binary
+// response body (ZIP bundles, images) cannot cross it as text: UTF-8
+// transcoding replaces undecodable bytes with U+FFFD and destroys the payload
+// (STA-2366 FAIL of record). Bodies that survive a UTF-8 round-trip travel as
+// plain text exactly like before; everything else travels base64-encoded and
+// the sandbox bridge server decodes it back to the original bytes.
+function toBridgeForwardResponseBody(bytes: Buffer): BridgeForwardResponseBody {
+  const asUtf8 = bytes.toString("utf8");
+  if (Buffer.from(asUtf8, "utf8").equals(bytes)) {
+    return { body: asUtf8 };
+  }
+  return { body: bytes.toString("base64"), bodyEncoding: "base64" };
+}
+
+export async function readBridgeForwardResponseBody(
+  response: Response,
+  maxBodyBytes: number,
+): Promise<BridgeForwardResponseBody> {
   const rawContentLength = response.headers.get("content-length");
   if (rawContentLength) {
     const contentLength = Number.parseInt(rawContentLength, 10);
@@ -1255,7 +1278,7 @@ async function readBridgeForwardResponseBody(response: Response, maxBodyBytes: n
   }
 
   if (!response.body) {
-    return "";
+    return { body: "" };
   }
 
   const reader = response.body.getReader();
@@ -1272,7 +1295,16 @@ async function readBridgeForwardResponseBody(response: Response, maxBodyBytes: n
     }
     chunks.push(Buffer.from(value));
   }
-  return Buffer.concat(chunks, totalBytes).toString("utf8");
+  const wire = toBridgeForwardResponseBody(Buffer.concat(chunks, totalBytes));
+  // The queue limit bounds the wire payload, so for a base64 body it applies
+  // to the encoded length. Oversized binaries fail here with a clean error
+  // instead of being truncated or transcoded.
+  if (wire.bodyEncoding === "base64" && wire.body.length > maxBodyBytes) {
+    throw new Error(
+      `Bridge response body exceeded the configured size limit of ${maxBodyBytes} bytes (base64-encoded binary; the losslessly servable binary payload limit is ${maxSandboxCallbackBridgeBase64PayloadBytes(maxBodyBytes)} bytes).`,
+    );
+  }
+  return wire;
 }
 
 const PROCESS_SESSION_PROXY_SCRIPT = "paperclip-process-session-proxy.mjs";
@@ -1972,7 +2004,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
         return {
           status: response.status,
           headers: buildBridgeResponseHeaders(response),
-          body: await readBridgeForwardResponseBody(response, maxBodyBytes),
+          ...(await readBridgeForwardResponseBody(response, maxBodyBytes)),
         };
       },
     });
