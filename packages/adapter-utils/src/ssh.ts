@@ -408,6 +408,46 @@ function tarExcludeArgs(exclude: string[] | undefined): string[] {
   return combined.flatMap((entry) => ["--exclude", entry]);
 }
 
+// SSH sync staging can reach multi-GB (a full workspace restore stages the whole
+// tree). `os.tmpdir()` is frequently a size-capped tmpfs (8G here), so a large
+// sync-back ENOSPCs mid-transfer. Resolve a disk-backed staging root instead:
+// an explicit operator override wins and fails loud; otherwise the instance
+// data dir (same disk family as the workspaces) is used when available, with a
+// silent fallback to `os.tmpdir()` preserving the historic behavior for
+// deployments without a data dir.
+export function resolveSshSyncStagingRoot(): { root: string; explicit: boolean } {
+  const override = process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR?.trim();
+  if (override) {
+    return { root: path.resolve(override), explicit: true };
+  }
+  const dataDir = process.env.PAPERCLIP_DATA_DIR?.trim();
+  if (dataDir) {
+    return {
+      root: path.join(path.resolve(dataDir), "tmp", "ssh-sync-staging"),
+      explicit: false,
+    };
+  }
+  return { root: os.tmpdir(), explicit: false };
+}
+
+async function mkSshStagingDir(prefix: string): Promise<string> {
+  const { root, explicit } = resolveSshSyncStagingRoot();
+  if (explicit) {
+    // An operator-provided root fails loud rather than silently falling back
+    // to the tmpfs the override exists to avoid.
+    await fs.mkdir(root, { recursive: true });
+    return await fs.mkdtemp(path.join(root, prefix));
+  }
+  try {
+    await fs.mkdir(root, { recursive: true });
+    return await fs.mkdtemp(path.join(root, prefix));
+  } catch {
+    // Unusable implicit root (read-only mount, ENOTDIR, ...) — fall back to
+    // the historic os.tmpdir() behavior.
+    return await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  }
+}
+
 function tarSpawnEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -761,7 +801,7 @@ async function importGitWorkspaceToSsh(input: {
   snapshot: LocalGitWorkspaceSnapshot;
   onProgress?: RuntimeProgressSink;
 }): Promise<void> {
-  const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-bundle-"));
+  const bundleDir = await mkSshStagingDir("paperclip-ssh-bundle-");
   const bundlePath = path.join(bundleDir, "workspace.bundle");
   // Per-import unique ref so concurrent imports against the same local repo
   // can't race on `update-ref` between this run's update and bundle create.
@@ -836,7 +876,7 @@ async function exportGitWorkspaceFromSsh(input: {
   resetLocalWorkspace?: boolean;
   onProgress?: RuntimeProgressSink;
 }): Promise<string> {
-  const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-bundle-"));
+  const bundleDir = await mkSshStagingDir("paperclip-ssh-bundle-");
   const bundlePath = path.join(bundleDir, "workspace.bundle");
   const importedRef = input.importedRef ?? `refs/paperclip/ssh-sync/imported/${randomUUID()}`;
 
@@ -1396,11 +1436,22 @@ export async function syncDirectoryFromSsh(input: {
   localDir: string;
   exclude?: string[];
   preserveLocalEntries?: string[];
+  /**
+   * Extract the remote tar straight into `localDir`, skipping the intermediate
+   * staging copy. Only valid when `localDir` is an empty, caller-owned,
+   * disposable directory (e.g. a fresh mkdtemp the caller merges from later) —
+   * the live workspace still needs the staged-then-swapped path so a failed
+   * transfer never leaves a half-written tree behind.
+   */
+  extractIntoLocalDir?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
 }): Promise<void> {
   const auth = await createSshAuthArgs(input.spec);
-  const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
+  const stagingDir = input.extractIntoLocalDir
+    ? null
+    : await mkSshStagingDir("paperclip-ssh-sync-back-");
+  const extractDir = stagingDir ?? input.localDir;
   const remoteTarScript = [
     `cd ${shellQuote(input.remoteDir)}`,
     `tar ${[...tarExcludeArgs(input.exclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
@@ -1433,7 +1484,7 @@ export async function syncDirectoryFromSsh(input: {
       const ssh = spawn("ssh", sshArgs, {
         stdio: ["ignore", "pipe", "pipe"],
       });
-      const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], {
+      const tar = spawn("tar", ["-xf", "-", "-C", extractDir], {
         stdio: ["pipe", "ignore", "pipe"],
         env: tarSpawnEnv(),
       });
@@ -1496,13 +1547,17 @@ export async function syncDirectoryFromSsh(input: {
     });
     await progress?.finish();
 
-    await clearLocalDirectory(input.localDir, input.preserveLocalEntries);
-    await copyDirectoryContents(stagingDir, input.localDir);
+    if (stagingDir) {
+      await clearLocalDirectory(input.localDir, input.preserveLocalEntries);
+      await copyDirectoryContents(stagingDir, input.localDir);
+    }
   } catch (error) {
     await progress?.fail();
     throw error;
   } finally {
-    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    if (stagingDir) {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    }
     await auth.cleanup();
   }
 }
@@ -1566,7 +1621,10 @@ export async function restoreWorkspaceFromSshExecution(input: {
 }): Promise<void> {
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
   if (input.baselineSnapshot) {
-    const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
+    // Single staging site for the whole restore: the tar extracts directly into
+    // this fresh directory. Staging a second full copy (tar target + merge
+    // source) doubled peak disk usage and ENOSPC'd on size-capped tmpfs mounts.
+    const stagingDir = await mkSshStagingDir("paperclip-ssh-sync-back-");
     const importedRef = input.restoreGitHistory
       ? `refs/paperclip/ssh-sync/imported/${randomUUID()}`
       : null;
@@ -1586,6 +1644,7 @@ export async function restoreWorkspaceFromSshExecution(input: {
         remoteDir,
         localDir: stagingDir,
         exclude: input.baselineSnapshot.exclude,
+        extractIntoLocalDir: true,
         onProgress: input.onProgress,
         progressLabel: "workspace",
       });

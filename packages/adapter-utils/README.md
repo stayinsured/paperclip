@@ -35,3 +35,20 @@ The invariant is pinned by the `no-remote-git contract` case in
 remote-only commit propagates to the local worktree through the
 prepare → restore round-trip with no git remote configured at any point. Do
 not regress that test.
+
+## SSH sync staging root
+
+Workspace sync-backs stage a full copy of the remote tree before merging it
+into the local workspace. Staging resolves through
+`resolveSshSyncStagingRoot()` in that order:
+
+1. `PAPERCLIP_SSH_SYNC_STAGING_DIR` — explicit operator override. Fails loud
+   when unusable rather than silently falling back.
+2. `$PAPERCLIP_DATA_DIR/tmp/ssh-sync-staging` — disk-backed instance data dir,
+   chosen because it shares a filesystem with the workspaces. Falls back
+   silently to `os.tmpdir()` when unusable.
+3. `os.tmpdir()` — historic default. On hosts where `/tmp` is a size-capped
+   tmpfs, a multi-GB workspace restore can ENOSPC here (STA-2395).
+
+The managed restore path stages exactly one copy: the remote tar extracts
+directly into the merge-source directory instead of staging twice.

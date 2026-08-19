@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -777,5 +778,122 @@ describe("ssh env-lab fixture", () => {
     const recentSubjects = await git(localRepo, ["log", "--pretty=%s", "-3"]);
     expect(recentSubjects).toContain("remote update a");
     expect(recentSubjects).toContain("remote update b");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("stages sync-back transfers under the configured disk-backed staging root", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
+    cleanupDirs.push(rootDir);
+    const statePath = path.join(rootDir, "state.json");
+    const localDir = path.join(rootDir, "local-source");
+    const restoreDir = path.join(rootDir, "restore-target");
+    const stagingRoot = path.join(rootDir, "disk-backed-staging");
+
+    await mkdir(localDir, { recursive: true });
+    await mkdir(restoreDir, { recursive: true });
+    await mkdir(stagingRoot, { recursive: true });
+    for (let index = 0; index < 4; index += 1) {
+      await writeFile(path.join(localDir, `blob-${index}.bin`), Buffer.alloc(256 * 1024, index + 1));
+    }
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH sync-back staging root test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const spec = { ...config, remoteCwd: started.workspaceDir } as const;
+    const remoteDir = path.posix.join(started.workspaceDir, "staging-root-source");
+
+    await syncDirectoryToSsh({ spec, localDir, remoteDir });
+
+    // Sample the staging root while the sync-back runs: the staging directory
+    // exists for the whole transfer, so a 1ms poll reliably observes it.
+    const observed = new Set<string>();
+    const sampler = setInterval(() => {
+      readdirSync(stagingRoot)
+        .filter((entry) => entry.startsWith("paperclip-ssh-sync-back-"))
+        .forEach((entry) => observed.add(entry));
+    }, 1);
+
+    const savedStagingRoot = process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR;
+    process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR = stagingRoot;
+    try {
+      await syncDirectoryFromSsh({ spec, remoteDir, localDir: restoreDir });
+    } finally {
+      process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR = savedStagingRoot;
+      clearInterval(sampler);
+    }
+
+    expect(observed.size).toBeGreaterThan(0);
+    // Staging is cleaned up after the transfer.
+    expect(readdirSync(stagingRoot).filter((entry) => entry.startsWith("paperclip-ssh-sync-back-"))).toEqual([]);
+    // The restored files round-tripped through the configured root.
+    await expect(readFile(path.join(restoreDir, "blob-1.bin"))).resolves.toEqual(
+      Buffer.alloc(256 * 1024, 2),
+    );
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("restores a managed runtime workspace through a single staging directory", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
+    cleanupDirs.push(rootDir);
+    const statePath = path.join(rootDir, "state.json");
+    const localRepo = path.join(rootDir, "local-workspace");
+    const stagingRoot = path.join(rootDir, "disk-backed-staging");
+
+    await mkdir(localRepo, { recursive: true });
+    await mkdir(stagingRoot, { recursive: true });
+    await git(localRepo, ["init"]);
+    await git(localRepo, ["checkout", "-b", "main"]);
+    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
+    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
+    await git(localRepo, ["add", "tracked.txt"]);
+    await git(localRepo, ["commit", "-m", "initial"]);
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "single-staging restore test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const spec = {
+      ...config,
+      remoteCwd: started.workspaceDir,
+    } as const;
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec,
+      runId: "run-single-staging",
+      adapterKey: "test-adapter",
+      workspaceLocalDir: localRepo,
+    });
+
+    await runSshCommand(
+      config,
+      `cd ${JSON.stringify(prepared.workspaceRemoteDir)} && printf "dirty remote\\n" > tracked.txt && printf "new remote\\n" > remote-only.txt`,
+      { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
+    );
+
+    // Track how many distinct sync-back staging directories exist at once.
+    // The restore must never hold two full copies (tar target + merge source)
+    // concurrently — that doubling is what ENOSPCs on size-capped tmpfs mounts.
+    let maxConcurrentStagingDirs = 0;
+    const observed = new Set<string>();
+    const sampler = setInterval(() => {
+      const present = readdirSync(stagingRoot).filter((entry) =>
+        entry.startsWith("paperclip-ssh-sync-back-"));
+      for (const entry of present) observed.add(entry);
+      maxConcurrentStagingDirs = Math.max(maxConcurrentStagingDirs, present.length);
+    }, 1);
+
+    const savedStagingRoot = process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR;
+    process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR = stagingRoot;
+    try {
+      await prepared.restoreWorkspace();
+    } finally {
+      process.env.PAPERCLIP_SSH_SYNC_STAGING_DIR = savedStagingRoot;
+      clearInterval(sampler);
+    }
+
+    expect(observed.size).toBeGreaterThan(0);
+    expect(maxConcurrentStagingDirs).toBe(1);
+    // Restore semantics are unchanged through the single-staging path.
+    await expect(readFile(path.join(localRepo, "tracked.txt"), "utf8")).resolves.toBe("dirty remote\n");
+    await expect(readFile(path.join(localRepo, "remote-only.txt"), "utf8")).resolves.toBe("new remote\n");
+    expect(readdirSync(stagingRoot).filter((entry) => entry.startsWith("paperclip-ssh-sync-back-"))).toEqual([]);
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 });
