@@ -37,6 +37,7 @@ import {
 } from "./local-service-supervisor.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { executionWorkspaceService, readExecutionWorkspaceConfig } from "./execution-workspaces.js";
+import { ensureIsolatedPaperclipRuntimeDatabase } from "./isolated-runtime-database.js";
 import { logActivity } from "./activity-log.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import {
@@ -4352,6 +4353,22 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   await ensureServerWorkspaceLinksCurrent(serviceCwd, {
     onLog: input.onLog,
   });
+
+  if (input.executionWorkspaceId) {
+    // STA-2385: isolated runtimes that boot a Paperclip server need a seeded,
+    // per-worktree database before the process starts; otherwise the sanitized
+    // environment leaves them on the HOME-shared fallback DB with no agent
+    // credentials (every agent API key rejected with 401). A seeded clone must
+    // also never run its own heartbeat scheduler against copied agent rows.
+    const isolatedRuntimeDb = await ensureIsolatedPaperclipRuntimeDatabase({
+      cwd: serviceCwd,
+      companyId: input.agent.companyId,
+      onLog: input.onLog,
+    });
+    if (isolatedRuntimeDb.applies) {
+      env.HEARTBEAT_SCHEDULER_ENABLED ??= "false";
+    }
+  }
 
   const shell = resolveShell();
   const child = spawn(shell, ["-lc", command], {

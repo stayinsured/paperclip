@@ -1,4 +1,8 @@
 export {
+  resolveDatabaseTarget,
+  type ResolvedDatabaseTarget,
+} from "./runtime-config.js";
+export {
   createDb,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
