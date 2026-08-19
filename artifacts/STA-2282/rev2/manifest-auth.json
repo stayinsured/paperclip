@@ -1,0 +1,203 @@
+{
+ "schemaVersion": "stay-digital-visual-gate-trial-authorization/v1",
+ "issue": "STA-2281",
+ "parentIssue": "STA-2276",
+ "packageKind": "change-authorization-package/non-production-hosted-visual-gate-trial",
+ "qualificationOfRecord": {
+  "issue": "STA-2380",
+  "verdict": "PASS",
+  "verdictCommentId": "aedd9fb3-b6ed-46c8-ac1f-8b79aca6c2ab",
+  "verdictAt": "2026-08-19T10:29:31.930Z",
+  "qaRunId": "e774383d-9812-40b9-95b4-21d90b34cd3c",
+  "qaPrincipal": "6beaba8b-d56c-49f2-b907-f2e512115d34",
+  "supersedes": "STA-2369 FAIL of 2026-08-18T20:35Z",
+  "evidencePath": "qa-artifacts/STA-2380/2026-08-19-qualification-verdict.md (+ fetch-report.txt, fetched/, extracted/, counterexamples.mjs, counterexample-results.txt) in the QA workspace",
+  "reachFix": {
+   "issue": "STA-2379",
+   "verdict": "PASS",
+   "buildCommit": "ed94f3e5f60e7792b2f354530651686592f82762",
+   "evidencePath": "artifacts/STA-2379/2026-08-19-fresh-run-bridge-verification.md (+ bridge-verify-output.json)"
+  }
+ },
+ "repository": {
+  "identity": "stayinsured/web-platform",
+  "githubRepositoryId": 1076455328,
+  "branch": "dev",
+  "credentialFreeRemote": "git@github.com:stayinsured/web-platform.git",
+  "fetchedDevCommit": "7fa0eb54bc6aed51485cad2cacb52ea92d86d2cc",
+  "fetchedDevTree": "1fd325c08700f415564411f272ba8d76f7617a32",
+  "frozenIsAncestor": true
+ },
+ "replacementObjects": {
+  "frozenFinalBinding": {
+   "role": "the only dispatch ref class the frozen controller accepts (contract-only-child)",
+   "commit": "8582652e6f4f73191389360e2a77529d46a73bc9",
+   "tree": "4803b656275362c7b56a9682655a089230f5882c",
+   "parentCommit": "ff593d26ec41565e1414175f012f79803438642b",
+   "changedPaths": [
+    ".github/config/hs-visual-regression-contract.v2.json"
+   ],
+   "strategy": "single-contract-only-child/v1",
+   "bundleRef": "refs/heads/frozen-visual-gate"
+  },
+  "workflow": {
+   "path": ".github/workflows/hs-visual-regression.yml",
+   "blob": "6e19bab7b2e030560ad9490335a6ef0883a1af53"
+  },
+  "hostContract": {
+   "path": ".github/config/hs-visual-regression-contract.v2.json",
+   "commit": "ff593d26ec41565e1414175f012f79803438642b",
+   "blob": "c7e6a8e8e5b554d530e52152311e4692767302fe"
+  },
+  "finalContract": {
+   "path": ".github/config/hs-visual-regression-contract.v2.json",
+   "commit": "8582652e6f4f73191389360e2a77529d46a73bc9",
+   "blob": "f76cddcab55b553e3dfe6b920d2c271721cc5788"
+  },
+  "controller": {
+   "path": "scripts/hs-visual-regression-evidence.mjs",
+   "blob": "244a3cf31df940b0e6269acb6262a37735ecd325"
+  },
+  "focusedTest": {
+   "path": ".github/workflows/hs-visual-regression.test.mjs",
+   "blob": "6957b075155bd2b423d46dbfe46267245c0ca30c"
+  },
+  "deeperHistoryObjectNamedForRollback": "abd70249629419c6b14d41d59b754f9e455028a1"
+ },
+ "candidate": {
+  "commit": "7bdc3cbca394da29a7148b4ba6505826a360d07d",
+  "tree": "d5a18426713faca1d26f2f8498d97f05f2daaa33",
+  "note": "The only accepted workflow_dispatch candidate_sha input; also the controller's hardcoded EXPECTED_CANDIDATE_SHA. Distinct from the dispatch ref (host_candidate_not_distinct guard)."
+ },
+ "dispatch": {
+  "environment": "non-production: GitHub-hosted runner, workflow permissions contents:read only; no deployment target, no production system, no credential use, no provider write",
+  "repository": "stayinsured/web-platform",
+  "workflow": {
+   "githubWorkflowId": 272513204,
+   "name": "HS Visual Regression",
+   "path": ".github/workflows/hs-visual-regression.yml"
+  },
+  "refRequirement": "github.workflow_sha must resolve to exactly 8582652e6f4f73191389360e2a77529d46a73bc9 (the frozen final binding). Direct dispatch at ff593d26 fails preflight: the host contract c7e6a8e8 still binds the prior host 543dd6dc, so only the contract-only-child binding passes.",
+  "inputs": {
+   "candidate_sha": "7bdc3cbca394da29a7148b4ba6505826a360d07d",
+   "visual_gate_required": true
+  },
+  "count": 1,
+  "attempt": 1,
+  "runtime": {
+   "runnerLabel": "ubuntu-24.04",
+   "containerImage": "mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
+   "nodeVersion": "20.20.2",
+   "pnpmVersion": "10.20.0",
+   "playwrightVersion": "1.59.1",
+   "browserName": "chromium",
+   "browserVersion": "147.0.7727.15",
+   "browserRevision": "1217",
+   "workers": 1,
+   "retries": 0,
+   "expectedRunAttempt": 1
+  }
+ },
+ "preState": {
+  "mode": "all-off",
+  "operatorMustVerifyBeforeDispatch": true,
+  "checks": [
+   "Zero prior dispatches of workflow 272513204 (attested activity.hostedDispatches=0 on 2026-08-15; STA-2380 qualification on 2026-08-19 was read-only and dispatched nothing)",
+   "No persistent visual-gate requirement exists in the hosted repository; gate intent lives only in the per-dispatch input visual_gate_required",
+   "Accepted manifest authorization block unchanged: releaseGateActivation=disabled, productionDeployment=not-authorized, externalProviderWrites=not-authorized",
+   "Frozen objects unmodified on the remote: workflow blob 6e19bab7, controller 244a3cf3, focused test 6957b075, host contract c7e6a8e8 at ff593d26, final contract f76cddca at 8582652e",
+   "No git ref creation or mutation is needed to dispatch at 8582652e; needing one is a stop condition, not a workaround",
+   "Excluded activity counters remain zero: deployments, productionChanges, providerWrites, credentialChanges, baselineUpdates, gitRefMutations"
+  ]
+ },
+ "operator": {
+  "agentId": "9f22f9ed-33dc-466b-aeb0-7fb36bb360f4",
+  "issue": "STA-2282",
+  "role": "runtime owner (STA-2368/STA-2379 fix owner); the separately authorized production operator rule is not implicated because this trial is non-production"
+ },
+ "independentVerifier": {
+  "agentId": "6beaba8b-d56c-49f2-b907-f2e512115d34",
+  "issue": "STA-2283",
+  "role": "QA principal that produced the qualification of record; verifies without repair or rerun"
+ },
+ "stopConditions": [
+  "Any identity drift: repository id, workflow id 272513204, workflow name, or workflow path differs from this manifest",
+  "Any revision drift: github.workflow_sha does not resolve to 8582652e6f4f73191389360e2a77529d46a73bc9, or observed blobs differ from 6e19bab7/244a3cf3/6957b075 (controller code: workflow_runtime_drift)",
+  "Any candidate drift: inputs.candidate_sha != 7bdc3cbca394da29a7148b4ba6505826a360d07d (stale_sha) or equals the dispatch ref (host_candidate_not_distinct)",
+  "Any attempt drift: run attempt != 1 (retry_attempt); a failed or re-run attempt is never re-dispatched under this authorization",
+  "Any pre-state drift: the all-off checks above fail or cannot be evidenced before dispatch",
+  "Any destination drift: the dispatch would target production, a deployment target, or require a credential, provider write, or git ref mutation",
+  "Any contract failure: malformed_contract, workflow_host_mismatch, gate_not_required, or expected-manifest-sha mismatch (d642f611) in preflight or any later controller step",
+  "Evidence failure: run evidence or artifacts cannot be captured or retained; missing or malformed evidence is a hard failure, not a retry trigger",
+  "Rollback failure: post-trial gate-off readback cannot be evidenced (Rollback record is malformed/missing -> hard fail)"
+ ],
+ "evidencePath": {
+  "operator": "operator-evidence document (contract qaAccess.documentKey operator-evidence, evidence schema stay-digital-hs-visual-gate-evidence/v2) plus GitHub run artifacts via actions/upload-artifact, linked on STA-2282",
+  "retentionDays": {
+   "pass": 7,
+   "failure": 30
+  },
+  "independentVerification": "STA-2283 durable PASS/FAIL report using the shared QA template; local contract tests alone are insufficient"
+ },
+ "rollback": {
+  "mode": "fail-closed",
+  "missingOrMalformedRollback": "hard_fail",
+  "trialProcedure": [
+   "The gate is enabled only via the single dispatch input visual_gate_required=true; after the single run it is off by construction (per-run input, no persistent setting)",
+   "After the run, disable/leave-disabled the trial gate and read back that no persistent visualGate requirement exists (visualGate.required=false state); record the readback",
+   "On any trial failure: restore and read back visualGate.required=false, retain failure evidence for 30 days",
+   "No fallback dispatch, baseline update, provider write, credential change, or production action is permitted as recovery"
+  ],
+  "repositoryProcedure": [
+   "Revert 8582652e6f4f73191389360e2a77529d46a73bc9",
+   "Revert ff593d26ec41565e1414175f012f79803438642b",
+   "Revert abd70249629419c6b14d41d59b754f9e455028a1",
+   "Rerun node --test .github/workflows/hs-visual-regression.test.mjs"
+  ]
+ },
+ "authorizedByAcceptanceOf": {
+  "interactionKind": "request_confirmation",
+  "targetDocumentKey": "immutable-handoff",
+  "binding": "this manifest's sha256 and the handoff document revision are named in the confirmation; acceptance of that exact revision is the only authorization",
+  "scope": "exactly one non-production hosted dispatch of workflow 272513204 at ref 8582652e6f4f73191389360e2a77529d46a73bc9 with candidate_sha 7bdc3cbca394da29a7148b4ba6505826a360d07d and visual_gate_required=true, run attempt 1"
+ },
+ "exclusions": [
+  "second or re-run dispatch (attempt > 1) under this authorization",
+  "deployment or production change",
+  "credential use or mutation",
+  "external provider writes",
+  "baseline updates",
+  "git ref creation or mutation as a dispatch workaround",
+  "authorization of STA-2282 execution before this confirmation is accepted"
+ ],
+ "qualifiedEvidenceSet": {
+  "attestation": {
+   "boundAttachmentId": "1631ec59-9937-4c3f-bc4e-f6bda7e4f8e5",
+   "workProductId": "7b983dc5-02f3-4876-b963-2f043d42262f",
+   "originalAttachmentPrefix": "7202c2c5",
+   "byteSize": 5324,
+   "sha256": "0b8ea2d1e7f880f8152fff6467ed8bcd9a7961a118ad440bc3347886f7e51d93"
+  },
+  "acceptedManifest": {
+   "boundAttachmentId": "7221bd75-37df-42bc-aeb4-fe96eb984a77",
+   "workProductId": "0f08b7d0-5b47-4db3-a2f3-36c25e6752ea",
+   "originalAttachmentPrefix": "a68091dd",
+   "byteSize": 14392,
+   "fileSha256": "d678111ebea7c5710bc02040047aa8a641c85278076a1ed70d28157cc33feea9",
+   "canonicalPayloadSha256": "d642f611542736a5d28bdd17d0a157dee96832ec46e20f8563ba77c4d0bf4627"
+  },
+  "sourceBundle": {
+   "boundAttachmentId": "38527c3b-2c82-4ace-97dc-71b2cfff0207",
+   "workProductId": "7edae959-90e1-440b-a209-54ce029f48aa",
+   "originalAttachmentPrefix": "7d5cb283",
+   "byteSize": 77122,
+   "sha256": "108041d2606bdcc5ed74ae50c419c95991b7ff5bab12462cfd358fe605c6618c",
+   "format": "application/zip"
+  },
+  "qaHandoffDocument": {
+   "id": "ccddffe8-39e3-4818-8143-11e657e9b628",
+   "key": "immutable-handoff",
+   "issue": "STA-2298"
+  }
+ }
+}
