@@ -1,0 +1,124 @@
+{
+  "schemaVersion": "stay-digital-hs-visual-gate-run-evidence/v2",
+  "conclusion": "blocked",
+  "workflow": {
+    "repositoryId": 1076455328,
+    "name": "HS Visual Regression",
+    "id": 272513204,
+    "path": ".github/workflows/hs-visual-regression.yml",
+    "hostCommit": "ff593d26ec41565e1414175f012f79803438642b",
+    "hostTree": "8deb2c734f40761ae9ae87b3d8e86af983431810",
+    "workflowBlob": "6e19bab7b2e030560ad9490335a6ef0883a1af53",
+    "contractBlob": "c7e6a8e8e5b554d530e52152311e4692767302fe",
+    "controllerBlob": "244a3cf31df940b0e6269acb6262a37735ecd325",
+    "testBlob": "6957b075155bd2b423d46dbfe46267245c0ca30c",
+    "bindingStrategy": "single-contract-only-child/v1"
+  },
+  "workflowHost": null,
+  "candidate": null,
+  "manifest": {
+    "attachmentId": "246e7d5b-7204-419b-9184-07a7f35384e3",
+    "payloadSha256": "d642f611542736a5d28bdd17d0a157dee96832ec46e20f8563ba77c4d0bf4627"
+  },
+  "gate": {
+    "required": false
+  },
+  "runtime": null,
+  "run": {
+    "id": "32267409007",
+    "attempt": 1,
+    "outcome": "not_run",
+    "startedAt": "not_run",
+    "completedAt": "not_run",
+    "durationMs": 0
+  },
+  "playwright": {
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "counters": {
+    "staleSha": 1,
+    "wrongManifest": 1,
+    "flaky": 0,
+    "unclassified": 10,
+    "criticalDiff": 0,
+    "retryAttempts": 1,
+    "credentialScanFindings": 0
+  },
+  "activity": {
+    "deployments": 0,
+    "providerWrites": 0,
+    "productionTargets": 0,
+    "baselineUpdates": 0,
+    "exceptions": 0,
+    "refMutations": 0
+  },
+  "failures": [
+    {
+      "code": "retry_attempt",
+      "detail": "bound Playwright run attempt differs from trusted GitHub context"
+    },
+    {
+      "code": "runtime_drift",
+      "detail": "runtime attestation differs from contract"
+    },
+    {
+      "code": "stale_sha",
+      "detail": "candidate identity did not pass"
+    },
+    {
+      "code": "unclassified",
+      "detail": "bound Playwright run attempt is malformed"
+    },
+    {
+      "code": "unclassified",
+      "detail": "candidate evidence enforcement did not succeed"
+    },
+    {
+      "code": "unclassified",
+      "detail": "candidate evidence evaluation did not succeed"
+    },
+    {
+      "code": "unclassified",
+      "detail": "Missing bound Playwright evidence: evidence/playwright-bound.json"
+    },
+    {
+      "code": "unclassified",
+      "detail": "Missing candidate gate evidence: evidence/candidate-gate.json"
+    },
+    {
+      "code": "unclassified",
+      "detail": "Missing identity evidence: evidence/identity.json"
+    },
+    {
+      "code": "unclassified",
+      "detail": "Missing preflight evidence: evidence/preflight.json"
+    },
+    {
+      "code": "unclassified",
+      "detail": "Missing runtime attestation: evidence/runtime-attestation.json"
+    },
+    {
+      "code": "unclassified",
+      "detail": "preflight did not pass"
+    },
+    {
+      "code": "unclassified",
+      "detail": "visual command did not succeed"
+    },
+    {
+      "code": "wrong_manifest",
+      "detail": "result binding did not succeed"
+    }
+  ],
+  "sourceDigests": {
+    "preflightSha256": null,
+    "identitySha256": null,
+    "boundResultsSha256": null,
+    "candidateGateSha256": null,
+    "credentialScanSha256": "03b59842f04fe4cc75ffdd8d650af9a989abe32cec138a5e933982d1111fc256",
+    "runtimeAttestationSha256": null
+  }
+}

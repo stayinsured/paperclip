@@ -1,0 +1,276 @@
+name: HS Visual Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full immutable web-platform candidate commit SHA
+        required: true
+        type: string
+      visual_gate_required:
+        description: Explicit intent to run the fail-closed visual gate
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hs-visual-regression-${{ github.workflow }}-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  hs-visual-regression:
+    name: Exact-SHA HubSpot Storybook visual gate
+    runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out workflow host
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-host
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate gate intent and frozen bindings before candidate checkout
+        id: preflight
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          VISUAL_GATE_REQUIRED: ${{ inputs.visual_gate_required }}
+          WORKFLOW_HOST_SHA: ${{ github.workflow_sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p evidence
+          host_sha="$(git -C workflow-host rev-parse HEAD)"
+          host_tree="$(git -C workflow-host rev-parse HEAD^{tree})"
+          host_parent="$(git -C workflow-host rev-parse HEAD^)"
+          binding_changed_paths="$(git -C workflow-host diff-tree --no-commit-id --name-only -r HEAD^ HEAD)"
+          workflow_blob="$(git -C workflow-host rev-parse HEAD:.github/workflows/hs-visual-regression.yml)"
+          contract_blob="$(git -C workflow-host rev-parse HEAD:.github/config/hs-visual-regression-contract.v2.json)"
+          controller_blob="$(git -C workflow-host rev-parse HEAD:scripts/hs-visual-regression-evidence.mjs)"
+          test_blob="$(git -C workflow-host rev-parse HEAD:.github/workflows/hs-visual-regression.test.mjs)"
+          node workflow-host/scripts/hs-visual-regression-evidence.mjs preflight \
+            --contract workflow-host/.github/config/hs-visual-regression-contract.v2.json \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --visual-gate-required "$VISUAL_GATE_REQUIRED" \
+            --workflow-host-sha "$WORKFLOW_HOST_SHA" \
+            --observed-workflow-host-sha "$host_sha" \
+            --workflow-host-tree "$host_tree" \
+            --workflow-host-parent "$host_parent" \
+            --binding-changed-paths "$binding_changed_paths" \
+            --workflow-blob "$workflow_blob" \
+            --contract-blob "$contract_blob" \
+            --controller-blob "$controller_blob" \
+            --test-blob "$test_blob" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --expected-manifest-sha d642f611542736a5d28bdd17d0a157dee96832ec46e20f8563ba77c4d0bf4627 \
+            --out evidence/preflight.json
+
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read back exact candidate identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          observed_sha="$(git -C candidate rev-parse HEAD)"
+          observed_tree="$(git -C candidate rev-parse HEAD^{tree})"
+          node workflow-host/scripts/hs-visual-regression-evidence.mjs identity \
+            --preflight evidence/preflight.json \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --observed-candidate-sha "$observed_sha" \
+            --observed-candidate-tree "$observed_tree" \
+            --out evidence/identity.json
+
+      - name: Setup exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20.20.2
+
+      - name: Setup exact pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.20.0
+          run_install: false
+
+      - name: Resolve pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact-lock dependency cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: hs-visual-pnpm-2f01b34fffe16abb8b5f406f39821a2a4877cecebc5b53ca5b53938cdf0db584
+
+      - name: Install candidate dependencies
+        working-directory: candidate
+        run: pnpm install --frozen-lockfile
+
+      - name: Attest exact runtime
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          playwright_version="$(pnpm --dir candidate --filter @stayinsured/ui-react exec playwright --version | awk '{print $2}')"
+          browser_version="$(/ms-playwright/chromium-1217/chrome-linux64/chrome --version | awk '{print $2}')"
+          lock_sha="$(sha256sum candidate/pnpm-lock.yaml | awk '{print $1}')"
+          node workflow-host/scripts/hs-visual-regression-evidence.mjs attest-runtime \
+            --contract workflow-host/.github/config/hs-visual-regression-contract.v2.json \
+            --runner-label ubuntu-24.04 \
+            --container-image 'mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53' \
+            --node-version "$(node --version)" \
+            --pnpm-version "$(pnpm --version)" \
+            --playwright-version "$playwright_version" \
+            --browser-name chromium \
+            --browser-version "$browser_version" \
+            --browser-revision 1217 \
+            --lockfile-sha256 "$lock_sha" \
+            --workers 1 \
+            --retries 0 \
+            --run-attempt "$RUN_ATTEMPT" \
+            --out evidence/runtime-attestation.json
+
+      - name: Run retry-free HubSpot visual regression
+        id: visual
+        working-directory: candidate
+        env:
+          CI: "true"
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ github.workspace }}/evidence/playwright-raw.json
+        run: |
+          started_ms="$(date +%s%3N)"
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          set +e
+          pnpm --filter @stayinsured/ui-react exec playwright test \
+            --config playwright.config.ts --workers=1 --retries=0 --reporter=json
+          status=$?
+          set -e
+          completed_ms="$(date +%s%3N)"
+          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ "$status" -eq 0 ]; then run_outcome=success; else run_outcome=failure; fi
+          echo "run_outcome=$run_outcome" >> "$GITHUB_OUTPUT"
+          echo "started_at=$started_at" >> "$GITHUB_OUTPUT"
+          echo "completed_at=$completed_at" >> "$GITHUB_OUTPUT"
+          echo "duration_ms=$((completed_ms - started_ms))" >> "$GITHUB_OUTPUT"
+
+      - name: Bind raw results to candidate and accepted manifest
+        id: bind
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          node workflow-host/scripts/hs-visual-regression-evidence.mjs bind-results --raw evidence/playwright-raw.json --candidate-sha "$CANDIDATE_SHA" --manifest-sha d642f611542736a5d28bdd17d0a157dee96832ec46e20f8563ba77c4d0bf4627 --run-attempt "$RUN_ATTEMPT" --out evidence/playwright-bound.json
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Classify candidate visual evidence
+        id: evaluate
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RUN_OUTCOME: ${{ steps.visual.outputs.run_outcome || 'failure' }}
+        run: |
+          set +e
+          observed_sha="$(git -C candidate rev-parse HEAD)"
+          node candidate/scripts/browser-release-gate.mjs evaluate --suite visual --candidate-sha "$CANDIDATE_SHA" --observed-sha "$observed_sha" --run-outcome "$RUN_OUTCOME" --results evidence/playwright-bound.json --policy candidate/tests/browser-gate/failure-policy.json --manifest-version d642f611542736a5d28bdd17d0a157dee96832ec46e20f8563ba77c4d0bf4627 --out evidence/candidate-gate.json
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce candidate visual classification without exception
+        id: candidate_enforce
+        if: ${{ always() && steps.preflight.outcome == 'success' }}
+        run: |
+          set +e
+          node candidate/scripts/browser-release-gate.mjs enforce --evidence evidence/candidate-gate.json
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Scan retained evidence for credential material
+        if: ${{ always() && steps.preflight.outcome != 'skipped' }}
+        run: node workflow-host/scripts/hs-visual-regression-evidence.mjs scan --paths evidence,candidate/test-results,candidate/playwright-report --out evidence/credential-scan.json
+
+      - name: Finalize deterministic visual-gate run evidence
+        id: finalize
+        if: ${{ always() && steps.preflight.outcome != 'skipped' }}
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_OUTCOME: ${{ steps.visual.outputs.run_outcome || 'not_run' }}
+          STARTED_AT: ${{ steps.visual.outputs.started_at || 'not_run' }}
+          COMPLETED_AT: ${{ steps.visual.outputs.completed_at || 'not_run' }}
+          DURATION_MS: ${{ steps.visual.outputs.duration_ms || '0' }}
+          BIND_STATUS: ${{ steps.bind.outputs.status || '1' }}
+          EVALUATION_STATUS: ${{ steps.evaluate.outputs.status || '1' }}
+          CANDIDATE_ENFORCE_STATUS: ${{ steps.candidate_enforce.outputs.status || '1' }}
+        run: |
+          set +e
+          node workflow-host/scripts/hs-visual-regression-evidence.mjs finalize-run --contract workflow-host/.github/config/hs-visual-regression-contract.v2.json --preflight evidence/preflight.json --identity evidence/identity.json --runtime-attestation evidence/runtime-attestation.json --bound-results evidence/playwright-bound.json --candidate-gate evidence/candidate-gate.json --credential-scan evidence/credential-scan.json --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --run-outcome "$RUN_OUTCOME" --started-at "$STARTED_AT" --completed-at "$COMPLETED_AT" --duration-ms "$DURATION_MS" --bind-status "$BIND_STATUS" --evaluation-status "$EVALUATION_STATUS" --candidate-enforce-status "$CANDIDATE_ENFORCE_STATUS" --out evidence/hs-visual-gate-run-evidence.json
+          status=$?
+          set -e
+          conclusion="$(node -p "JSON.parse(require('fs').readFileSync('evidence/hs-visual-gate-run-evidence.json')).conclusion")"
+          sha256sum evidence/*.json > evidence/SHA256SUMS
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Enforce complete visual-gate run evidence
+        if: ${{ always() && steps.finalize.outcome != 'skipped' }}
+        run: node workflow-host/scripts/hs-visual-regression-evidence.mjs enforce-run --evidence evidence/hs-visual-gate-run-evidence.json
+
+      - name: Upload passing visual-gate evidence
+        id: upload_pass
+        if: ${{ always() && steps.finalize.outputs.conclusion == 'pass' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hs-visual-gate-pass-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            evidence/**
+            candidate/test-results/**
+            candidate/playwright-report/**
+
+      - name: Record immutable passing artifact receipt
+        if: ${{ always() && steps.upload_pass.outcome == 'success' }}
+        run: |
+          node workflow-host/scripts/hs-visual-regression-evidence.mjs record-artifact \
+            --run-evidence evidence/hs-visual-gate-run-evidence.json \
+            --artifact-id "${{ steps.upload_pass.outputs.artifact-id }}" \
+            --artifact-name "hs-visual-gate-pass-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --artifact-digest "${{ steps.upload_pass.outputs.artifact-digest }}" \
+            --artifact-url "${{ steps.upload_pass.outputs.artifact-url }}" \
+            --retention-days 7 --out evidence/artifact-receipt.json
+
+      - name: Upload immutable receipt index
+        if: ${{ always() && steps.upload_pass.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hs-visual-gate-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: evidence/artifact-receipt.json
+
+      - name: Upload failing visual-gate evidence
+        if: ${{ always() && steps.finalize.outputs.conclusion != 'pass' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hs-visual-gate-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            evidence/**
+            candidate/test-results/**
+            candidate/playwright-report/**
