@@ -17,6 +17,7 @@ const config: ModuleConfig = {
   readOnly: true,
   destinationEnabled: false,
   destinationKey: "digital/architecture",
+  outlineActivation: null,
   sourceVersion: "paperclip-v1",
   policyVersion: "shadow-v1",
   maxAttempts: 5,

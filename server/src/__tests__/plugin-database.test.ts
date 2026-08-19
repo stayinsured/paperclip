@@ -468,6 +468,7 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       "002_sentry_workflow.sql",
       "003_clickup_projection.sql",
       "004_outline_assessments.sql",
+      "005_outline_activation.sql",
     ]);
 
     await pluginLifecycleManager(db, { loader }).unload(installed!.id, true);
@@ -501,6 +502,7 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       "002_sentry_workflow.sql",
       "003_clickup_projection.sql",
       "004_outline_assessments.sql",
+      "005_outline_activation.sql",
     ]);
 
     const projectConfigTables = Array.from(

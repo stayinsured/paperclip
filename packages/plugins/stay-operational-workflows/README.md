@@ -2,13 +2,15 @@
 
 Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.
 
-Outline and ClickUp remain strictly shadow-only. The Sentry pilot adds a separate,
-fail-closed activation path for read-only polling and one-way Slack notifications.
-It performs no provider call until the exact configuration fingerprint and
-capabilities are present in a current issue-document revision, that revision has
-an accepted board-only confirmation, and both least-privilege provider identity
-proofs are current. The currently accepted pilot policy authorizes zero polling
-and zero Slack messages, so installation alone is inert.
+ClickUp remains strictly shadow-only. Outline adds an approved, fail-closed
+activation path: the guarded publisher is connected to runtime reconciliation
+behind the exact board-approved gates (accepted destination configuration
+fingerprint, current per-collection writer proofs, all external-write switches
+on, and a host-bound MCP runtime). A config without the approved activation
+payload stays structurally shadow with zero provider writes. The Sentry pilot
+keeps a separate fail-closed activation path for read-only polling and one-way
+Slack notifications. The currently accepted pilot policies authorize zero
+polling and zero Slack messages, so installation alone is inert.
 
 ## Runtime model
 
@@ -57,9 +59,14 @@ Configuration mutation is board-only:
 
 Valid modules are outline, clickup, and sentry_slack. Each
 company/project/module row has independent enabled, readOnly,
-destinationEnabled, and destinationKey switches. This release rejects
-readOnly false or destinationEnabled true; enabling writes requires a future,
-separately approved release and migration.
+destinationEnabled, and destinationKey switches. ClickUp and Sentry/Slack rows
+reject readOnly false or destinationEnabled true. An outline row may activate
+only by also carrying the approved `outlineActivation` payload (exact
+destination configuration plus its accepted authorization); the payload is
+validated at upsert time and re-validated on every reconciliation. Kill switch:
+upsert the row with `enabled: false` (or the shadow switch combination) — the
+payload and all durable state survive, and reconciliation performs zero
+provider writes.
 
 ## Operator routes
 

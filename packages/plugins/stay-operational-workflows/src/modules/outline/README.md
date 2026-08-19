@@ -17,7 +17,7 @@ Event and scheduled reconciliation share a durable assessment coordinator. It cl
 
 ## Publishing gate
 
-The current plugin release is structurally shadow-only. The publishing service is deliberately unwired until a later activation revision satisfies every gate below:
+Default configurations remain structurally shadow-only. The guarded publisher is wired into runtime reconciliation and publishes a candidate's durable preview only when its module config carries an approved activation payload and every gate below passes — checked at config upsert and again on every reconciliation:
 
 1. the module, destination, and external-write switches are enabled;
 2. read-only mode is disabled;
@@ -27,7 +27,7 @@ The current plugin release is structurally shadow-only. The publishing service i
 6. the proof covers `documents.info`, `documents.create`, and `documents.update`;
 7. the preview still resolves to the approved collection and parent.
 
-Changing the MCP connection, connection revision, tool names, collection, or any parent invalidates both approval and writer proof before provider access.
+Changing the MCP connection, connection revision, tool names, collection, or any parent invalidates both approval and writer proof before provider access. A gate that fails at runtime (kill switch, approval drift, expired proof, or no host-bound MCP runtime) records one visible exception, observes the candidate in shadow, and performs zero provider writes; the durable operation ledger, cursors, and receipts survive the rollback.
 
 ## Idempotency and reconciliation
 
