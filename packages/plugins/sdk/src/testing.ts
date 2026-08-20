@@ -41,6 +41,7 @@ import type {
   AgentSessionEvent,
   PluginLocalFolderEntry,
   PluginLocalFolderStatus,
+  PluginManagedToolProfilesClient,
   PluginAccessMember,
   PrincipalPermissionGrant,
   PermissionKey,
@@ -81,6 +82,8 @@ export interface TestHarnessOptions {
   capabilities?: PluginCapability[];
   /** Initial config returned by `ctx.config.get(companyId)`. */
   config?: Record<string, unknown>;
+  /** Host-backed fake for ctx.managedToolProfiles.invoke. */
+  managedToolProfileInvoke?: PluginManagedToolProfilesClient["invoke"];
 }
 
 export interface TestHarnessLogEntry {
@@ -751,6 +754,15 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
     config: {
       async get() {
         return { ...currentConfig };
+      },
+    },
+    managedToolProfiles: {
+      async invoke(input) {
+        requireCapability(manifest, capabilitySet, "tools.profile.invoke");
+        if (!options.managedToolProfileInvoke) {
+          throw new Error("Managed tool profile invocation requires a host-backed test double");
+        }
+        return options.managedToolProfileInvoke(input);
       },
     },
     localFolders: {

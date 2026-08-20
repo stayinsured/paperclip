@@ -142,6 +142,36 @@ async function allowToolsForAgent(db: Db, companyId: string, agentId: string, to
   return profile;
 }
 
+async function allowExactCatalogEntryForAgent(
+  db: Db,
+  companyId: string,
+  agentId: string,
+  connectionId: string,
+  catalogEntryId: string,
+) {
+  const profile = await db.insert(toolProfiles).values({
+    companyId,
+    profileKey: "exact-" + randomUUID(),
+    name: "Exact profile " + randomUUID(),
+    defaultAction: "deny",
+  }).returning().then((rows) => rows[0]!);
+  await db.insert(toolProfileEntries).values({
+    companyId,
+    profileId: profile.id,
+    selectorType: "catalog_entry",
+    effect: "include",
+    connectionId,
+    catalogEntryId,
+  });
+  await db.insert(toolProfileBindings).values({
+    companyId,
+    profileId: profile.id,
+    targetType: "agent",
+    targetId: agentId,
+  });
+  return profile;
+}
+
 async function allowAllToolsForAgent(db: Db, companyId: string, agentId: string) {
   const profile = await db
     .insert(toolProfiles)
@@ -3905,6 +3935,109 @@ rl.on("line", (line) => {
         parameters: { id: "1" },
       }),
     ]);
+  });
+
+  it("executes only exact managed-profile catalog entries and returns durable sanitized receipts", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const primary = await createLocalStdioMcpTool(db, company.id, { toolName: "list_documents", riskLevel: "read" });
+    const other = await createLocalStdioMcpTool(db, company.id, { toolName: "list_documents", riskLevel: "read" });
+    const gateway = createTestToolGatewayService(db);
+    const base = {
+      companyId: company.id,
+      pluginId: "stay.operational",
+      agentId: agent.id,
+      profileKey: "outline",
+      toolName: "list_documents",
+      parameters: { message: "docs" },
+    };
+
+    const denied = await gateway.executeManagedToolProfileCall({
+      ...base,
+      connectionId: primary.connection.id,
+      idempotencyKey: "denied-before-profile",
+    });
+    expect(denied).toEqual({ receipt: expect.objectContaining({ outcome: "denied", replayed: false, errorCode: "deny_default" }) });
+
+    const profile = await allowExactCatalogEntryForAgent(
+      db, company.id, agent.id, primary.connection.id, primary.catalogEntry.id,
+    );
+    const allowed = await gateway.executeManagedToolProfileCall({
+      ...base,
+      connectionId: primary.connection.id,
+      idempotencyKey: "allowed-once",
+    });
+    expect(allowed).toMatchObject({
+      receipt: { outcome: "succeeded", replayed: false, connectionId: primary.connection.id, toolName: "list_documents" },
+      result: expect.anything(),
+    });
+    const replay = await gateway.executeManagedToolProfileCall({
+      ...base,
+      connectionId: primary.connection.id,
+      idempotencyKey: "allowed-once",
+    });
+    expect(replay).toEqual({
+      receipt: expect.objectContaining({ receiptId: allowed.receipt.receiptId, outcome: "succeeded", replayed: true }),
+    });
+
+    const wrongConnection = await gateway.executeManagedToolProfileCall({
+      ...base,
+      connectionId: other.connection.id,
+      idempotencyKey: "wrong-connection",
+    });
+    expect(wrongConnection.receipt.outcome).toBe("denied");
+    await expect(gateway.executeManagedToolProfileCall({
+      ...base,
+      connectionId: primary.connection.id,
+      toolName: "delete_everything",
+      idempotencyKey: "wrong-tool",
+    })).rejects.toMatchObject({ status: 404, reasonCode: "tool_not_found" });
+
+    await db.update(toolProfiles).set({ status: "disabled" }).where(eq(toolProfiles.id, profile.id));
+    const revoked = await gateway.executeManagedToolProfileCall({
+      ...base,
+      connectionId: primary.connection.id,
+      idempotencyKey: "revoked-profile",
+    });
+    expect(revoked.receipt.outcome).toBe("denied");
+
+    const rows = await db.select().from(toolInvocations).where(eq(toolInvocations.actorId, "stay.operational"));
+    expect(rows.find((row) => row.id === allowed.receipt.receiptId)).toMatchObject({
+      actorType: "plugin",
+      status: "succeeded",
+      resultHash: expect.any(String),
+      resultSummary: expect.objectContaining({ sha256: expect.any(String) }),
+    });
+    expect(rows.filter((row) => row.idempotencyKey?.endsWith(":allowed-once"))).toHaveLength(1);
+  });
+
+  it("marks failed managed-profile writes ambiguous without persisting provider error payloads", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const failing = await createLocalStdioMcpTool(db, company.id, {
+      toolName: "update_document",
+      riskLevel: "write",
+      stdioScript: "process.stderr.write(\"provider raw secret\"); process.exit(1);",
+    });
+    await allowExactCatalogEntryForAgent(
+      db, company.id, agent.id, failing.connection.id, failing.catalogEntry.id,
+    );
+    const gateway = createTestToolGatewayService(db);
+    const result = await gateway.executeManagedToolProfileCall({
+      companyId: company.id,
+      pluginId: "stay.operational",
+      agentId: agent.id,
+      connectionId: failing.connection.id,
+      profileKey: "outline",
+      toolName: "update_document",
+      parameters: { message: "update" },
+      idempotencyKey: "ambiguous-write",
+    });
+    expect(result).toEqual({ receipt: expect.objectContaining({ outcome: "ambiguous", errorCode: expect.any(String) }) });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, result.receipt.receiptId));
+    expect(invocation.errorMessage).toMatch(/^Tool invocation failed: /);
+    expect(invocation.errorMessage).not.toContain("provider raw secret");
+    expect(invocation.resultSummary).toBeNull();
   });
 
   it("rejects caller-supplied issue context outside the run company", async () => {

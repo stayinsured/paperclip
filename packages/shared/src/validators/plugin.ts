@@ -199,6 +199,7 @@ export const pluginManagedAgentDeclarationSchema = z.object({
     skillKey: z.string().min(1).max(100),
     tool: z.string().min(3).max(201).regex(/^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/),
   }).strict().optional(),
+  identityOnly: z.literal("tool_profile").optional(),
   status: z.enum(["idle", "paused"]).optional(),
   budgetMonthlyCents: z.number().int().min(0).optional(),
   instructions: z.object({
@@ -210,6 +211,17 @@ export const pluginManagedAgentDeclarationSchema = z.object({
 });
 
 export type PluginManagedAgentDeclarationInput = z.infer<typeof pluginManagedAgentDeclarationSchema>;
+
+export const pluginManagedToolProfileDeclarationSchema = z.object({
+  profileKey: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._:-]*$/),
+  displayName: z.string().min(1).max(100),
+  description: z.string().max(500).optional(),
+  principalAgentKey: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._:-]*$/),
+  connectionConfigPath: z.string().min(1).max(300).regex(/^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$/),
+  tools: z.array(z.string().min(1).max(200)).min(1).max(25),
+}).strict();
+
+export type PluginManagedToolProfileDeclarationInput = z.infer<typeof pluginManagedToolProfileDeclarationSchema>;
 
 export const pluginManagedProjectDeclarationSchema = z.object({
   projectKey: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._:-]*$/, {
@@ -745,6 +757,7 @@ export const pluginManifestV1Schema = z.object({
   apiRoutes: z.array(pluginApiRouteDeclarationSchema).optional(),
   environmentDrivers: z.array(pluginEnvironmentDriverDeclarationSchema).optional(),
   agents: z.array(pluginManagedAgentDeclarationSchema).optional(),
+  managedToolProfiles: z.array(pluginManagedToolProfileDeclarationSchema).optional(),
   projects: z.array(pluginManagedProjectDeclarationSchema).optional(),
   routines: z.array(pluginManagedRoutineDeclarationSchema).optional(),
   skills: z.array(pluginManagedSkillDeclarationSchema).optional(),
@@ -757,8 +770,34 @@ export const pluginManifestV1Schema = z.object({
   }).optional(),
 }).superRefine((manifest, ctx) => {
   const declaredSkills = new Set((manifest.skills ?? []).map((skill) => skill.skillKey));
-  const declaredTools = new Set((manifest.tools ?? []).map((tool) => `${manifest.id}:${tool.name}`));
+  const declaredTools = new Set((manifest.tools ?? []).map((tool) => manifest.id + ":" + tool.name));
+  const managedAgents = new Map((manifest.agents ?? []).map((agent) => [agent.agentKey, agent]));
+  const seenProfileKeys = new Set<string>();
+  const seenProfilePrincipals = new Set<string>();
+  for (const [profileIndex, profile] of (manifest.managedToolProfiles ?? []).entries()) {
+    if (seenProfileKeys.has(profile.profileKey)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "managedToolProfiles profileKey must be unique", path: ["managedToolProfiles", profileIndex, "profileKey"] });
+    }
+    seenProfileKeys.add(profile.profileKey);
+    if (seenProfilePrincipals.has(profile.principalAgentKey)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "identity-only principals may back exactly one managed tool profile", path: ["managedToolProfiles", profileIndex, "principalAgentKey"] });
+    }
+    seenProfilePrincipals.add(profile.principalAgentKey);
+    const principal = managedAgents.get(profile.principalAgentKey);
+    if (principal?.identityOnly !== "tool_profile" || principal.executionPrincipal) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "principalAgentKey must reference an identity-only tool_profile agent", path: ["managedToolProfiles", profileIndex, "principalAgentKey"] });
+    }
+    if (new Set(profile.tools).size !== profile.tools.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "managedToolProfiles tools must be unique", path: ["managedToolProfiles", profileIndex, "tools"] });
+    }
+  }
   for (const [agentIndex, agent] of (manifest.agents ?? []).entries()) {
+    if (agent.identityOnly === "tool_profile" && !seenProfilePrincipals.has(agent.agentKey)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "identity-only tool_profile agents must back exactly one managed tool profile", path: ["agents", agentIndex, "identityOnly"] });
+    }
+    if (agent.identityOnly === "tool_profile" && (agent.permissions || agent.instructions || agent.executionPrincipal)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "identity-only tool_profile agents cannot declare permissions, instructions, or an execution principal", path: ["agents", agentIndex] });
+    }
     const principal = agent.executionPrincipal;
     if (!principal) continue;
     if (agent.permissions && Object.keys(agent.permissions).length > 0) {
@@ -818,6 +857,14 @@ export const pluginManifestV1Schema = z.object({
     }
   }
 
+  if ((manifest.managedToolProfiles?.length ?? 0) > 0 && !manifest.capabilities.includes("tools.profile.invoke")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Capability tools.profile.invoke is required when managedToolProfiles are declared",
+      path: ["capabilities"],
+    });
+  }
+
   // environment drivers require environment.drivers.register
   if (manifest.environmentDrivers && manifest.environmentDrivers.length > 0) {
     if (!manifest.capabilities.includes("environment.drivers.register")) {
@@ -829,7 +876,7 @@ export const pluginManifestV1Schema = z.object({
     }
   }
 
-  if (manifest.agents && manifest.agents.length > 0) {
+  if (manifest.agents?.some((agent) => agent.identityOnly !== "tool_profile")) {
     if (!manifest.capabilities.includes("agents.managed")) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

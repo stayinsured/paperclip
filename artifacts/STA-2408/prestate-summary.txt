@@ -1,0 +1,32 @@
+STA-2408 rev-3 §4 pre-state sweep 2026-08-19T14:57:56Z
+PASS | §4 workflow identity | id=272513204 .github/workflows/hs-visual-regression.yml active HS Visual Regression
+dispatch-event total_count=0
+FAIL | §4.2 dispatch baseline
+PASS | §4.5 blob .github/workflows/hs-visual-regression.yml @ 8582652e6f == 6e19bab7
+PASS | §4.5 blob .github/config/hs-visual-regression-contract.v2.json @ ff593d26ec == c7e6a8e8
+PASS | §4.5 blob .github/config/hs-visual-regression-contract.v2.json @ 8582652e6f == f76cddca
+PASS | §4.5 blob scripts/hs-visual-regression-evidence.mjs @ 8582652e6f == 244a3cf3
+PASS | §4.5 blob .github/workflows/hs-visual-regression.test.mjs @ 8582652e6f == 6957b075
+PASS | §4.5 frozen commit shape | parents=['ff593d26'] tree=4803b6562753
+PASS | §4.3 yml@8582652e6f visual_gate_required default_true=False (input-only gate)
+PASS | §4.3 yml@dev visual_gate_required default_true=False (input-only gate)
+PASS | §4.3 no persistent gate variable | matches=[] (of 1 vars)
+PASS | §4.6 authorized ref -> 8582652e6f4f73191389360e2a77529d46a73bc9 (commit)
+heads total=86; refs at frozen SHA: ['refs/heads/visual-gate/sta-2282-8582652e']
+PASS | §4.6 exactly one ref at frozen SHA
+--- refs-vs-baseline + health probe + deployments recorded separately ---
+workflow 272513204 total runs listed=100 (total_count=191); workflow_dispatch runs=1
+  32257803101 #189 attempt=1 completed/failure head=8582652e6f branch=visual-gate/sta-2282-8582652e
+PASS | §4.2 dispatch baseline ==1 by full enumeration (spent rev-2 trial 32257803101); note: '?event=' filter param returned a false total_count=0 — documented, raw retained
+PASS | §4.6 zero tags at frozen SHA | tags total=11 at-SHA=[]
+baseline heads(rev2-post 13:2xZ)=79; current heads=86
+added-since-baseline=['refs/heads/ops/sta-2392-release-candidate', 'refs/heads/ops/sta-2402-revision-6-candidate', 'refs/heads/sta-2373-relocation-hero-wrap', 'refs/heads/sta-2392-main-promo', 'refs/heads/sta-2399-e2e-rule', 'refs/heads/sta-2399-main-promo', 'refs/heads/sta-2405-hydration-cluster']
+removed=[]
+moved=['refs/heads/dev', 'refs/heads/main']
+PASS | §4.6 scope-relative ref drift | suspicious=[]; vg->frozen=True; added/moved above are ordinary engineering cadence outside the authorization scope (CTO-cleared reading, release comment 14:54Z; none at frozen SHA, none on visual-gate/*)
+health-probe run 32266720929 (release-ui-react, push, completed/success 14:55:11Z): job 96112897398 'react-ui-publish' runner_id=1000002764 runner_name=GitHub Actions 1000002764 steps=15 executed=14 conclusion=success
+PASS | §4.7 Actions health probe | ≥1 completed run within ~30min with steps executed on real runner (runner_id≠0); backup in-window run: App Journeys 32263126088 completed/failure 14:32:52Z
+PASS | §4.8 deployments counter zero | total listed=0; latest=None; created-today-after-10Z=[]
+PASS | §4.8 operator attestation | this run performed read-only GitHub API reads only (zero deployments/production changes/provider writes/credential changes/baseline updates/ref mutations); the single permitted mutation is the §10 dispatch POST that follows
+PASS | §4.1 sequencing | STA-2283 done (verifier of record closed, verdict eb86ded6 FAIL/environment superseded by this authorized re-trial)
+PASS | §4.4 manifest of record | sha256=3a641e147d1362ad9c85f73eb0b4c1e8b1c5c2135ef302359a3d3ab6d626b4a6 (frozen 3a641e14…); authorization block releaseGateActivation=disabled productionDeployment=not-authorized externalProviderWrites=not-authorized

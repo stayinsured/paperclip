@@ -1345,6 +1345,7 @@ export type {
   PluginEnvironmentDriverDeclaration,
   PluginEnvironmentTemplateConfigBinding,
   PluginManagedAgentDeclaration,
+  PluginManagedToolProfileDeclaration,
   PluginManagedProjectDeclaration,
   PluginManagedRoutineDeclaration,
   PluginManagedSkillDeclaration,

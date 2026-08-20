@@ -391,6 +391,12 @@ arbitrary document selector, or credential to the principal. Installing this
 declaration makes the capability available to the plugin coordinator; provider
 activation and production writes remain separately governed operator actions.
 
+### Deterministic brokered MCP profiles
+
+Use a managed tool profile instead of a restricted execution principal when no model reasoning is needed. Add only `tools.profile.invoke`, declare an `identityOnly: "tool_profile"` managed agent, and list the exact upstream MCP tools under `managedToolProfiles`. The host reconciles the identity automatically; do not add `agents.managed`, `agents.invoke`, `secrets.read-ref`, or `http.outbound` for this path.
+
+Call `ctx.managedToolProfiles.invoke()` with a declared profile/tool and semantic idempotency key. The worker cannot select a connection or credential. Treat `ambiguous` write receipts as unknown commit state: list/read the provider state before retrying. Disabling the managed profile is the operator kill switch. See [the host-contract ADR](../plans/2026-08-20-plugin-managed-mcp-profile-host-contract.md) for the manifest and receipt schema.
+
 UI:
 
 - `usePluginData`

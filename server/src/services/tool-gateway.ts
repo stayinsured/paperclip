@@ -29,7 +29,7 @@ import {
   toolProfiles,
   toolStdioCommandTemplates,
 } from "@paperclipai/db";
-import type { ToolRunContext } from "@paperclipai/plugin-sdk";
+import type { ManagedToolProfileOutcome, ToolRunContext } from "@paperclipai/plugin-sdk";
 import type {
   CreateToolMcpGateway,
   CreateToolMcpGatewayToken,
@@ -202,6 +202,18 @@ interface ExecuteTestCallInput {
   userId: string;
   toolName: string;
   parameters?: unknown;
+  timeoutMs?: number;
+}
+
+interface ExecuteManagedToolProfileCallInput {
+  companyId: string;
+  pluginId: string;
+  agentId: string;
+  connectionId: string;
+  profileKey: string;
+  toolName: string;
+  parameters?: unknown;
+  idempotencyKey: string;
   timeoutMs?: number;
 }
 
@@ -3725,7 +3737,9 @@ export function createToolGatewayService(
     invocationId: string;
     companyId: string;
     agentId: string;
-    userId: string;
+    actorType: "user" | "plugin";
+    actorId: string;
+    source: "test" | "plugin_profile";
     argumentsSummary: ReturnType<typeof summarizeToolValue>;
     reasonCode: string;
     matchedPolicyIds: string[];
@@ -3744,11 +3758,11 @@ export function createToolGatewayService(
       agentId: args.agentId,
       runId: null,
       issueId: null,
-      actorType: "user",
-      actorId: args.userId,
+      actorType: args.actorType,
+      actorId: args.actorId,
       action: "tool_gateway.call_allowed",
       details: {
-        source: "test",
+        source: args.source,
         invocationId: args.invocationId,
         decision: "allow",
         reasonCode: args.reasonCode,
@@ -3802,7 +3816,7 @@ export function createToolGatewayService(
         argumentsSummary: args.argumentsSummary,
         resultSummary: resultValidation.summary,
         metadata: {
-          source: "test",
+          source: args.source,
           headerSummary: connectedMcpExecution.headerSummary ?? undefined,
           execution: connectedMcpExecution.execution,
         },
@@ -3814,11 +3828,11 @@ export function createToolGatewayService(
         agentId: args.agentId,
         runId: null,
         issueId: null,
-        actorType: "user",
-        actorId: args.userId,
+        actorType: args.actorType,
+        actorId: args.actorId,
         action: "tool_gateway.call_completed",
         details: {
-          source: "test",
+          source: args.source,
           invocationId: args.invocationId,
           decision: "allow",
           reasonCode: "tool_completed",
@@ -3846,12 +3860,15 @@ export function createToolGatewayService(
             ? err.reasonCode
             : "tool_execution_failed";
       const message = err instanceof Error ? err.message : String(err);
+      const persistedMessage = args.source === "plugin_profile"
+        ? "Tool invocation failed: " + reasonCode
+        : message;
       await db
         .update(toolInvocations)
         .set({
           status: status === 504 ? "timed_out" : status === 429 ? "rate_limited" : "failed",
           errorCode: reasonCode,
-          errorMessage: message,
+          errorMessage: persistedMessage,
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -3866,7 +3883,7 @@ export function createToolGatewayService(
         reasonCode,
         argumentsSummary: args.argumentsSummary,
         metadata: {
-          source: "test",
+          source: args.source,
           ...(err instanceof ToolContentValidationError ? { findings: err.findings } : {}),
           ...(executionAuditFromError(err) ? { execution: executionAuditFromError(err) } : {}),
         },
@@ -3878,11 +3895,11 @@ export function createToolGatewayService(
         agentId: args.agentId,
         runId: null,
         issueId: null,
-        actorType: "user",
-        actorId: args.userId,
+        actorType: args.actorType,
+        actorId: args.actorId,
         action: status === 504 ? "tool_gateway.call_deferred" : "tool_gateway.call_failed",
         details: {
-          source: "test",
+          source: args.source,
           invocationId: args.invocationId,
           decision: status === 504 ? "defer_runtime" : "deny",
           reasonCode,
@@ -3890,14 +3907,14 @@ export function createToolGatewayService(
           ...toolAuditMetadata(args.tool),
           argumentsSummary: args.argumentsSummary,
           durationMs: Date.now() - startedAt,
-          error: message,
+          error: persistedMessage,
           ...(executionAuditFromError(err) ? { execution: executionAuditFromError(err) } : {}),
         },
       });
       return {
         decision: "allowed" as const,
         invocationId: args.invocationId,
-        error: { message, reasonCode },
+        error: { message: persistedMessage, reasonCode },
       };
     }
   }
@@ -3973,7 +3990,9 @@ export function createToolGatewayService(
         invocationId: invocation.id,
         companyId: invocation.companyId,
         agentId,
-        userId,
+        actorType: "user",
+        actorId: userId,
+        source: "test",
         argumentsSummary,
         reasonCode: "approval_granted",
         matchedPolicyIds: invocation.matchedPolicyIds ?? [],
@@ -5092,12 +5111,135 @@ export function createToolGatewayService(
         invocationId,
         companyId: input.companyId,
         agentId: input.agentId,
-        userId: input.userId,
+        actorType: "user",
+        actorId: input.userId,
+        source: "test",
         argumentsSummary: argumentValidation.summary,
         reasonCode: accessDecision.reasonCode,
         matchedPolicyIds: accessDecision.matchedPolicyIds,
         timeoutMs: input.timeoutMs,
       });
+    },
+
+    async executeManagedToolProfileCall(input: ExecuteManagedToolProfileCallInput) {
+      await assertAgentInCompany(input.companyId, input.agentId);
+      if (!input.idempotencyKey.trim() || input.idempotencyKey.length > 200) {
+        throw new ToolGatewayHttpError(400, "A non-empty idempotency key of at most 200 characters is required", "invalid_idempotency_key");
+      }
+      const tool = (await connectedMcpToolsForConnection(input.companyId, input.connectionId))
+        .find((candidate) => candidate.upstreamToolName === input.toolName);
+      if (!tool) {
+        throw new ToolGatewayHttpError(404, "Declared tool is not active on the managed connection", "tool_not_found", {
+          connectionId: input.connectionId,
+          tool: input.toolName,
+        });
+      }
+      const session: ToolGatewaySession = {
+        id: "plugin-profile:" + input.profileKey,
+        token: "",
+        companyId: input.companyId,
+        agentId: input.agentId,
+        runId: null,
+        issueId: null,
+        projectId: null,
+        actorType: "plugin",
+        actorId: input.pluginId,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + DEFAULT_SESSION_TTL_MS),
+      };
+      const requestedParameters = input.parameters ?? {};
+      const argumentValidation = validateToolContent({
+        value: requestedParameters,
+        direction: "arguments",
+        sensitiveMode: "redact",
+        promptInjectionMode: "ignore",
+      });
+      const decisionInput = policyInputForAgentTool({
+        companyId: input.companyId,
+        agentId: input.agentId,
+        actorType: "plugin",
+        actorId: input.pluginId,
+        tool,
+        parameters: requestedParameters,
+        idempotencyKey: "plugin-profile:" + input.pluginId + ":" + input.profileKey + ":" + input.idempotencyKey,
+        consumeRateLimit: true,
+      });
+      const initialDecision = await policyService.decide(decisionInput);
+      const accessDecision: ToolAccessDecision = initialDecision.decision === "require_approval"
+        ? {
+            ...initialDecision,
+            allowed: false,
+            decision: "deny",
+            reasonCode: "deny_policy_block",
+            explanation: "Managed plugin profile calls cannot create approval requests",
+          }
+        : initialDecision;
+      const recorded = await policyService.recordInvocation(decisionInput, accessDecision);
+      await policyService.writeAudit(decisionInput, accessDecision);
+      const expectedArgumentsHash = argumentValidation.summary.sha256 ?? null;
+      if (recorded.replayed && (
+        recorded.invocation.actorType !== "plugin"
+        || recorded.invocation.actorId !== input.pluginId
+        || recorded.invocation.agentId !== input.agentId
+        || recorded.invocation.connectionId !== input.connectionId
+        || recorded.invocation.upstreamToolName !== input.toolName
+        || recorded.invocation.argumentsHash !== expectedArgumentsHash
+      )) {
+        throw new ToolGatewayHttpError(409, "Idempotency key was reused with different managed profile input", "idempotency_conflict");
+      }
+
+      const receipt = (row: typeof toolInvocations.$inferSelect, replayed: boolean) => {
+        const failedAfterDispatch = tool.risk !== "read" && ["executing", "authorized", "failed", "timed_out"].includes(row.status);
+        const outcome: ManagedToolProfileOutcome = row.status === "succeeded"
+          ? "succeeded"
+          : row.status === "rate_limited"
+            ? "rate_limited"
+            : row.status === "denied" || row.status === "awaiting_approval"
+              ? "denied"
+              : failedAfterDispatch
+                ? "ambiguous"
+                : "failed";
+        return {
+          schemaVersion: 1 as const,
+          receiptId: row.id,
+          companyId: row.companyId,
+          profileKey: input.profileKey,
+          connectionId: row.connectionId,
+          toolName: input.toolName,
+          outcome,
+          replayed,
+          resultHash: row.resultHash,
+          resultSizeBytes: row.resultSizeBytes,
+          errorCode: row.errorCode,
+          completedAt: (row.completedAt ?? row.updatedAt).toISOString(),
+        };
+      };
+
+      if (recorded.replayed || !accessDecision.allowed) {
+        return { receipt: receipt(recorded.invocation, recorded.replayed) };
+      }
+      const execution = await runTestToolInvocation({
+        session,
+        tool,
+        parameters: requestedParameters,
+        invocationId: recorded.invocation.id,
+        companyId: input.companyId,
+        agentId: input.agentId,
+        actorType: "plugin",
+        actorId: input.pluginId,
+        source: "plugin_profile",
+        argumentsSummary: argumentValidation.summary,
+        reasonCode: accessDecision.reasonCode,
+        matchedPolicyIds: accessDecision.matchedPolicyIds,
+        timeoutMs: input.timeoutMs,
+      });
+      const completed = await db.select().from(toolInvocations)
+        .where(eq(toolInvocations.id, recorded.invocation.id))
+        .then((rows) => rows[0]);
+      if (!completed) throw new ToolGatewayHttpError(500, "Durable invocation receipt was not found", "receipt_missing");
+      return "result" in execution
+        ? { receipt: receipt(completed, false), result: execution.result }
+        : { receipt: receipt(completed, false) };
     },
 
     /**

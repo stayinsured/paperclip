@@ -123,6 +123,47 @@ describe("createHostClientHandlers invocation company scope", () => {
     ).resolves.toEqual([{ id: "company-a", name: "Company A" }]);
   });
 
+  it("gates managed tool-profile invocation by capability and invocation company", async () => {
+    const invoke = vi.fn(async () => ({
+      receipt: {
+        schemaVersion: 1 as const,
+        receiptId: "receipt-a",
+        companyId: "company-a",
+        profileKey: "outline",
+        connectionId: "connection-a",
+        toolName: "list_documents",
+        outcome: "succeeded" as const,
+        replayed: false,
+        resultHash: "sha256:result",
+        resultSizeBytes: 10,
+        errorCode: null,
+        completedAt: new Date().toISOString(),
+      },
+      result: { documents: [] },
+    }));
+    const services = { managedToolProfiles: { invoke } } as unknown as HostServices;
+    const params = {
+      companyId: "company-a",
+      profileKey: "outline",
+      toolName: "list_documents",
+      parameters: {},
+      idempotencyKey: "assessment-a:list",
+    };
+    const denied = createHostClientHandlers({ pluginId: "paperclip.test", capabilities: [], services });
+    await expect(denied["managedToolProfiles.invoke"](params, { invocationScope: { companyId: "company-a" } }))
+      .rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(invoke).not.toHaveBeenCalled();
+
+    const allowed = createHostClientHandlers({ pluginId: "paperclip.test", capabilities: ["tools.profile.invoke"], services });
+    await expect(allowed["managedToolProfiles.invoke"](params, { invocationScope: { companyId: "company-a" } }))
+      .resolves.toMatchObject({ receipt: { outcome: "succeeded" } });
+    await expect(allowed["managedToolProfiles.invoke"](
+      { ...params, companyId: "company-b" },
+      { invocationScope: { companyId: "company-a" } },
+    )).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects company-scope store access for a different company", async () => {
     const stateGet = vi.fn(async () => null);
     const services = {
