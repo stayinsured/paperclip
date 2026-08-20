@@ -564,9 +564,9 @@ function redactedPublishReceipt(operationKey: string, receipt: OutlinePublishRec
     code: receipt.outcome === "succeeded" ? `publish_${receipt.action}` : (receipt.errorClass ?? "outline_publish_failed"),
     status: receipt.outcome === "succeeded" ? receipt.action : receipt.outcome,
     occurredAt: receipt.occurredAt,
-    externalWriteAttempted: receipt.outcome !== "succeeded"
-      || receipt.action !== "already_current"
-      || receipt.reconciledBeforeRetry,
+    externalWriteAttempted: receipt.outcome === "succeeded"
+      ? receipt.action !== "already_current" || receipt.reconciledBeforeRetry
+      : receipt.reconciledBeforeRetry,
   });
 }
 

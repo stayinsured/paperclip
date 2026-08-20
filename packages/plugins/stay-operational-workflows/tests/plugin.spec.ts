@@ -269,14 +269,14 @@ describe("stay operational workflows plugin", () => {
       accessMode: "mcp",
       connectionId: "outline-sandbox",
       tools: {
-        documentsInfo: "outline:documents_info",
-        documentsCreate: "outline:documents_create",
-        documentsUpdate: "outline:documents_update",
+        documentsInfo: "list_documents",
+        documentsCreate: "create_document",
+        documentsUpdate: "update_document",
       },
       targets: {
-        architecture: { collectionId: "c1", parentDocumentId: "p1", parentTitle: "Architecture" },
-        reports: { collectionId: "c1", parentDocumentId: "p2", parentTitle: "Reports" },
-        processes: { collectionId: "c1", parentDocumentId: "p3", parentTitle: "Processes" },
+        architecture: { collectionId: "89f93133-b508-4143-a281-d19488881eb9", parentDocumentId: "6806f4b9-36ed-442b-a91e-43ee75f4dcb1", parentTitle: "Architecture" },
+        reports: { collectionId: "89f93133-b508-4143-a281-d19488881eb9", parentDocumentId: "43333bc2-f05b-47c7-bdd4-03fd43534c76", parentTitle: "Reports" },
+        processes: { collectionId: "89f93133-b508-4143-a281-d19488881eb9", parentDocumentId: "0f5fcd02-9849-4b1d-a36c-1ed6efe2ac30", parentTitle: "Processes" },
       },
     };
     const rejected = await plugin.definition.onApiRequest?.(

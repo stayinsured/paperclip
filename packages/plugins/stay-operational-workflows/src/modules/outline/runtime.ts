@@ -3,7 +3,7 @@ import type {
   PluginManagedToolProfilesClient,
 } from "@paperclipai/plugin-sdk";
 import { isOutlineActiveConfig, type ModuleConfig } from "../../contracts.js";
-import { outlineActivationDenial } from "./activation.js";
+import { outlineActivationDenial, parseOutlineModuleActivation } from "./activation.js";
 import { sha256 } from "./identity.js";
 import { OutlineAmbiguousWriteError, OutlineMcpError } from "./mcp.js";
 import type {
@@ -166,7 +166,12 @@ export function createOutlineRuntime(options: OutlineRuntimeOptions): OutlineRun
   return {
     resolve(config) {
       if (!isOutlineActiveConfig(config)) return null;
-      const activation = config.outlineActivation!;
+      let activation;
+      try {
+        activation = parseOutlineModuleActivation(config.outlineActivation);
+      } catch {
+        return { deniedCode: "outline_activation_invalid" };
+      }
       const denial = outlineActivationDenial(activation, now());
       if (denial) return { deniedCode: denial };
       const api = options.mcpConnectionFactory?.(activation.destination, activation.authorization)

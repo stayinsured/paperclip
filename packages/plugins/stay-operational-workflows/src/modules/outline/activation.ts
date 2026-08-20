@@ -6,9 +6,34 @@ import type {
   OutlineModuleActivation,
   OutlinePublishingAuthorization,
   OutlineTarget,
+  OutlineTargetDestination,
 } from "./types.js";
 
-const TARGETS: OutlineTarget[] = ["architecture", "reports", "processes"];
+const TARGET_CONFIG: Record<OutlineTarget, OutlineTargetDestination> = {
+  architecture: {
+    collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+    parentDocumentId: "6806f4b9-36ed-442b-a91e-43ee75f4dcb1",
+    parentTitle: "Architecture",
+  },
+  reports: {
+    collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+    parentDocumentId: "43333bc2-f05b-47c7-bdd4-03fd43534c76",
+    parentTitle: "Reports",
+  },
+  processes: {
+    collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+    parentDocumentId: "0f5fcd02-9849-4b1d-a36c-1ed6efe2ac30",
+    parentTitle: "Processes",
+  },
+};
+
+const TARGETS = Object.keys(TARGET_CONFIG) as OutlineTarget[];
+
+const BROKER_TOOLS = {
+  documentsInfo: "list_documents",
+  documentsCreate: "create_document",
+  documentsUpdate: "update_document",
+} as const;
 
 function invalidActivation(message: string): WorkflowRequestError {
   return new WorkflowRequestError(
@@ -46,6 +71,16 @@ function parseDestination(input: unknown): OutlineDestinationConfig {
   if (new Set(toolNames).size !== toolNames.length) {
     throw invalidActivation("outlineActivation.destination.tools must name three distinct tools");
   }
+  if (
+    tools.documentsInfo !== BROKER_TOOLS.documentsInfo
+    || tools.documentsCreate !== BROKER_TOOLS.documentsCreate
+    || tools.documentsUpdate !== BROKER_TOOLS.documentsUpdate
+  ) {
+    throw invalidActivation(
+      "outlineActivation.destination.tools must match the exact managed Outline broker tool names",
+    );
+  }
+
   const targetsInput = isObject(input.targets) ? input.targets : {};
   const targets = {} as OutlineDestinationConfig["targets"];
   for (const target of TARGETS) {
@@ -53,11 +88,20 @@ function parseDestination(input: unknown): OutlineDestinationConfig {
     if (!targetInput) {
       throw invalidActivation(`outlineActivation.destination.targets.${target} is required`);
     }
-    targets[target] = {
-      collectionId: requiredNonEmptyString(targetInput.collectionId, `outlineActivation.destination.targets.${target}.collectionId`),
-      parentDocumentId: requiredNonEmptyString(targetInput.parentDocumentId, `outlineActivation.destination.targets.${target}.parentDocumentId`),
-      parentTitle: target as OutlineDestinationConfig["targets"][OutlineTarget]["parentTitle"],
-    };
+    const expected = TARGET_CONFIG[target];
+    const collectionId = requiredNonEmptyString(targetInput.collectionId, `outlineActivation.destination.targets.${target}.collectionId`);
+    const parentDocumentId = requiredNonEmptyString(targetInput.parentDocumentId, `outlineActivation.destination.targets.${target}.parentDocumentId`);
+    const parentTitle = requiredNonEmptyString(targetInput.parentTitle, `outlineActivation.destination.targets.${target}.parentTitle`);
+    if (
+      collectionId !== expected.collectionId
+      || parentDocumentId !== expected.parentDocumentId
+      || parentTitle !== expected.parentTitle
+    ) {
+      throw invalidActivation(
+        `outlineActivation.destination.targets.${target} must match the approved Digital destination`,
+      );
+    }
+    targets[target] = expected;
   }
   return {
     accessMode: "mcp",

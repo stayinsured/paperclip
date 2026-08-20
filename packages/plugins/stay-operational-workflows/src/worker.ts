@@ -13,7 +13,7 @@ import {
 } from "./contracts.js";
 import { ShadowReconciler } from "./reconciler.js";
 import { PostgresWorkflowRepository } from "./repository.js";
-import { assertOutlineModuleActivationUsable } from "./modules/outline/activation.js";
+import { assertOutlineModuleActivationUsable, parseOutlineModuleActivation } from "./modules/outline/activation.js";
 import { PostgresOutlineAssessmentRepository } from "./modules/outline/assessment.js";
 import { createOutlineRuntime } from "./modules/outline/runtime.js";
 import {
@@ -151,9 +151,9 @@ const plugin = definePlugin({
       if (input.routeKey === "config.upsert") {
         const config = parseModuleConfig({ ...body, companyId: input.companyId });
         if (config.outlineActivation) {
-          // Fail closed at the configuration boundary: an activation payload
-          // that could not publish right now (switches, exact approved
-          // fingerprint, writer proofs, expiry) is rejected, never persisted.
+          // Fail closed at the configuration boundary: exact destination/tool set,
+          // switches, approval fingerprint, writer proofs, and expiry must all pass.
+          config.outlineActivation = parseOutlineModuleActivation(config.outlineActivation);
           assertOutlineModuleActivationUsable(config.outlineActivation);
         }
         const project = await ctx.projects.get(config.projectId, input.companyId);

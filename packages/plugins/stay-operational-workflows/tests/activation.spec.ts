@@ -23,6 +23,7 @@ import {
   createOutlineRuntime,
   outlineConfigurationFingerprint,
   renderOutlineShadowPreview,
+  parseOutlineModuleActivation,
   type OutlineCompletionSource,
   type OutlineDestinationConfig,
   type OutlineDocument,
@@ -51,24 +52,24 @@ const destination: OutlineDestinationConfig = {
   connectionId: "outline-sandbox",
   connectionRevision: "oauth-v1",
   tools: {
-    documentsInfo: "outline:documents_info",
-    documentsCreate: "outline:documents_create",
-    documentsUpdate: "outline:documents_update",
+    documentsInfo: "list_documents",
+    documentsCreate: "create_document",
+    documentsUpdate: "update_document",
   },
   targets: {
     architecture: {
-      collectionId: "10000000-0000-4000-8000-000000000001",
-      parentDocumentId: "20000000-0000-4000-8000-000000000001",
+      collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+      parentDocumentId: "6806f4b9-36ed-442b-a91e-43ee75f4dcb1",
       parentTitle: "Architecture",
     },
     reports: {
-      collectionId: "10000000-0000-4000-8000-000000000001",
-      parentDocumentId: "20000000-0000-4000-8000-000000000002",
+      collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+      parentDocumentId: "43333bc2-f05b-47c7-bdd4-03fd43534c76",
       parentTitle: "Reports",
     },
     processes: {
-      collectionId: "10000000-0000-4000-8000-000000000001",
-      parentDocumentId: "20000000-0000-4000-8000-000000000003",
+      collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+      parentDocumentId: "0f5fcd02-9849-4b1d-a36c-1ed6efe2ac30",
       parentTitle: "Processes",
     },
   },
@@ -527,6 +528,18 @@ describe("outline activation configuration gates", () => {
   it("rejects an activation whose destination key does not match the approved connection", () => {
     expect(() => activeConfig({ destinationKey: "some-other-connection" })).toThrow(/connectionId/);
   });
+
+  it("rejects an activation whose approval names tools outside the exact broker allowlist", () => {
+    const activation = structuredClone(activationPayload());
+    activation.destination.tools.documentsInfo = "outline:documents_info";
+    expect(() => parseOutlineModuleActivation(activation)).toThrow(/exact managed Outline broker tool names/);
+  });
+
+  it("rejects an activation outside the exact Digital collection and parent destinations", () => {
+    const activation = structuredClone(activationPayload());
+    activation.destination.targets.architecture.parentDocumentId = "wrong-parent";
+    expect(() => parseOutlineModuleActivation(activation)).toThrow(/approved Digital destination/);
+  });
 });
 
 describe("approved outline activation path in reconciliation", () => {
@@ -645,6 +658,7 @@ describe("approved outline activation path in reconciliation", () => {
     expect(operation.status).toBe("retry_wait");
     // Broker-supplied retry delay (1500ms) is preserved over the default backoff.
     expect(operation.nextAttemptAt).toBe("2026-08-07T10:00:01.500Z");
+    expect(operation.outcomeReceipt).toMatchObject({ externalWriteAttempted: false });
     expect(h.repository.exceptions.map((value) => value.kind)).toEqual(["rate_limited"]);
     expect(h.repository.cursors).toHaveLength(0);
 
