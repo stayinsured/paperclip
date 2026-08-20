@@ -12,8 +12,13 @@ import {
   pluginLogs,
   principalPermissionGrants,
   projects as projectsTable,
+  toolCatalogEntries,
+  toolConnections,
+  toolProfileBindings,
+  toolProfileEntries,
+  toolProfiles,
 } from "@paperclipai/db";
-import { eq, and, like, desc, inArray, sql, isNull, isNotNull, gt, lte } from "drizzle-orm";
+import { eq, and, or, like, desc, inArray, sql, isNull, isNotNull, gt, lte } from "drizzle-orm";
 import type {
   HostServices,
   Company,
@@ -29,6 +34,7 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import type { ToolGatewayService } from "./tool-gateway.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -685,7 +691,7 @@ export function buildHostServices(
   pluginKey: string,
   eventBus: PluginEventBus,
   notifyWorker?: (method: string, params: unknown) => void,
-  options: { pluginWorkerManager?: PluginWorkerManager; manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1 } = {},
+  options: { pluginWorkerManager?: PluginWorkerManager; manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1; toolGateway?: ToolGatewayService } = {},
 ): HostServices & { dispose(): void } {
   const registry = pluginRegistryService(db);
   const stateStore = pluginStateStore(db);
@@ -824,6 +830,133 @@ export function buildHostServices(
 
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
+
+  const readConfigPath = (config: Record<string, unknown>, dotPath: string): unknown => {
+    let current: unknown = config;
+    for (const segment of dotPath.split(".")) {
+      if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, segment)) return undefined;
+      current = current[segment];
+    }
+    return current;
+  };
+
+  const reconcileManagedToolProfile = async (companyId: string, profileKey: string) => {
+    const declaration = options.manifest?.managedToolProfiles?.find((candidate) => candidate.profileKey === profileKey);
+    if (!declaration) throw new Error("Managed tool profile declaration not found: " + profileKey);
+    const principalDeclaration = options.manifest?.agents?.find((candidate) => candidate.agentKey === declaration.principalAgentKey);
+    if (principalDeclaration?.identityOnly !== "tool_profile" || principalDeclaration.executionPrincipal) {
+      throw new Error("Managed tool profile principal must be an identity-only tool_profile agent");
+    }
+    const config = (await registry.getConfig(pluginId, companyId))?.configJson ?? {};
+    const connectionRef = readConfigPath(config, declaration.connectionConfigPath);
+    if (typeof connectionRef !== "string" || !connectionRef.trim()) {
+      throw new Error("Managed tool profile connection is not configured");
+    }
+    const normalizedConnectionRef = connectionRef.trim();
+    const connectionSelector = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalizedConnectionRef)
+      ? or(eq(toolConnections.id, normalizedConnectionRef), eq(toolConnections.uid, normalizedConnectionRef))
+      : eq(toolConnections.uid, normalizedConnectionRef);
+    const connection = await db.select().from(toolConnections).where(and(
+      eq(toolConnections.companyId, companyId),
+      connectionSelector,
+    )).then((rows) => rows[0] ?? null);
+    if (!connection || !connection.enabled || connection.status !== "active" || !["mcp_remote", "local_stdio"].includes(connection.transport)) {
+      throw new Error("Managed tool profile connection is unavailable");
+    }
+    const catalog = await db.select().from(toolCatalogEntries).where(and(
+      eq(toolCatalogEntries.companyId, companyId),
+      eq(toolCatalogEntries.connectionId, connection.id),
+      eq(toolCatalogEntries.status, "active"),
+      eq(toolCatalogEntries.entryKind, "tool"),
+      inArray(toolCatalogEntries.toolName, declaration.tools),
+    ));
+    const byTool = new Map<string, typeof catalog>();
+    for (const entry of catalog) byTool.set(entry.toolName, [...(byTool.get(entry.toolName) ?? []), entry]);
+    for (const toolName of declaration.tools) {
+      if ((byTool.get(toolName)?.length ?? 0) !== 1) {
+        throw new Error("Managed tool profile requires exactly one active catalog entry for " + toolName);
+      }
+    }
+    const principal = await managedAgents.reconcile(declaration.principalAgentKey, companyId);
+    if (!principal.agent || principal.agent.status !== "idle") {
+      throw new Error("Managed tool profile identity is unavailable");
+    }
+    const namespacedKey = "plugin:" + pluginKey + ":" + declaration.profileKey;
+    let profile = await db.select().from(toolProfiles).where(and(
+      eq(toolProfiles.companyId, companyId),
+      eq(toolProfiles.profileKey, namespacedKey),
+    )).then((rows) => rows[0] ?? null);
+    if (profile && profile.status !== "active") {
+      throw new Error("Managed tool profile is revoked");
+    }
+    const profileMetadata = {
+      managedBy: "plugin",
+      pluginId,
+      pluginKey,
+      declaredProfileKey: declaration.profileKey,
+      principalAgentKey: declaration.principalAgentKey,
+      connectionConfigPath: declaration.connectionConfigPath,
+    };
+    if (!profile) {
+      profile = await db.insert(toolProfiles).values({
+        companyId,
+        profileKey: namespacedKey,
+        name: "Plugin " + pluginKey + ": " + declaration.displayName,
+        description: declaration.description ?? null,
+        status: "active",
+        defaultAction: "deny",
+        metadata: profileMetadata,
+      }).onConflictDoNothing().returning().then((rows) => rows[0] ?? null);
+      if (!profile) {
+        profile = await db.select().from(toolProfiles).where(and(
+          eq(toolProfiles.companyId, companyId),
+          eq(toolProfiles.profileKey, namespacedKey),
+        )).then((rows) => rows[0] ?? null);
+      }
+    }
+    if (!profile || profile.status !== "active") throw new Error("Managed tool profile is revoked");
+    await db.update(toolProfiles).set({
+      name: "Plugin " + pluginKey + ": " + declaration.displayName,
+      description: declaration.description ?? null,
+      defaultAction: "deny",
+      metadata: profileMetadata,
+      updatedAt: new Date(),
+    }).where(eq(toolProfiles.id, profile.id));
+    const desiredCatalogIds = declaration.tools.map((toolName) => byTool.get(toolName)![0].id).sort();
+    const [entries, bindings] = await Promise.all([
+      db.select().from(toolProfileEntries).where(and(eq(toolProfileEntries.companyId, companyId), eq(toolProfileEntries.profileId, profile.id))),
+      db.select().from(toolProfileBindings).where(and(eq(toolProfileBindings.companyId, companyId), eq(toolProfileBindings.profileId, profile.id))),
+    ]);
+    const currentCatalogIds = entries
+      .filter((entry) => entry.effect === "include" && entry.selectorType === "catalog_entry" && entry.catalogEntryId)
+      .map((entry) => entry.catalogEntryId!)
+      .sort();
+    const exactEntries = entries.length === desiredCatalogIds.length && currentCatalogIds.join(",") === desiredCatalogIds.join(",");
+    const exactBinding = bindings.length === 1 && bindings[0].targetType === "agent" && bindings[0].targetId === principal.agent.id;
+    if (!exactEntries || !exactBinding) {
+      await db.transaction(async (tx) => {
+        await tx.delete(toolProfileEntries).where(and(eq(toolProfileEntries.companyId, companyId), eq(toolProfileEntries.profileId, profile!.id)));
+        await tx.insert(toolProfileEntries).values(desiredCatalogIds.map((catalogEntryId) => ({
+          companyId,
+          profileId: profile!.id,
+          selectorType: "catalog_entry" as const,
+          effect: "include" as const,
+          connectionId: connection.id,
+          catalogEntryId,
+        })));
+        await tx.delete(toolProfileBindings).where(and(eq(toolProfileBindings.companyId, companyId), eq(toolProfileBindings.profileId, profile!.id)));
+        await tx.insert(toolProfileBindings).values({
+          companyId,
+          profileId: profile!.id,
+          targetType: "agent",
+          targetId: principal.agent!.id,
+          priority: 100,
+          metadata: { managedBy: "plugin", pluginId, pluginKey, profileKey: declaration.profileKey },
+        });
+      });
+    }
+    return { declaration, principalAgentId: principal.agent.id, connectionId: connection.id, profileId: profile.id };
+  };
 
   const readProviderMetadata = (metadata: Record<string, unknown> | null | undefined) => {
     if (!isRecord(metadata)) return null;
@@ -1418,6 +1551,26 @@ export function buildHostServices(
         await ensurePluginAvailableForCompany(companyId);
         const configRow = await registry.getConfig(pluginId, companyId);
         return configRow?.configJson ?? {};
+      },
+    },
+
+    managedToolProfiles: {
+      async invoke(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const declared = options.manifest?.managedToolProfiles?.find((candidate) => candidate.profileKey === params.profileKey);
+        if (!declared || !declared.tools.includes(params.toolName)) {
+          throw new Error("Tool is not declared for the managed profile");
+        }
+        if (!options.toolGateway) throw new Error("Managed tool profile gateway is unavailable");
+        const reconciled = await reconcileManagedToolProfile(companyId, params.profileKey);
+        return options.toolGateway.executeManagedToolProfileCall({
+          ...params,
+          companyId,
+          pluginId,
+          agentId: reconciled.principalAgentId,
+          connectionId: reconciled.connectionId,
+        });
       },
     },
 

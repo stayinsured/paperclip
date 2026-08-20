@@ -27,6 +27,7 @@ function moduleConfig(overrides: Partial<ModuleConfig> = {}): ModuleConfig {
     readOnly: true,
     destinationEnabled: false,
     destinationKey: "digital",
+    outlineActivation: null,
     sourceVersion: "paperclip-v1",
     policyVersion: "shadow-v1",
     maxAttempts: 5,
@@ -165,6 +166,22 @@ class MemoryRepository implements WorkflowRepository {
     return true;
   }
 
+  async completePublish(
+    companyId: string,
+    operationId: string,
+    leaseToken: string,
+    receipt: RedactedReceipt,
+  ): Promise<boolean> {
+    const operation = await this.getOperation(companyId, operationId);
+    if (!operation || this.leases.get(operationId) !== leaseToken) return false;
+    operation.status = "published";
+    operation.outcomeReceipt = receipt;
+    operation.nextAttemptAt = null;
+    this.leases.delete(operationId);
+    this.timeline.push(`operation:${operation.id}:published`);
+    return true;
+  }
+
   async recordFailure(
     companyId: string,
     operationId: string,
@@ -183,7 +200,7 @@ class MemoryRepository implements WorkflowRepository {
 
   async advanceCursor(candidate: SourceCandidate, operationKey: string): Promise<void> {
     const operation = this.operations.get(`${candidate.companyId}:${candidate.module}:${operationKey}`);
-    if (!operation || !["shadowed", "skipped"].includes(operation.status)) {
+    if (!operation || !["shadowed", "skipped", "published"].includes(operation.status)) {
       throw new Error("cursor attempted before durable terminal ledger");
     }
     if (this.failCursorOnce) {
@@ -238,8 +255,10 @@ class MemoryRepository implements WorkflowRepository {
       companyId,
       trigger,
       status: "running",
+      mode: "shadow",
       scanned: 0,
       shadowed: 0,
+      published: 0,
       duplicates: 0,
       conflicts: 0,
       exceptions: 0,
@@ -283,10 +302,11 @@ class MemoryRepository implements WorkflowRepository {
         status: run.status,
         scanned: run.scanned,
         shadowed: run.shadowed,
+        published: run.published,
         duplicates: run.duplicates,
         conflicts: run.conflicts,
         exceptions: run.exceptions,
-        externalWrites: 0,
+        externalWrites: run.externalWrites,
         startedAt: "2026-08-07T10:00:00.000Z",
         completedAt: "2026-08-07T10:00:01.000Z",
       })),

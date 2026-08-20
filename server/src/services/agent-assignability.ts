@@ -16,8 +16,9 @@ function isPluginExecutionPrincipal(metadata: unknown): boolean {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
   const managed = (metadata as Record<string, unknown>).pluginManagedAgent;
   if (!managed || typeof managed !== "object" || Array.isArray(managed)) return false;
-  const principal = (managed as Record<string, unknown>).executionPrincipal;
-  return Boolean(principal && typeof principal === "object" && !Array.isArray(principal) && (principal as Record<string, unknown>).kind === "plugin_tool_only");
+  const record = managed as Record<string, unknown>;
+  const principal = record.executionPrincipal;
+  return record.identityOnly === "tool_profile" || Boolean(principal && typeof principal === "object" && !Array.isArray(principal) && (principal as Record<string, unknown>).kind === "plugin_tool_only");
 }
 
 type AgentAssignmentConflictReason =

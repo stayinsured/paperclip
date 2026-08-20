@@ -31,24 +31,24 @@ const destination: OutlineDestinationConfig = {
   connectionId: "outline-sandbox",
   connectionRevision: "oauth-v1",
   tools: {
-    documentsInfo: "outline:documents_info",
-    documentsCreate: "outline:documents_create",
-    documentsUpdate: "outline:documents_update",
+    documentsInfo: "list_documents",
+    documentsCreate: "create_document",
+    documentsUpdate: "update_document",
   },
   targets: {
     architecture: {
-      collectionId: "10000000-0000-4000-8000-000000000001",
-      parentDocumentId: "20000000-0000-4000-8000-000000000001",
+      collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+      parentDocumentId: "6806f4b9-36ed-442b-a91e-43ee75f4dcb1",
       parentTitle: "Architecture",
     },
     reports: {
-      collectionId: "10000000-0000-4000-8000-000000000001",
-      parentDocumentId: "20000000-0000-4000-8000-000000000002",
+      collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+      parentDocumentId: "43333bc2-f05b-47c7-bdd4-03fd43534c76",
       parentTitle: "Reports",
     },
     processes: {
-      collectionId: "10000000-0000-4000-8000-000000000001",
-      parentDocumentId: "20000000-0000-4000-8000-000000000003",
+      collectionId: "89f93133-b508-4143-a281-d19488881eb9",
+      parentDocumentId: "0f5fcd02-9849-4b1d-a36c-1ed6efe2ac30",
       parentTitle: "Processes",
     },
   },
@@ -238,7 +238,7 @@ describe("Outline publishing gate", () => {
     const auth = authorization();
     auth.writerProofs = auth.writerProofs!.map((proof) => ({
       ...proof,
-      tools: { ...proof.tools, documentsUpdate: "outline:other_update_tool" },
+      tools: { ...proof.tools, documentsUpdate: "other_update_tool" },
     }));
     await expect(publishOutlinePreview({
       preview: preview(),

@@ -160,6 +160,68 @@ describe("plugin managed skill validators", () => {
   });
 });
 
+describe("plugin managed tool profile validators", () => {
+  const base = {
+    id: "paperclip.outline-sync",
+    apiVersion: 1,
+    version: "0.3.0",
+    displayName: "Outline Sync",
+    description: "Brokered Outline reconciliation.",
+    author: "Paperclip",
+    categories: ["automation"],
+    entrypoints: { worker: "./dist/worker.js" },
+    agents: [{ agentKey: "outline-runtime", displayName: "Outline Runtime", identityOnly: "tool_profile" }],
+    managedToolProfiles: [{
+      profileKey: "outline",
+      displayName: "Outline documents",
+      principalAgentKey: "outline-runtime",
+      connectionConfigPath: "outline.connectionId",
+      tools: ["list_documents", "create_document", "update_document"],
+    }],
+  } as const;
+
+  it("accepts an exact identity-only profile with its dedicated capability", () => {
+    const parsed = pluginManifestV1Schema.parse({ ...base, capabilities: ["tools.profile.invoke"] });
+    expect(parsed.managedToolProfiles?.[0]?.tools).toEqual(["list_documents", "create_document", "update_document"]);
+  });
+
+  it("rejects profiles without capability or an identity-only principal", () => {
+    expect(pluginManifestV1Schema.safeParse({ ...base, capabilities: [] }).success).toBe(false);
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      capabilities: ["tools.profile.invoke"],
+      agents: [{ agentKey: "outline-runtime", displayName: "Outline Runtime" }],
+    }).success).toBe(false);
+  });
+
+  it("rejects duplicate principals and orphan identity-only agents", () => {
+    const duplicate = pluginManifestV1Schema.safeParse({
+      ...base,
+      capabilities: ["tools.profile.invoke"],
+      managedToolProfiles: [
+        base.managedToolProfiles[0],
+        { ...base.managedToolProfiles[0], profileKey: "outline-second" },
+      ],
+    });
+    expect(duplicate.success).toBe(false);
+    const orphan = pluginManifestV1Schema.safeParse({
+      ...base,
+      capabilities: ["tools.profile.invoke"],
+      agents: [...base.agents, { agentKey: "orphan", displayName: "Orphan", identityOnly: "tool_profile" }],
+    });
+    expect(orphan.success).toBe(false);
+  });
+
+  it("rejects duplicate tool entries", () => {
+    const parsed = pluginManifestV1Schema.safeParse({
+      ...base,
+      capabilities: ["tools.profile.invoke"],
+      managedToolProfiles: [{ ...base.managedToolProfiles[0], tools: ["list_documents", "list_documents"] }],
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe("plugin UI slot validators", () => {
   it("accepts route-scoped sidebar slots with a routePath", () => {
     const parsed = pluginUiSlotDeclarationSchema.parse({

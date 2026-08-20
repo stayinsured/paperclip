@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import {
   candidateFromIssueRow,
+  isOutlineActiveConfig,
   outcomeIdentity,
   type AuditIdentity,
   type ModuleConfig,
@@ -11,6 +12,7 @@ import {
   type SourceCandidate,
   type WorkflowModule,
 } from "./contracts.js";
+import type { OutlineModuleActivation } from "./modules/outline/types.js";
 
 export interface OperationRecord {
   id: string;
@@ -33,10 +35,11 @@ export interface OperationRecord {
 export interface ReconciliationCounts {
   scanned: number;
   shadowed: number;
+  published: number;
   duplicates: number;
   conflicts: number;
   exceptions: number;
-  externalWrites: 0;
+  externalWrites: number;
 }
 
 export interface ReconciliationRun extends ReconciliationCounts {
@@ -44,13 +47,14 @@ export interface ReconciliationRun extends ReconciliationCounts {
   companyId: string;
   trigger: "schedule" | "event" | "manual" | "retry";
   status: "running" | "completed" | "failed";
+  mode: "shadow" | "active";
 }
 
 export interface ShadowReport {
   companyId: string;
   generatedAt: string;
-  mode: "shadow";
-  externalWrites: 0;
+  mode: "shadow" | "active";
+  externalWrites: number;
   modules: Array<{
     projectId: string;
     module: WorkflowModule;
@@ -82,6 +86,7 @@ export interface ShadowReport {
     status: string;
     scanned: number;
     shadowed: number;
+    published: number;
     duplicates: number;
     conflicts: number;
     exceptions: number;
@@ -99,6 +104,7 @@ export interface WorkflowRepository {
   getOperation(companyId: string, operationId: string): Promise<OperationRecord | null>;
   claimOperation(companyId: string, operationId: string, leaseToken: string, force: boolean): Promise<boolean>;
   completeShadow(companyId: string, operationId: string, leaseToken: string, receipt: RedactedReceipt): Promise<boolean>;
+  completePublish(companyId: string, operationId: string, leaseToken: string, receipt: RedactedReceipt): Promise<boolean>;
   recordFailure(
     companyId: string,
     operationId: string,
@@ -132,6 +138,7 @@ type ConfigRow = {
   read_only: boolean;
   destination_enabled: boolean;
   destination_key: string | null;
+  outline_activation: OutlineModuleActivation | null;
   source_version: string;
   policy_version: string;
   max_attempts: number;
@@ -168,6 +175,7 @@ function configFromRow(row: ConfigRow): ModuleConfig {
     readOnly: row.read_only,
     destinationEnabled: row.destination_enabled,
     destinationKey: row.destination_key,
+    outlineActivation: row.outline_activation ?? null,
     sourceVersion: row.source_version,
     policyVersion: row.policy_version,
     maxAttempts: row.max_attempts,
@@ -222,14 +230,15 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     await this.db.execute(
       `INSERT INTO ${this.table("project_configs")}
        (id, company_id, project_id, module, enabled, read_only, destination_enabled, destination_key,
-        source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms, overlap_seconds,
-        batch_size, created_by_actor_type, created_by_actor_id, created_by_run_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        outline_activation, source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
+        overlap_seconds, batch_size, created_by_actor_type, created_by_actor_id, created_by_run_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        ON CONFLICT (company_id, project_id, module) DO UPDATE SET
          enabled = EXCLUDED.enabled,
          read_only = EXCLUDED.read_only,
          destination_enabled = EXCLUDED.destination_enabled,
          destination_key = EXCLUDED.destination_key,
+         outline_activation = EXCLUDED.outline_activation,
          source_version = EXCLUDED.source_version,
          policy_version = EXCLUDED.policy_version,
          max_attempts = EXCLUDED.max_attempts,
@@ -243,7 +252,9 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
          updated_at = now()`,
       [
         randomUUID(), config.companyId, config.projectId, config.module, config.enabled, config.readOnly,
-        config.destinationEnabled, config.destinationKey, config.sourceVersion, config.policyVersion,
+        config.destinationEnabled, config.destinationKey,
+        config.outlineActivation ? JSON.stringify(config.outlineActivation) : null,
+        config.sourceVersion, config.policyVersion,
         config.maxAttempts, config.baseDelayMs, config.maxDelayMs, config.overlapSeconds, config.batchSize,
         audit.actorType, audit.actorId, audit.runId,
       ],
@@ -253,7 +264,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   async listConfigs(companyId: string, enabledOnly = false): Promise<ModuleConfig[]> {
     const rows = await this.db.query<ConfigRow>(
       `SELECT company_id, project_id, module, enabled, read_only, destination_enabled, destination_key,
-              source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
+              outline_activation, source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
               overlap_seconds, batch_size
        FROM ${this.table("project_configs")}
        WHERE company_id = $1 AND ($2::boolean = false OR enabled = true)
@@ -358,6 +369,22 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     return result.rowCount === 1;
   }
 
+  async completePublish(
+    companyId: string,
+    operationId: string,
+    leaseToken: string,
+    receipt: RedactedReceipt,
+  ): Promise<boolean> {
+    const result = await this.db.execute(
+      `UPDATE ${this.table("operations")}
+       SET status = 'published', outcome_receipt = $4::jsonb, next_attempt_at = NULL,
+           lease_token = NULL, lease_expires_at = NULL, last_error_code = NULL, updated_at = now()
+       WHERE company_id = $1 AND id = $2 AND lease_token = $3`,
+      [companyId, operationId, leaseToken, JSON.stringify(receipt)],
+    );
+    return result.rowCount === 1;
+  }
+
   async recordFailure(
     companyId: string,
     operationId: string,
@@ -445,8 +472,10 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
       companyId,
       trigger,
       status: "running",
+      mode: "shadow",
       scanned: 0,
       shadowed: 0,
+      published: 0,
       duplicates: 0,
       conflicts: 0,
       exceptions: 0,
@@ -464,12 +493,13 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   async finishRun(run: ReconciliationRun): Promise<void> {
     const report = {
       schemaVersion: 1,
-      mode: "shadow",
+      mode: run.mode,
       companyId: run.companyId,
-      externalWrites: 0,
+      externalWrites: run.externalWrites,
       counts: {
         scanned: run.scanned,
         shadowed: run.shadowed,
+        published: run.published,
         duplicates: run.duplicates,
         conflicts: run.conflicts,
         exceptions: run.exceptions,
@@ -477,13 +507,13 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     };
     await this.db.execute(
       `UPDATE ${this.table("reconciliation_runs")}
-       SET status = $3, scanned_count = $4, shadowed_count = $5, duplicate_count = $6,
-           conflict_count = $7, exception_count = $8, external_write_count = 0,
-           report = $9::jsonb, completed_at = now(), updated_at = now()
+       SET status = $3, scanned_count = $4, shadowed_count = $5, published_count = $6, duplicate_count = $7,
+           conflict_count = $8, exception_count = $9, external_write_count = $10,
+           report = $11::jsonb, completed_at = now(), updated_at = now()
        WHERE company_id = $1 AND id = $2`,
       [
-        run.companyId, run.id, run.status, run.scanned, run.shadowed, run.duplicates,
-        run.conflicts, run.exceptions, JSON.stringify(report),
+        run.companyId, run.id, run.status, run.scanned, run.shadowed, run.published, run.duplicates,
+        run.conflicts, run.exceptions, run.externalWrites, JSON.stringify(report),
       ],
     );
   }
@@ -526,6 +556,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         status: string;
         scanned_count: number;
         shadowed_count: number;
+        published_count: number;
         duplicate_count: number;
         conflict_count: number;
         exception_count: number;
@@ -533,7 +564,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         started_at: string;
         completed_at: string | null;
       }>(
-        `SELECT id, trigger, status, scanned_count, shadowed_count, duplicate_count,
+        `SELECT id, trigger, status, scanned_count, shadowed_count, published_count, duplicate_count,
                 conflict_count, exception_count, external_write_count,
                 started_at::text AS started_at, completed_at::text AS completed_at
          FROM ${this.table("reconciliation_runs")}
@@ -546,8 +577,8 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     return {
       companyId,
       generatedAt: new Date().toISOString(),
-      mode: "shadow",
-      externalWrites: 0,
+      mode: configs.some((config) => isOutlineActiveConfig(config)) ? "active" : "shadow",
+      externalWrites: recentRuns.reduce((sum, row) => sum + row.external_write_count, 0),
       modules: configs.map((config) => ({
         projectId: config.projectId,
         module: config.module,
@@ -579,6 +610,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         status: row.status,
         scanned: row.scanned_count,
         shadowed: row.shadowed_count,
+        published: row.published_count,
         duplicates: row.duplicate_count,
         conflicts: row.conflict_count,
         exceptions: row.exception_count,

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { OutlineModuleActivation } from "./modules/outline/types.js";
 
 export const WORKFLOW_MODULES = ["outline", "clickup", "sentry_slack"] as const;
 export type WorkflowModule = (typeof WORKFLOW_MODULES)[number];
@@ -8,6 +9,7 @@ export type OperationStatus =
   | "retry_wait"
   | "reconciling"
   | "shadowed"
+  | "published"
   | "skipped"
   | "failed"
   | "conflict";
@@ -26,6 +28,13 @@ export interface ModuleConfig {
   readOnly: boolean;
   destinationEnabled: boolean;
   destinationKey: string | null;
+  /**
+   * Approved Outline activation payload (exact destination configuration plus
+   * its board-accepted authorization). Null for every shadow configuration.
+   * Only the outline module may carry one; deep validation happens at the
+   * configuration boundary and again on every reconciliation.
+   */
+  outlineActivation: OutlineModuleActivation | null;
   sourceVersion: string;
   policyVersion: string;
   maxAttempts: number;
@@ -49,12 +58,12 @@ export interface SourceCandidate {
 
 export interface RedactedReceipt {
   schemaVersion: 1;
-  category: "shadow" | "retry" | "exception" | "conflict" | "reconciled";
+  category: "shadow" | "retry" | "exception" | "conflict" | "reconciled" | "publish";
   code: string;
   status: string;
   occurredAt: string;
   outcomeIdentity: string;
-  externalWriteAttempted: false;
+  externalWriteAttempted: boolean;
 }
 
 export interface RetryDecision {
@@ -101,6 +110,8 @@ function invalidWorkflowConfig(message: string): WorkflowRequestError {
   );
 }
 
+// Underscores are allowed because issue statuses ("in_progress") and Outline
+// publisher error classes ("outline_mcp_rate_limited") are snake_case.
 const SAFE_VERSION = /^[a-zA-Z0-9._:-]{1,120}$/;
 const SAFE_DESTINATION = /^[a-zA-Z0-9._:/-]{1,200}$/;
 
@@ -129,6 +140,7 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
     throw invalidWorkflowConfig(`Unsupported module: ${module}`);
   }
 
+  const outlineActivation = parseOutlineActivationField(input.outlineActivation, module);
   const config: ModuleConfig = {
     companyId: requiredString(input.companyId, "companyId"),
     projectId: requiredString(input.projectId, "projectId"),
@@ -139,6 +151,7 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
     destinationKey: input.destinationKey == null || input.destinationKey === ""
       ? null
       : requiredString(input.destinationKey, "destinationKey", SAFE_DESTINATION),
+    outlineActivation,
     sourceVersion: requiredString(input.sourceVersion ?? "paperclip-v1", "sourceVersion", SAFE_VERSION),
     policyVersion: requiredString(input.policyVersion ?? "shadow-v1", "policyVersion", SAFE_VERSION),
     maxAttempts: boundedInteger(input.maxAttempts, 5, 1, 10, "maxAttempts"),
@@ -147,19 +160,68 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
     overlapSeconds: boundedInteger(input.overlapSeconds, 300, 0, 3_600, "overlapSeconds"),
     batchSize: boundedInteger(input.batchSize, 200, 1, 1_000, "batchSize"),
   };
-  assertShadowOnly(config);
+  if (config.module !== "outline") {
+    assertShadowOnly(config);
+  } else if (config.outlineActivation == null) {
+    // No approved activation payload: the structural shadow-only limit stands.
+    assertShadowOnly(config);
+  } else if (config.destinationKey !== config.outlineActivation.destination.connectionId) {
+    throw invalidWorkflowConfig(
+      "destinationKey must equal the approved Outline activation connectionId",
+    );
+  }
   if (config.maxDelayMs < config.baseDelayMs) {
     throw invalidWorkflowConfig("maxDelayMs must be at least baseDelayMs");
   }
   return config;
 }
 
+function parseOutlineActivationField(
+  input: unknown,
+  module: WorkflowModule,
+): ModuleConfig["outlineActivation"] {
+  if (input == null) return null;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw invalidWorkflowConfig("outlineActivation must be an object");
+  }
+  const payload = input as Record<string, unknown>;
+  if (
+    payload.schemaVersion !== 1 ||
+    typeof payload.destination !== "object" || payload.destination == null
+    || typeof payload.authorization !== "object" || payload.authorization == null
+  ) {
+    throw invalidWorkflowConfig("outlineActivation must carry schemaVersion 1, destination, and authorization");
+  }
+  if (module !== "outline") {
+    throw invalidWorkflowConfig("Only the outline module accepts an activation payload");
+  }
+  // Deep gate validation (fingerprint, writer proofs, expiry) runs at the
+  // configuration boundary and again on every reconciliation.
+  return payload as unknown as ModuleConfig["outlineActivation"];
+}
+
 export function assertShadowOnly(config: Pick<ModuleConfig, "readOnly" | "destinationEnabled">): void {
   if (!config.readOnly || config.destinationEnabled) {
     throw invalidWorkflowConfig(
-      "This plugin release is shadow-only: readOnly must be true and destinationEnabled must be false",
+      "This plugin release is shadow-only without an approved outline activation: readOnly must be true and destinationEnabled must be false",
     );
   }
+}
+
+/**
+ * True only when the outline module carries an activation payload AND every
+ * external-write switch is on. Dormant forms (payload retained with the module
+ * disabled or read-only) are the kill-switch positions and never publish.
+ */
+export function isOutlineActiveConfig(config: Pick<
+  ModuleConfig,
+  "module" | "enabled" | "readOnly" | "destinationEnabled" | "outlineActivation"
+>): boolean {
+  return config.module === "outline"
+    && config.enabled
+    && !config.readOnly
+    && config.destinationEnabled
+    && config.outlineActivation != null;
 }
 
 export function sha256(value: string): string {
@@ -187,6 +249,7 @@ export function createRedactedReceipt(input: {
   code: string;
   status: string;
   occurredAt: string;
+  externalWriteAttempted?: boolean;
 }): RedactedReceipt {
   return {
     schemaVersion: 1,
@@ -195,7 +258,7 @@ export function createRedactedReceipt(input: {
     status: requiredString(input.status, "status", SAFE_VERSION),
     occurredAt: new Date(input.occurredAt).toISOString(),
     outcomeIdentity: outcomeIdentity(input.operationKey),
-    externalWriteAttempted: false,
+    externalWriteAttempted: input.externalWriteAttempted ?? false,
   };
 }
 

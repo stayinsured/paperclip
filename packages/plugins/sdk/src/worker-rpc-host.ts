@@ -459,6 +459,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      managedToolProfiles: {
+        async invoke(input) {
+          return callHost("managedToolProfiles.invoke", input);
+        },
+      },
+
       localFolders: {
         declarations() {
           if (!manifest) throw new Error("Plugin context accessed before initialization");

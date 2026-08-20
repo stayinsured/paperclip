@@ -70,7 +70,13 @@ describe("stay operational workflows plugin", () => {
     expect(manifest.capabilities).toContain("http.outbound");
     expect(manifest.capabilities).toContain("secrets.read-ref");
     expect(manifest.capabilities).toContain("projects.read");
-    expect(manifest.agents).toEqual([expect.objectContaining({ agentKey: "sentry-triage", status: "idle" })]);
+    expect(manifest.agents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentKey: "outline-runtime", identityOnly: "tool_profile" }),
+      expect.objectContaining({ agentKey: "sentry-triage", status: "idle" }),
+    ]));
+    expect(manifest.managedToolProfiles).toEqual([expect.objectContaining({
+      profileKey: "outline", tools: ["list_documents", "create_document", "update_document"],
+    })]);
     expect(manifest.skills).toEqual([expect.objectContaining({ skillKey: "sentry-triage-proposal" })]);
     expect(manifest.entrypoints.ui).toBeUndefined();
   });
@@ -241,15 +247,80 @@ describe("stay operational workflows plugin", () => {
     expect(sql).toContain("destination_enabled boolean NOT NULL DEFAULT false CHECK (destination_enabled = false)");
     expect(sql).toContain("outcome_receipt jsonb");
     expect(sql).toContain("summary_redacted text");
-    expect(sql).not.toMatch(/raw_payload|request_body|authorization|secret_value|customer_email/i);
+    expect(sql).not.toMatch(/raw_payload|request_body|secret_value|customer_email/i);
   });
 
-  it("reports shadow-only modules and the separately gated Sentry mode", async () => {
+  it("scopes the activation migration to the outline module and keeps non-negative counters", async () => {
+    const sql = await readFile(new URL("../migrations/005_outline_activation.sql", import.meta.url), "utf8");
+    expect(sql).toContain("CHECK (read_only = true OR module = 'outline')");
+    expect(sql).toContain("CHECK (destination_enabled = false OR module = 'outline')");
+    expect(sql).toContain("CHECK (outline_activation IS NULL OR module = 'outline')");
+    expect(sql).toContain("'published'");
+    expect(sql).toContain("CHECK (external_write_count >= 0)");
+    expect(sql).not.toMatch(/secret|token|bearer/i);
+  });
+
+  it("rejects an unusable outline activation before persistence and reports the gated modes", async () => {
+    const harness = createTestHarness({ manifest });
+    harness.seed({ projects: [PROJECT_A] });
+    await plugin.definition.setup(harness.ctx);
+
+    const destination = {
+      accessMode: "mcp",
+      connectionId: "outline-sandbox",
+      tools: {
+        documentsInfo: "list_documents",
+        documentsCreate: "create_document",
+        documentsUpdate: "update_document",
+      },
+      targets: {
+        architecture: { collectionId: "89f93133-b508-4143-a281-d19488881eb9", parentDocumentId: "6806f4b9-36ed-442b-a91e-43ee75f4dcb1", parentTitle: "Architecture" },
+        reports: { collectionId: "89f93133-b508-4143-a281-d19488881eb9", parentDocumentId: "43333bc2-f05b-47c7-bdd4-03fd43534c76", parentTitle: "Reports" },
+        processes: { collectionId: "89f93133-b508-4143-a281-d19488881eb9", parentDocumentId: "0f5fcd02-9849-4b1d-a36c-1ed6efe2ac30", parentTitle: "Processes" },
+      },
+    };
+    const rejected = await plugin.definition.onApiRequest?.(
+      apiRequest("config.upsert", COMPANY_A_ID, {
+        ...configBody(PROJECT_A_ID),
+        readOnly: false,
+        destinationEnabled: true,
+        destinationKey: "outline-sandbox",
+        outlineActivation: {
+          schemaVersion: 1,
+          destination,
+          authorization: {
+            enabled: true,
+            readOnly: false,
+            externalWritesEnabled: true,
+            exactConfigurationApproval: {
+              status: "accepted",
+              configurationRevisionId: "rev-1",
+              configurationFingerprint: "sha256:not-the-approved-fingerprint",
+              interactionId: "int-1",
+              acceptedAt: "2026-08-07T09:30:00.000Z",
+            },
+            writerProofs: [],
+          },
+        },
+      }),
+    );
+    expect(rejected).toEqual({
+      status: 422,
+      body: {
+        error: "Workflow configuration validation failed",
+        code: "invalid_workflow_config",
+      },
+    });
+    expect(harness.dbExecutes).toHaveLength(0);
+  });
+
+  it("reports the activation-gated Outline mode, shadow ClickUp, and separately gated Sentry mode", async () => {
     const health = await plugin.definition.onHealth?.();
     expect(health).toMatchObject({
       status: "ok",
       details: {
-        outlineAndClickupMode: "shadow",
+        outlineMode: "activation-gated",
+        clickupMode: "shadow",
         sentryMode: "configuration-gated",
         slackApprovalCapability: false,
         authoritativeSource: "scheduled-reconciliation",

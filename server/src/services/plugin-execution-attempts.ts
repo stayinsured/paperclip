@@ -385,5 +385,6 @@ export function isPluginExecutionPrincipalAgent(agent: { metadata?: Record<strin
   const managed = agent.metadata?.pluginManagedAgent;
   if (!managed || typeof managed !== "object" || Array.isArray(managed)) return false;
   const principal = (managed as Record<string, unknown>).executionPrincipal;
-  return Boolean(principal && typeof principal === "object" && !Array.isArray(principal) && (principal as Record<string, unknown>).kind === "plugin_tool_only");
+  const identityOnly = (managed as Record<string, unknown>).identityOnly;
+  return identityOnly === "tool_profile" || Boolean(principal && typeof principal === "object" && !Array.isArray(principal) && (principal as Record<string, unknown>).kind === "plugin_tool_only");
 }

@@ -100,6 +100,12 @@ export interface OutlineCollectionWriterProof {
   };
 }
 
+export interface OutlineModuleActivation {
+  schemaVersion: 1;
+  destination: OutlineDestinationConfig;
+  authorization: OutlinePublishingAuthorization;
+}
+
 export interface OutlinePublishingAuthorization {
   enabled: boolean;
   readOnly: boolean;

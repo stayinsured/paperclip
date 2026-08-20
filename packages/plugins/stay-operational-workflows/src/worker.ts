@@ -6,12 +6,16 @@ import {
   type PluginJobContext,
 } from "@paperclipai/plugin-sdk";
 import {
+  isOutlineActiveConfig,
   parseModuleConfig,
   WorkflowRequestError,
   type AuditIdentity,
 } from "./contracts.js";
 import { ShadowReconciler } from "./reconciler.js";
 import { PostgresWorkflowRepository } from "./repository.js";
+import { assertOutlineModuleActivationUsable, parseOutlineModuleActivation } from "./modules/outline/activation.js";
+import { PostgresOutlineAssessmentRepository } from "./modules/outline/assessment.js";
+import { createOutlineRuntime } from "./modules/outline/runtime.js";
 import {
   parseSentryPilotConfig,
   PluginSentryControlPlane,
@@ -28,7 +32,14 @@ const plugin = definePlugin({
 
   async setup(ctx) {
     const repository = new PostgresWorkflowRepository(ctx.db);
-    const reconciler = new ShadowReconciler(repository);
+    const outlineAssessments = new PostgresOutlineAssessmentRepository(ctx.db);
+    // The host resolves the company connection and credentials from the
+    // manifest-managed deny-by-default profile and returns sanitized receipts.
+    const outlineRuntime = createOutlineRuntime({
+      assessments: outlineAssessments,
+      managedToolProfiles: ctx.managedToolProfiles,
+    });
+    const reconciler = new ShadowReconciler(repository, undefined, outlineRuntime);
     const sentryRepository = new PostgresSentryWorkflowRepository(ctx.db);
     const sentryControlPlane = new PluginSentryControlPlane(ctx);
     const sentryWorkflow = new SentryWorkflow(
@@ -139,6 +150,12 @@ const plugin = definePlugin({
       const audit = auditFromApi(input);
       if (input.routeKey === "config.upsert") {
         const config = parseModuleConfig({ ...body, companyId: input.companyId });
+        if (config.outlineActivation) {
+          // Fail closed at the configuration boundary: exact destination/tool set,
+          // switches, approval fingerprint, writer proofs, and expiry must all pass.
+          config.outlineActivation = parseOutlineModuleActivation(config.outlineActivation);
+          assertOutlineModuleActivationUsable(config.outlineActivation);
+        }
         const project = await ctx.projects.get(config.projectId, input.companyId);
         if (!project) {
           throw new WorkflowRequestError(
@@ -149,11 +166,12 @@ const plugin = definePlugin({
           );
         }
         await repository.upsertConfig(config, audit);
+        const active = isOutlineActiveConfig(config);
         await ctx.activity.log({
           companyId: input.companyId,
           entityType: "project",
           entityId: config.projectId,
-          message: `Stay Operational Workflows updated ${config.module} shadow configuration`,
+          message: `Stay Operational Workflows updated ${config.module} ${active ? "approved activation" : "shadow"} configuration`,
           metadata: {
             module: config.module,
             enabled: config.enabled,
@@ -163,7 +181,7 @@ const plugin = definePlugin({
             sourceVersion: config.sourceVersion,
           },
         });
-        return { body: { config, mode: "shadow", externalWritesEnabled: false } };
+        return { body: { config, mode: active ? "active" : "shadow", externalWritesEnabled: active } };
       }
       if (input.routeKey === "sentry.config.upsert") {
         const config = parseSentryPilotConfig({ ...body, companyId: input.companyId });
@@ -210,14 +228,16 @@ const plugin = definePlugin({
         });
         await ctx.activity.log({
           companyId: input.companyId,
-          message: "Stay Operational Workflows completed a manual shadow reconciliation",
+          message: "Stay Operational Workflows completed a manual reconciliation",
           metadata: {
             runId: result.runId,
+            mode: result.mode,
             scanned: result.scanned,
             shadowed: result.shadowed,
+            published: result.published,
             duplicates: result.duplicates,
             exceptions: result.exceptions,
-            externalWrites: 0,
+            externalWrites: result.externalWrites,
           },
         });
         return { body: result };
@@ -298,7 +318,8 @@ const plugin = definePlugin({
     return {
       ok: true,
       warnings: [
-        "Outline and ClickUp remain structurally locked to shadow mode.",
+        "Outline publishing stays disabled unless an approved activation payload with an accepted exact configuration fingerprint, current writer proofs, and a bound MCP runtime all match; default configurations remain zero-write.",
+        "ClickUp remains structurally locked to shadow mode.",
         "Sentry polling and Slack notification remain disabled unless exact scope, least-privilege identities, non-expired proofs, and an immutable board-approved configuration revision all match.",
       ],
     };
@@ -309,7 +330,8 @@ const plugin = definePlugin({
       status: "ok",
       message: "Operational reconciliation worker is running",
       details: {
-        outlineAndClickupMode: "shadow",
+        outlineMode: "activation-gated",
+        clickupMode: "shadow",
         sentryMode: "configuration-gated",
         slackApprovalCapability: false,
         authoritativeSource: "scheduled-reconciliation",

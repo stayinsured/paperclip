@@ -216,6 +216,8 @@ export interface PluginManagedAgentDeclaration {
     skillKey: string;
     tool: string;
   };
+  /** Host-only, non-invokable identity used solely for an exact managed tool-profile binding. */
+  identityOnly?: "tool_profile";
   /** Suggested starting status when no board approval is required. */
   status?: Extract<AgentStatus, "idle" | "paused">;
   /** Suggested monthly budget in cents. */
@@ -227,6 +229,26 @@ export interface PluginManagedAgentDeclaration {
     files?: Record<string, string>;
     assetPath?: string;
   };
+}
+
+/**
+ * Declares a deny-by-default MCP tool profile managed by the host for one
+ * identity-only plugin agent. The connection is resolved from company config;
+ * workers never receive or choose provider credentials.
+ */
+export interface PluginManagedToolProfileDeclaration {
+  /** Stable identifier for this profile, unique within the plugin. */
+  profileKey: string;
+  /** Visible profile name for operator inspection. */
+  displayName: string;
+  /** Optional operator-facing description. */
+  description?: string;
+  /** Managed agent declaration with `identityOnly: "tool_profile"`. */
+  principalAgentKey: string;
+  /** Dot path in resolved company plugin config containing the connection id or uid. */
+  connectionConfigPath: string;
+  /** Exact upstream MCP tool names allowed on that one connection. */
+  tools: string[];
 }
 
 /**
@@ -628,6 +650,8 @@ export interface PaperclipPluginManifestV1 {
   environmentDrivers?: PluginEnvironmentDriverDeclaration[];
   /** Suggested company-scoped agents this plugin can provision and resolve by stable key. */
   agents?: PluginManagedAgentDeclaration[];
+  /** Deny-by-default, host-managed profiles for exact connected MCP tools. */
+  managedToolProfiles?: PluginManagedToolProfileDeclaration[];
   /** Suggested company-scoped projects this plugin can provision and resolve by stable key. */
   projects?: PluginManagedProjectDeclaration[];
   /** Suggested company-scoped routines this plugin can provision and resolve by stable key. */
