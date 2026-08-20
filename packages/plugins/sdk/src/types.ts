@@ -64,6 +64,7 @@ export type {
   PluginEnvironmentDriverDeclaration,
   PluginEnvironmentTemplateConfigBinding,
   PluginManagedAgentDeclaration,
+  PluginManagedToolProfileDeclaration,
   PluginManagedAgentResolution,
   PluginManagedProjectDeclaration,
   PluginManagedProjectResolution,
@@ -265,6 +266,29 @@ export interface ToolRunContext {
  *
  * @see PLUGIN_SPEC.md §13.10 — `executeTool`
  */
+export type ManagedToolProfileOutcome = "succeeded" | "denied" | "failed" | "rate_limited" | "ambiguous";
+
+export interface ManagedToolProfileReceipt {
+  schemaVersion: 1;
+  receiptId: string;
+  companyId: string;
+  profileKey: string;
+  connectionId: string | null;
+  toolName: string;
+  outcome: ManagedToolProfileOutcome;
+  replayed: boolean;
+  resultHash: string | null;
+  resultSizeBytes: number | null;
+  errorCode: string | null;
+  completedAt: string;
+}
+
+export interface ManagedToolProfileInvocationResult {
+  receipt: ManagedToolProfileReceipt;
+  /** Present only for a fresh success and already sanitized by the host. */
+  result?: unknown;
+}
+
 export interface ToolResult {
   /** String content returned to the agent. Required for success responses. */
   content?: string;
@@ -987,6 +1011,17 @@ export interface PluginActionsClient {
  *
  * @see PLUGIN_SPEC.md §11 — Agent Tools
  */
+export interface PluginManagedToolProfilesClient {
+  invoke(input: {
+    companyId: string;
+    profileKey: string;
+    toolName: string;
+    parameters?: unknown;
+    idempotencyKey: string;
+    timeoutMs?: number;
+  }): Promise<ManagedToolProfileInvocationResult>;
+}
+
 export interface PluginToolsClient {
   /**
    * Register a handler for a plugin-contributed agent tool.
@@ -2133,6 +2168,9 @@ export interface PluginContext {
 
   /** Push real-time events from the worker to the plugin UI via SSE. */
   streams: PluginStreamsClient;
+
+  /** Invoke exact connected MCP tools through a managed deny-by-default profile. */
+  managedToolProfiles: PluginManagedToolProfilesClient;
 
   /** Register agent tool handlers. Requires `agent.tools.register`. */
   tools: PluginToolsClient;

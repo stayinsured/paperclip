@@ -1333,6 +1333,8 @@ export const PLUGIN_CAPABILITIES = [
   "local.folders",
   // Agent Tools
   "agent.tools.register",
+  // Invoke exact MCP tools only through a host-managed deny-by-default profile.
+  "tools.profile.invoke",
   // UI
   "instance.settings.register",
   "ui.sidebar.register",

@@ -67,6 +67,7 @@ import type {
   PluginExecutionAttempt,
   ToolRunContext,
   ToolResult,
+  ManagedToolProfileInvocationResult,
   PluginLocalFolderListing,
   PluginLocalFolderStatus,
   PluginAccessInvite,
@@ -1108,6 +1109,18 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
 export interface WorkerToHostMethods {
   // Config
   "config.get": [params: { companyId?: string }, result: Record<string, unknown>];
+
+  "managedToolProfiles.invoke": [
+    params: {
+      companyId: string;
+      profileKey: string;
+      toolName: string;
+      parameters?: unknown;
+      idempotencyKey: string;
+      timeoutMs?: number;
+    },
+    result: ManagedToolProfileInvocationResult,
+  ];
 
   // Trusted local folders
   "localFolders.declarations": [

@@ -106,6 +106,11 @@ export interface HostServices {
     ): Promise<Record<string, unknown>>;
   };
 
+  /** Provides managedToolProfiles.invoke. */
+  managedToolProfiles: {
+    invoke(params: WorkerToHostMethods["managedToolProfiles.invoke"][0]): Promise<WorkerToHostMethods["managedToolProfiles.invoke"][1]>;
+  };
+
   /** Provides trusted company-scoped local folder helpers. */
   localFolders: {
     declarations(params: WorkerToHostMethods["localFolders.declarations"][0]): Promise<WorkerToHostMethods["localFolders.declarations"][1]>;
@@ -382,6 +387,8 @@ export type HostClientHandlers = {
 const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | null> = {
   // Config — always allowed
   "config.get": null,
+
+  "managedToolProfiles.invoke": "tools.profile.invoke",
 
   // Trusted local folders
   "localFolders.declarations": null,
@@ -714,6 +721,10 @@ export function createHostClientHandlers(
     "config.get": gated("config.get", async (params, context) => {
       const companyId = resolveRequiredCompanyId("config.get", params, context);
       return services.config.get({ ...params, companyId }, context);
+    }),
+
+    "managedToolProfiles.invoke": gated("managedToolProfiles.invoke", async (params) => {
+      return services.managedToolProfiles.invoke(params);
     }),
 
     "localFolders.declarations": gated("localFolders.declarations", async (params) => {

@@ -73,6 +73,42 @@ describe("createTestHarness action context", () => {
   });
 });
 
+describe("createTestHarness managed tool profiles", () => {
+  it("uses an injected host fake and still enforces capability denial", async () => {
+    const invoke = async () => ({
+      receipt: {
+        schemaVersion: 1 as const,
+        receiptId: "receipt-1",
+        companyId: "company-1",
+        profileKey: "outline",
+        connectionId: "connection-1",
+        toolName: "list_documents",
+        outcome: "succeeded" as const,
+        replayed: false,
+        resultHash: "sha256:result",
+        resultSizeBytes: 2,
+        errorCode: null,
+        completedAt: new Date().toISOString(),
+      },
+      result: [],
+    });
+    const params = {
+      companyId: "company-1",
+      profileKey: "outline",
+      toolName: "list_documents",
+      idempotencyKey: "assessment-1:list",
+    };
+    const allowed = createTestHarness({
+      manifest: { ...manifest, capabilities: ["tools.profile.invoke"] },
+      managedToolProfileInvoke: invoke,
+    });
+    await expect(allowed.ctx.managedToolProfiles.invoke(params)).resolves.toMatchObject({ receipt: { outcome: "succeeded" } });
+
+    const denied = createTestHarness({ manifest, managedToolProfileInvoke: invoke });
+    await expect(denied.ctx.managedToolProfiles.invoke(params)).rejects.toThrow("tools.profile.invoke");
+  });
+});
+
 describe("createTestHarness managed routines", () => {
   it("preserves declared activity gate settings", async () => {
     const harness = createTestHarness({

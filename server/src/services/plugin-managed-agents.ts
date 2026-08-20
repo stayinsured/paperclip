@@ -60,6 +60,7 @@ function managedMetadata(
       displayName: declaration.displayName,
       instructions: declaration.instructions ?? null,
       executionPrincipal: declaration.executionPrincipal ?? null,
+      identityOnly: declaration.identityOnly ?? null,
     },
   };
 }
@@ -111,14 +112,14 @@ function selectPreferredAdapterType(
 function declarationPatch(declaration: PluginManagedAgentDeclaration, input: { adapterType?: string } = {}) {
   return {
     name: declaration.displayName,
-    role: declaration.executionPrincipal ? "general" : (declaration.role ?? "general"),
+    role: (declaration.executionPrincipal || declaration.identityOnly) ? "general" : (declaration.role ?? "general"),
     title: declaration.title ?? null,
     icon: declaration.icon ?? null,
     capabilities: declaration.capabilities ?? null,
     adapterType: input.adapterType ?? fallbackAdapterType(declaration),
     adapterConfig: declaration.adapterConfig ?? {},
     runtimeConfig: declaration.runtimeConfig ?? {},
-    permissions: declaration.executionPrincipal
+    permissions: (declaration.executionPrincipal || declaration.identityOnly)
       ? PLUGIN_EXECUTION_PERMISSIONS
       : (declaration.permissions ?? {}),
     budgetMonthlyCents: declaration.budgetMonthlyCents ?? 0,
@@ -221,7 +222,7 @@ export function pluginManagedAgentService(
     const defaultsJson = {
       agentKey: declaration.agentKey,
       displayName: declaration.displayName,
-      role: declaration.executionPrincipal ? "general" : (declaration.role ?? "general"),
+      role: (declaration.executionPrincipal || declaration.identityOnly) ? "general" : (declaration.role ?? "general"),
       title: declaration.title ?? null,
       icon: declaration.icon ?? null,
       capabilities: declaration.capabilities ?? null,
@@ -423,7 +424,7 @@ export function pluginManagedAgentService(
     declaration: PluginManagedAgentDeclaration,
     agent: Agent,
   ): Promise<Agent> {
-    if (declaration.executionPrincipal?.kind !== "plugin_tool_only") return agent;
+    if (declaration.executionPrincipal?.kind !== "plugin_tool_only" && declaration.identityOnly !== "tool_profile") return agent;
     const existingMetadata = agent.metadata && typeof agent.metadata === "object"
       ? agent.metadata
       : {};
@@ -463,7 +464,7 @@ export function pluginManagedAgentService(
       .then((rows) => rows[0] ?? null);
     if (!company) throw notFound("Company not found");
 
-    const requiresApproval = company.requireBoardApprovalForNewAgents;
+    const requiresApproval = company.requireBoardApprovalForNewAgents && declaration.identityOnly !== "tool_profile";
     const adapterType = await resolveManagedAdapterType(companyId, declaration);
     let created = await agentSvc.create(companyId, {
       ...declarationPatch(declaration, { adapterType }),

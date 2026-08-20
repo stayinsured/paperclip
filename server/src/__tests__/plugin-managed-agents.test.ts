@@ -16,8 +16,15 @@ import {
   pluginExecutionAttempts,
   pluginEntities,
   pluginCompanySettings,
+  pluginConfig,
   pluginManagedResources,
   plugins,
+  toolApplications,
+  toolCatalogEntries,
+  toolConnections,
+  toolProfileBindings,
+  toolProfileEntries,
+  toolProfiles,
 } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
@@ -73,6 +80,32 @@ function manifest(): PaperclipPluginManifestV1 {
         budgetMonthlyCents: 1234,
       },
     ],
+  };
+}
+
+function managedToolProfileManifest(): PaperclipPluginManifestV1 {
+  return {
+    id: "paperclip.outline-profile-test",
+    apiVersion: 1,
+    version: "0.3.0",
+    displayName: "Outline Profile Test",
+    description: "Test managed Outline MCP profile",
+    author: "Paperclip",
+    categories: ["automation"],
+    capabilities: ["tools.profile.invoke"],
+    entrypoints: { worker: "./dist/worker.js" },
+    agents: [{
+      agentKey: "outline-runtime",
+      displayName: "Outline Runtime",
+      identityOnly: "tool_profile",
+    }],
+    managedToolProfiles: [{
+      profileKey: "outline",
+      displayName: "Outline documents",
+      principalAgentKey: "outline-runtime",
+      connectionConfigPath: "outline.connectionId",
+      tools: ["list_documents", "create_document", "update_document"],
+    }],
   };
 }
 
@@ -137,6 +170,12 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
 
   afterEach(async () => {
     await db.delete(pluginExecutionAttempts);
+    await db.delete(toolProfileEntries);
+    await db.delete(toolProfileBindings);
+    await db.delete(toolProfiles);
+    await db.delete(toolCatalogEntries);
+    await db.delete(toolConnections);
+    await db.delete(toolApplications);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentConfigRevisions);
@@ -144,6 +183,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     await db.delete(pluginManagedResources);
     await db.delete(companySkills);
     await db.delete(pluginCompanySettings);
+    await db.delete(pluginConfig);
     await db.delete(approvals);
     await db.delete(agents);
     await db.delete(plugins);
@@ -154,7 +194,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     await tempDb?.cleanup();
   });
 
-  async function seedCompanyAndPlugin(options: { requireApproval?: boolean; manifest?: PaperclipPluginManifestV1 } = {}) {
+  async function seedCompanyAndPlugin(options: { requireApproval?: boolean; manifest?: PaperclipPluginManifestV1; toolGateway?: any } = {}) {
     const companyId = randomUUID();
     const pluginId = randomUUID();
     const pluginManifest = options.manifest ?? manifest();
@@ -177,6 +217,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     });
     const services = buildHostServices(db, pluginId, pluginManifest.id, createEventBusStub(), undefined, {
       manifest: pluginManifest,
+      toolGateway: options.toolGateway,
     });
     return { companyId, pluginId, pluginManifest, services };
   }
@@ -415,6 +456,119 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       sourcePluginKey: "paperclip.managed-agents-test",
       managedResourceKey: "wiki-maintainer",
     });
+  });
+
+  it("reconciles an exact managed MCP profile and keeps disabled profiles revoked", async () => {
+    const executeManagedToolProfileCall = vi.fn(async (input: any) => ({
+      receipt: {
+        schemaVersion: 1 as const,
+        receiptId: "receipt-1",
+        companyId: input.companyId,
+        profileKey: input.profileKey,
+        connectionId: input.connectionId,
+        toolName: input.toolName,
+        outcome: "succeeded" as const,
+        replayed: false,
+        resultHash: "sha256:result",
+        resultSizeBytes: 10,
+        errorCode: null,
+        completedAt: new Date().toISOString(),
+      },
+      result: { documents: [] },
+    }));
+    const seeded = await seedCompanyAndPlugin({
+      manifest: managedToolProfileManifest(),
+      toolGateway: { executeManagedToolProfileCall },
+    });
+    const [application] = await db.insert(toolApplications).values({
+      companyId: seeded.companyId,
+      applicationKey: "outline",
+      name: "Outline",
+      type: "mcp_http",
+      status: "active",
+    }).returning();
+    const [connection] = await db.insert(toolConnections).values({
+      companyId: seeded.companyId,
+      applicationId: application.id,
+      name: "Outline sandbox",
+      uid: "outline-sandbox",
+      transport: "mcp_remote",
+      status: "active",
+      enabled: true,
+      healthStatus: "ok",
+      config: { url: "https://outline.invalid/mcp" },
+      transportConfig: { url: "https://outline.invalid/mcp" },
+    }).returning();
+    await db.insert(pluginConfig).values({
+      pluginId: seeded.pluginId,
+      companyId: seeded.companyId,
+      configJson: { outline: { connectionId: connection.uid } },
+    });
+    await db.insert(toolCatalogEntries).values(
+      ["list_documents", "create_document", "update_document"].map((toolName, index) => ({
+        companyId: seeded.companyId,
+        applicationId: application.id,
+        connectionId: connection.id,
+        entryKind: "tool" as const,
+        name: toolName + "-" + index,
+        toolName,
+        inputSchema: { type: "object" },
+        annotations: {},
+        riskLevel: toolName === "list_documents" ? "read" as const : "write" as const,
+        isReadOnly: toolName === "list_documents",
+        isWrite: toolName !== "list_documents",
+        isDestructive: false,
+        status: "active" as const,
+        versionHash: "version-" + index,
+      })),
+    );
+
+    const result = await seeded.services.managedToolProfiles.invoke({
+      companyId: seeded.companyId,
+      profileKey: "outline",
+      toolName: "list_documents",
+      parameters: { collectionId: "c1" },
+      idempotencyKey: "assessment-1:list",
+    });
+    expect(result.receipt.outcome).toBe("succeeded");
+    expect(executeManagedToolProfileCall).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: seeded.companyId,
+      pluginId: seeded.pluginId,
+      connectionId: connection.id,
+      profileKey: "outline",
+      toolName: "list_documents",
+    }));
+    const call = executeManagedToolProfileCall.mock.calls[0]![0];
+    expect(call).not.toHaveProperty("credentialRefs");
+    expect(call).not.toHaveProperty("token");
+
+    const [profile] = await db.select().from(toolProfiles);
+    expect(profile).toMatchObject({ defaultAction: "deny", status: "active" });
+    const entries = await db.select().from(toolProfileEntries);
+    expect(entries).toHaveLength(3);
+    expect(entries.every((entry) => entry.selectorType === "catalog_entry" && entry.connectionId === connection.id)).toBe(true);
+    const [binding] = await db.select().from(toolProfileBindings);
+    const [principal] = await db.select().from(agents).where(eq(agents.id, binding.targetId));
+    expect(principal.metadata).toMatchObject({ pluginManagedAgent: { identityOnly: "tool_profile" } });
+    await expect(assertAssignableAgent(db, seeded.companyId, principal.id, "work"))
+      .rejects.toThrow("Cannot assign work to plugin execution principals");
+    await expect(seeded.services.agents.invoke({ companyId: seeded.companyId, agentId: principal.id, prompt: "ordinary invoke" }))
+      .rejects.toThrow("plugin execution principals cannot be invoked through agents.invoke");
+
+    await expect(seeded.services.managedToolProfiles.invoke({
+      companyId: seeded.companyId,
+      profileKey: "outline",
+      toolName: "delete_document",
+      idempotencyKey: "wrong-tool",
+    })).rejects.toThrow("Tool is not declared");
+    await db.update(toolProfiles).set({ status: "disabled" }).where(eq(toolProfiles.id, profile.id));
+    await expect(seeded.services.managedToolProfiles.invoke({
+      companyId: seeded.companyId,
+      profileKey: "outline",
+      toolName: "list_documents",
+      idempotencyKey: "revoked",
+    })).rejects.toThrow("Managed tool profile is revoked");
+    expect(executeManagedToolProfileCall).toHaveBeenCalledTimes(1);
   });
 
   it("keeps plugin execution principals outside assignment, ordinary invoke, and sessions", async () => {

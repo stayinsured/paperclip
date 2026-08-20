@@ -391,7 +391,7 @@ Rules:
 - `entrypoints.ui` points to the directory containing the built UI bundle
 - `ui.slots` declares which extension slots the plugin fills, so the host knows what to mount without loading the bundle eagerly; each slot references an `exportName` from the UI bundle
 - declare managed declarations with the matching `*.managed` capability:
-  - `agents` → `agents.managed`
+  - ordinary `agents` → `agents.managed`; identity-only tool-profile agents are host-reconciled and require `tools.profile.invoke` instead
   - `projects` → `projects.managed`
   - `routines` → `routines.managed`
   - `skills` → `skills.managed`
@@ -416,6 +416,14 @@ agents: [{
 `skillKey` must name a skill in the same manifest and `tool` must be the exact namespaced name of a tool in the same manifest. Ordinary `permissions` and `instructions` conflict with this declaration. The principal is non-assignable and has no normal invoke, wake, session, issue, project, agent, secret, runtime, or company API authority. The one bound tool may perform a mutation such as maintaining documentation; its plugin worker retains provider credentials and must enforce the allowed provider tenant/space/document scope, validate optimistic-concurrency inputs, and audit the result. Write capability on that tool does not expose a generic provider API or any additional tool to the principal.
 
 After reconciling managed resources, the coordinator calls `ctx.agents.execution.invoke()` with its attempt/assessment/source/policy identities, nonce, billing code, and a sanitized bounded envelope. The host pins the current managed skill, creates the durable attempt, and queues an unattached run. `cancel()` and `reclaim()` converge attempt/run state without mutating source issues. A plugin remains responsible for its higher-level retry and review policy.
+
+### 10.3 Managed MCP tool profiles
+
+Use a managed MCP tool profile when a plugin needs deterministic access to a small, reviewed set of tools on one operator-configured connection and does not need a model. Declare `tools.profile.invoke`, an agent with `identityOnly: "tool_profile"`, and `managedToolProfiles[]` with a config path and exact upstream tool names. Identity-only agents do not require or confer `agents.managed`.
+
+Workers call `ctx.managedToolProfiles.invoke({ companyId, profileKey, toolName, parameters, idempotencyKey })`. They cannot supply the connection, catalog entry, credential, token, prompt, or agent id. The host resolves company config, reconciles a default-deny profile with exact `catalog_entry` includes and one identity binding, then uses the normal tool gateway. A disabled profile is a kill switch and is never automatically reactivated.
+
+The call returns a versioned durable receipt and, only for a fresh success, the sanitized result. Replays return the receipt without reconstructing provider content. Failed or timed-out writes are `ambiguous` and must be reconciled with a read before retry. Raw provider results and plugin-profile error payloads are not persisted. See [the managed MCP profile ADR](../plans/2026-08-20-plugin-managed-mcp-profile-host-contract.md).
 
 ## 11. Agent Tools
 
