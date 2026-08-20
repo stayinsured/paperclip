@@ -33,11 +33,12 @@ const plugin = definePlugin({
   async setup(ctx) {
     const repository = new PostgresWorkflowRepository(ctx.db);
     const outlineAssessments = new PostgresOutlineAssessmentRepository(ctx.db);
-    // The Outline MCP connection is host-bound, not plugin-held: this plugin
-    // carries no Outline token or HTTP client by design. Until the host
-    // provides an MCP bridge, a structurally active outline config resolves to
-    // a denied binding (visible exception) and reconciliation stays zero-write.
-    const outlineRuntime = createOutlineRuntime({ assessments: outlineAssessments });
+    // The host resolves the company connection and credentials from the
+    // manifest-managed deny-by-default profile and returns sanitized receipts.
+    const outlineRuntime = createOutlineRuntime({
+      assessments: outlineAssessments,
+      managedToolProfiles: ctx.managedToolProfiles,
+    });
     const reconciler = new ShadowReconciler(repository, undefined, outlineRuntime);
     const sentryRepository = new PostgresSentryWorkflowRepository(ctx.db);
     const sentryControlPlane = new PluginSentryControlPlane(ctx);

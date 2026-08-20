@@ -70,7 +70,13 @@ describe("stay operational workflows plugin", () => {
     expect(manifest.capabilities).toContain("http.outbound");
     expect(manifest.capabilities).toContain("secrets.read-ref");
     expect(manifest.capabilities).toContain("projects.read");
-    expect(manifest.agents).toEqual([expect.objectContaining({ agentKey: "sentry-triage", status: "idle" })]);
+    expect(manifest.agents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentKey: "outline-runtime", identityOnly: "tool_profile" }),
+      expect.objectContaining({ agentKey: "sentry-triage", status: "idle" }),
+    ]));
+    expect(manifest.managedToolProfiles).toEqual([expect.objectContaining({
+      profileKey: "outline", tools: ["list_documents", "create_document", "update_document"],
+    })]);
     expect(manifest.skills).toEqual([expect.objectContaining({ skillKey: "sentry-triage-proposal" })]);
     expect(manifest.entrypoints.ui).toBeUndefined();
   });

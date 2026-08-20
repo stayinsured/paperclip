@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 const PLUGIN_ID = "staydigital.stay-operational-workflows";
+const OUTLINE_RUNTIME_AGENT_KEY = "outline-runtime";
 const SENTRY_TRIAGE_SKILL_KEY = "sentry-triage-proposal";
 const SENTRY_TRIAGE_AGENT_KEY = "sentry-triage";
 const SENTRY_TRIAGE_SKILL_CANONICAL_KEY = "plugin/staydigital-stay-operational-workflows/sentry-triage-proposal";
@@ -16,7 +17,7 @@ function sentryTriageSkillMarkdown(): string {
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.3.0",
+  version: "0.3.1",
   displayName: "Stay Operational Workflows",
   description: "Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.",
   author: "Stay Digital Products",
@@ -34,6 +35,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "jobs.schedule",
     "metrics.write",
     "projects.read",
+    "tools.profile.invoke",
     "skills.managed",
     "agents.read",
     "agents.managed",
@@ -54,6 +56,11 @@ const manifest: PaperclipPluginManifestV1 = {
     coreReadTables: ["companies", "issues", "projects", "agents"]
   },
   agents: [
+    {
+      agentKey: OUTLINE_RUNTIME_AGENT_KEY,
+      displayName: "Outline Runtime",
+      identityOnly: "tool_profile",
+    },
     {
       agentKey: SENTRY_TRIAGE_AGENT_KEY,
       displayName: "Sentry Triage",
@@ -81,6 +88,16 @@ const manifest: PaperclipPluginManifestV1 = {
           "Any semantic proposal edit must replace proposal_revision. Stop after saving the proposal document.",
         ].join("\n"),
       },
+    },
+  ],
+  managedToolProfiles: [
+    {
+      profileKey: "outline",
+      displayName: "Outline documents",
+      description: "Deny-by-default access to the approved Outline document tools on one company connection.",
+      principalAgentKey: OUTLINE_RUNTIME_AGENT_KEY,
+      connectionConfigPath: "outline.connectionId",
+      tools: ["list_documents", "create_document", "update_document"],
     },
   ],
   skills: [

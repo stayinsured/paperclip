@@ -746,6 +746,91 @@ describe("approved outline activation path in reconciliation", () => {
   });
 });
 
+describe("brokered Outline MCP runtime", () => {
+  it("uses only the declared profile tools and translates sanitized receipts", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const responses: Array<{ receipt: Record<string, unknown>; result?: unknown }> = [
+      {
+        receipt: {
+          schemaVersion: 1,
+          receiptId: "receipt-read",
+          companyId: "company-a",
+          profileKey: "outline",
+          connectionId: "connection-a",
+          toolName: "list_documents",
+          outcome: "succeeded",
+          replayed: false,
+          resultHash: "hash",
+          resultSizeBytes: 100,
+          errorCode: null,
+          completedAt: NOW.toISOString(),
+        },
+        result: {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              documents: [{
+                id: preview().deterministicDocumentId,
+                collectionId: preview().collectionId,
+                parentDocumentId: preview().parentDocumentId,
+                title: preview().title,
+                text: preview().body,
+              }],
+            }),
+          }],
+        },
+      },
+      {
+        receipt: {
+          schemaVersion: 1,
+          receiptId: "receipt-create",
+          companyId: "company-a",
+          profileKey: "outline",
+          connectionId: "connection-a",
+          toolName: "create_document",
+          outcome: "ambiguous",
+          replayed: false,
+          resultHash: null,
+          resultSizeBytes: null,
+          errorCode: "tool_timeout",
+          completedAt: NOW.toISOString(),
+        },
+      },
+    ];
+    const runtime = createOutlineRuntime({
+      assessments: { async get() { return null; } },
+      managedToolProfiles: {
+        async invoke(input) {
+          calls.push(input as unknown as Record<string, unknown>);
+          return responses.shift() as never;
+        },
+      },
+      now: () => NOW,
+    });
+    const binding = runtime.resolve(activeConfig());
+    if (!binding || "deniedCode" in binding) throw new Error("expected brokered binding");
+
+    await expect(binding.api.getDocument(preview().deterministicDocumentId)).resolves.toMatchObject({
+      id: preview().deterministicDocumentId,
+      collectionId: preview().collectionId,
+      parentDocumentId: preview().parentDocumentId,
+    });
+    await expect(binding.api.createDocument({
+      id: preview().deterministicDocumentId,
+      collectionId: preview().collectionId,
+      parentDocumentId: preview().parentDocumentId,
+      title: preview().title,
+      text: preview().body,
+    })).rejects.toBeInstanceOf(OutlineAmbiguousWriteError);
+
+    expect(calls.map((call) => [call.profileKey, call.toolName])).toEqual([
+      ["outline", "list_documents"],
+      ["outline", "create_document"],
+    ]);
+    expect(calls.every((call) => !("connectionId" in call))).toBe(true);
+  });
+});
+
 describe("activation fail-closed behavior", () => {
   it("default configuration performs zero provider writes even with a material preview available", async () => {
     const h = harness({ config: parseConfig({ enabled: true, readOnly: true, destinationEnabled: false }) });

@@ -14,7 +14,10 @@ polling and zero Slack messages, so installation alone is inert.
 
 ## Runtime model
 
-- A five-minute scheduled job is the authoritative reconciliation path.
+- A five-minute scheduled job is the authoritative reconciliation path. Active
+  Outline publishing uses the host-managed `outline` profile, bound from
+  company plugin config at `outline.connectionId`; the worker never receives
+  the connection credential or a generic MCP invocation surface.
 - Issue-created and issue-updated events are latency hints. Event payloads are
   ignored; the worker reads only allowlisted issue identity/status columns.
 - Each candidate gets a SHA-256 operation key over company, module, source
