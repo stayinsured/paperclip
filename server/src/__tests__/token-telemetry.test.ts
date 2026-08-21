@@ -50,15 +50,43 @@ function fact(overrides: Partial<TokenTelemetryFact> = {}): TokenTelemetryFact {
 }
 
 describe("token telemetry baseline", () => {
-  it("uses the first exact model candidate and rejects placeholder labels", () => {
+  it("uses immutable run evidence before current agent config", () => {
     expect(resolveTelemetryModelLabel([
       { value: "unknown", source: "cost_event" },
-      { value: "auto", source: "run_usage" },
-      { value: "claude-opus-4-1", source: "agent_config" },
+      { value: "claude-opus-4-1", source: "run_usage" },
+      { value: "gpt-5.6-sol", source: "agent_config" },
     ])).toEqual({
       model: "claude-opus-4-1",
-      source: "agent_config",
+      source: "run_usage",
       exact: true,
+    });
+  });
+
+  it("keeps current agent config as a non-exact inferred label", () => {
+    const report = buildTokenTelemetryBaselineReport({
+      companyId: "company-1",
+      from,
+      toExclusive,
+      dailyFacts: [fact({
+        model: "unknown",
+        usageJson: { model: "unknown" },
+        resultJson: { model: "auto" },
+        contextSnapshot: { wakeReason: "issue_commented" },
+        agentConfig: { model: "gpt-5.6-terra" },
+        costCents: 100,
+      })],
+      completedIssueFacts: [],
+    });
+
+    expect(report.dailyRollups[0]).toMatchObject({
+      model: "gpt-5.6-terra",
+      modelSource: "agent_config",
+      exactModel: false,
+    });
+    expect(report.coverage).toMatchObject({
+      exactModelPaidSpendCents: 0,
+      exactModelPaidSpendPercent: 0,
+      exactModelThresholdMet: false,
     });
   });
 
@@ -81,6 +109,10 @@ describe("token telemetry baseline", () => {
             resetReasons: ["effective run configuration changed: model"],
           },
         },
+      },
+      contextSnapshot: {
+        wakeReason: "issue_commented",
+        paperclipTelemetry: { configuredModel: "gpt-5.6-sol" },
       },
       agentConfig: { model: "gpt-5.6-sol" },
       inputTokens: 100,
@@ -173,6 +205,51 @@ describe("token telemetry baseline", () => {
       matched: true,
       processedTokens: { p50: 200, p75: 250, p95: 290 },
       cachedInputTokens: { p50: 95, p75: 122.5, p95: 144.5 },
+    });
+  });
+
+  it("fails attribution coverage for malformed and unlinked token telemetry", () => {
+    const report = buildTokenTelemetryBaselineReport({
+      companyId: "company-1",
+      from,
+      toExclusive,
+      dailyFacts: [
+        fact(),
+        fact({
+          eventId: "event-malformed-run",
+          heartbeatRunId: "run-missing",
+          runStartedAt: null,
+          runFinishedAt: null,
+          runStatus: null,
+          issueId: null,
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          costCents: 0,
+        }),
+        fact({
+          eventId: "event-unlinked",
+          heartbeatRunId: null,
+          runStartedAt: null,
+          runFinishedAt: null,
+          runStatus: null,
+          issueId: null,
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          costCents: 0,
+        }),
+      ],
+      completedIssueFacts: [],
+    });
+
+    expect(report.coverage).toMatchObject({
+      tokenBearingRunCount: 2,
+      issueAttributedRunCount: 1,
+      explicitUnattributedRunCount: 0,
+      unlinkedTokenEventCount: 1,
+      tokenBearingRunsAccountedPercent: 33.33,
+      runAttributionThresholdMet: false,
     });
   });
 });

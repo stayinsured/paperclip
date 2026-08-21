@@ -1236,8 +1236,12 @@ and priority. Processed tokens are uncached input + cached input + output. Cache
 input, uncached input, subscription usage, and metered usage remain separate in
 every metrics object. Coverage reports exact-model paid-spend attribution and
 maps token-bearing runs either to a company-valid issue or the explicit
-`unattributed` bucket. Cohort baselines expose p50, p75, and p95 values for token,
-cost, run-count, and runtime measures.
+`unattributed` bucket when a company-valid persisted run proves that no issue
+resolved. Unlinked token-bearing events and unresolved run references lower the
+attribution percentage. Current agent configuration may provide an inferred
+model label, but only cost-event, run-usage, run-result, or persisted run-context
+evidence counts toward exact-model coverage. Cohort baselines expose p50, p75,
+and p95 values for token, cost, run-count, and runtime measures.
 
 ## 14. UI Requirements (Board App)
 

@@ -530,7 +530,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
       role: "devops",
       status: "active",
       adapterType: "codex_local",
-      adapterConfig: { model: "gpt-5.6-sol" },
+      adapterConfig: { model: "gpt-5.6-terra" },
       runtimeConfig: {},
       permissions: {},
     });
@@ -561,7 +561,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
       finishedAt: new Date("2026-08-02T12:00:00.000Z"),
       contextSnapshot: { issueId, wakeReason: "issue_commented" },
       usageJson: {
-        model: "unknown",
+        model: "gpt-5.6-sol",
         taskSessionReused: false,
         freshSession: true,
       },
@@ -594,7 +594,7 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     });
     expect(report.dailyRollups[0]).toMatchObject({
       model: "gpt-5.6-sol",
-      modelSource: "agent_config",
+      modelSource: "run_usage",
       wakeReason: "issue_commented",
       taskSessionReused: false,
       resetCause: "no_prior_session",

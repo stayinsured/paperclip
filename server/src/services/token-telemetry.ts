@@ -25,6 +25,12 @@ const NON_EXACT_MODEL_LABELS = new Set([
   "unknown",
   "unspecified",
 ]);
+const EXACT_MODEL_SOURCES = new Set<TokenTelemetryModelSource>([
+  "cost_event",
+  "run_usage",
+  "run_result",
+  "run_context",
+]);
 
 export interface TokenTelemetryModelCandidate {
   value: unknown;
@@ -127,12 +133,21 @@ function addMetrics(target: TokenTelemetryMetrics, source: TokenTelemetryMetrics
 }
 
 export function resolveTelemetryModelLabel(candidates: TokenTelemetryModelCandidate[]) {
+  let inferred: {
+    model: string;
+    source: TokenTelemetryModelSource;
+    exact: false;
+  } | null = null;
   for (const candidate of candidates) {
     const model = nonEmptyString(candidate.value);
     if (!model || NON_EXACT_MODEL_LABELS.has(model.toLowerCase())) continue;
+    if (!EXACT_MODEL_SOURCES.has(candidate.source)) {
+      inferred ??= { model, source: candidate.source, exact: false };
+      continue;
+    }
     return { model, source: candidate.source, exact: true };
   }
-  return { model: "unknown", source: "unknown" as const, exact: false };
+  return inferred ?? { model: "unknown", source: "unknown" as const, exact: false };
 }
 
 function normalizeBillingType(value: string): BillingType {
@@ -496,7 +511,8 @@ export function buildTokenTelemetryBaselineReport(input: {
     (sum, fact) => sum + (fact.exactModel ? fact.metrics.paidCostCents : 0),
     0,
   );
-  const tokenRuns = new Map<string, boolean>();
+  type RunAttribution = "issue" | "explicit_unattributed" | "unresolved";
+  const tokenRuns = new Map<string, RunAttribution>();
   let unlinkedTokenEventCount = 0;
   for (const fact of dailyFacts) {
     if (fact.metrics.processedTokens <= 0) continue;
@@ -504,12 +520,31 @@ export function buildTokenTelemetryBaselineReport(input: {
       unlinkedTokenEventCount += 1;
       continue;
     }
-    tokenRuns.set(fact.heartbeatRunId, (tokenRuns.get(fact.heartbeatRunId) ?? false) || fact.issueId !== null);
+    const previous = tokenRuns.get(fact.heartbeatRunId);
+    const current: RunAttribution = fact.issueId !== null
+      ? "issue"
+      : fact.runStatus !== null
+        ? "explicit_unattributed"
+        : "unresolved";
+    tokenRuns.set(
+      fact.heartbeatRunId,
+      previous === "issue" || current === "issue"
+        ? "issue"
+        : previous === "explicit_unattributed" || current === "explicit_unattributed"
+          ? "explicit_unattributed"
+          : "unresolved",
+    );
   }
-  const issueAttributedRunCount = [...tokenRuns.values()].filter(Boolean).length;
-  const explicitUnattributedRunCount = tokenRuns.size - issueAttributedRunCount;
-  const tokenBearingRunsAccountedPercent = tokenRuns.size > 0
-    ? roundPercent(issueAttributedRunCount + explicitUnattributedRunCount, tokenRuns.size)
+  const issueAttributedRunCount = [...tokenRuns.values()]
+    .filter((attribution) => attribution === "issue").length;
+  const explicitUnattributedRunCount = [...tokenRuns.values()]
+    .filter((attribution) => attribution === "explicit_unattributed").length;
+  const attributionDenominator = tokenRuns.size + unlinkedTokenEventCount;
+  const tokenBearingRunsAccountedPercent = attributionDenominator > 0
+    ? roundPercent(
+        issueAttributedRunCount + explicitUnattributedRunCount,
+        attributionDenominator,
+      )
     : 100;
   const consecutiveUtcDays = Math.max(
     0,
