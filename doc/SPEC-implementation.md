@@ -1017,6 +1017,7 @@ Allowed states are `joined` and `left`. Endpoints require a concrete board user 
 - `GET /companies/:companyId/costs/summary`
 - `GET /companies/:companyId/costs/by-agent`
 - `GET /companies/:companyId/costs/by-project`
+- `GET /companies/:companyId/costs/token-telemetry-baseline`
 - `PATCH /companies/:companyId/budgets`
 - `PATCH /agents/:agentId/budgets`
 
@@ -1227,6 +1228,16 @@ Validation:
 
 Read-time aggregate queries are acceptable for V1.
 Materialized rollups can be added later if query latency exceeds targets.
+
+The token telemetry baseline endpoint uses an exclusive `to` boundary and defaults
+to the previous 14 complete UTC days. It returns dimensioned daily rows plus
+completed-issue rollups and matched cohorts keyed by project, assignee, work mode,
+and priority. Processed tokens are uncached input + cached input + output. Cached
+input, uncached input, subscription usage, and metered usage remain separate in
+every metrics object. Coverage reports exact-model paid-spend attribution and
+maps token-bearing runs either to a company-valid issue or the explicit
+`unattributed` bucket. Cohort baselines expose p50, p75, and p95 values for token,
+cost, run-count, and runtime measures.
 
 ## 14. UI Requirements (Board App)
 

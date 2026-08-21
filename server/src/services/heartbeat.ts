@@ -98,6 +98,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { resolveTelemetryModelLabel } from "./token-telemetry.js";
 import { pluginExecutionAttemptService, PLUGIN_EXECUTION_RUNTIME_MS } from "./plugin-execution-attempts.js";
 import { evaluateExecutionAdmission, type ExecutionAdmissionResult } from "./execution-admission.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
@@ -15215,6 +15216,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null,
     });
     const configuredModel = readConfiguredModelFromAdapterConfig(runtimeConfig);
+    if (configuredModel) {
+      context.paperclipTelemetry = { configuredModel };
+    } else {
+      delete context.paperclipTelemetry;
+    }
     const wakeSessionResetReason = describeSessionResetReason(context);
     const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
       hasTaskSession: taskSession != null,
@@ -16861,6 +16867,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               : "failed";
 
       const cacheAdjustedCostUsd = resolveCacheAdjustedCostUsd(adapterResult);
+      const telemetryModel = resolveTelemetryModelLabel([
+        { value: adapterResult.model, source: "run_result" },
+        { value: configuredModel, source: "run_context" },
+      ]);
       const usageJson =
         normalizedUsage || adapterResult.costUsd != null || cacheAdjustedCostUsd != null
           ? ({
@@ -16886,7 +16896,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               configFreshness: configFreshnessResultMetadata,
               provider: readNonEmptyString(adapterResult.provider) ?? "unknown",
               biller: resolveLedgerBiller(adapterResult),
-              model: readNonEmptyString(adapterResult.model) ?? "unknown",
+              model: telemetryModel.model,
               ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
               ...(cacheAdjustedCostUsd != null ? { cacheAdjustedCostUsd } : {}),
               costStatus: resolveLedgerCostStatus({
@@ -17090,7 +17100,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       if (finalizedRun) {
-        await updateRuntimeState(agent, finalizedRun, adapterResult, {
+        await updateRuntimeState(agent, finalizedRun, {
+          ...adapterResult,
+          model: telemetryModel.model,
+        }, {
           legacySessionId: nextSessionState.legacySessionId,
         }, normalizedUsage);
         if (taskKey) {

@@ -127,3 +127,133 @@ export interface CostByProject {
   cachedInputTokens: number;
   outputTokens: number;
 }
+
+export type TokenTelemetryModelSource =
+  | "cost_event"
+  | "run_usage"
+  | "run_result"
+  | "run_context"
+  | "agent_config"
+  | "unknown";
+
+export type TokenTelemetryBillingCategory = "metered" | "subscription" | "other";
+
+export interface TokenTelemetryMetrics {
+  uncachedInputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  processedTokens: number;
+  paidCostCents: number;
+  meteredProcessedTokens: number;
+  meteredCostCents: number;
+  subscriptionProcessedTokens: number;
+  subscriptionCostCents: number;
+}
+
+export interface TokenTelemetryDailyRollup {
+  day: string;
+  agentId: string;
+  agentName: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  issueAttribution: "issue" | "unattributed";
+  model: string;
+  modelSource: TokenTelemetryModelSource;
+  exactModel: boolean;
+  wakeReason: string;
+  runStatus: string;
+  taskSessionReused: boolean | null;
+  resetCause: string | null;
+  billingType: BillingType;
+  billingCategory: TokenTelemetryBillingCategory;
+  runCount: number;
+  eventCount: number;
+  metrics: TokenTelemetryMetrics;
+}
+
+export interface TokenTelemetryDimensionCount {
+  value: string;
+  count: number;
+}
+
+export interface TokenTelemetryCompletedIssueRollup {
+  issueId: string;
+  issueIdentifier: string;
+  title: string;
+  completedAt: string;
+  projectId: string | null;
+  projectName: string | null;
+  assigneeAgentId: string | null;
+  assigneeAgentName: string | null;
+  workMode: string;
+  priority: string;
+  cohortKey: string;
+  runCount: number;
+  runtimeMs: number;
+  taskSessionEligibleRunCount: number;
+  taskSessionReusedRunCount: number;
+  taskSessionReusePercent: number | null;
+  agents: TokenTelemetryDimensionCount[];
+  models: TokenTelemetryDimensionCount[];
+  modelSources: TokenTelemetryDimensionCount[];
+  wakeReasons: TokenTelemetryDimensionCount[];
+  runStatuses: TokenTelemetryDimensionCount[];
+  resetCauses: TokenTelemetryDimensionCount[];
+  billingTypes: TokenTelemetryDimensionCount[];
+  exactModelPaidSpendPercent: number;
+  metrics: TokenTelemetryMetrics;
+}
+
+export interface TokenTelemetryPercentiles {
+  p50: number;
+  p75: number;
+  p95: number;
+}
+
+export interface TokenTelemetryCohortBaseline {
+  cohortKey: string;
+  projectId: string | null;
+  assigneeAgentId: string | null;
+  workMode: string;
+  priority: string;
+  sampleSize: number;
+  matched: boolean;
+  processedTokens: TokenTelemetryPercentiles;
+  uncachedInputTokens: TokenTelemetryPercentiles;
+  cachedInputTokens: TokenTelemetryPercentiles;
+  outputTokens: TokenTelemetryPercentiles;
+  paidCostCents: TokenTelemetryPercentiles;
+  runCount: TokenTelemetryPercentiles;
+  runtimeMs: TokenTelemetryPercentiles;
+}
+
+export interface TokenTelemetryCoverage {
+  paidSpendCents: number;
+  exactModelPaidSpendCents: number;
+  exactModelPaidSpendPercent: number;
+  tokenBearingRunCount: number;
+  issueAttributedRunCount: number;
+  explicitUnattributedRunCount: number;
+  tokenBearingRunsAccountedPercent: number;
+  unlinkedTokenEventCount: number;
+  matchedCompletedIssueCount: number;
+  exactModelThresholdMet: boolean;
+  runAttributionThresholdMet: boolean;
+  baselineSampleThresholdMet: boolean;
+}
+
+export interface TokenTelemetryBaselineReport {
+  companyId: string;
+  generatedAt: string;
+  window: {
+    from: string;
+    toExclusive: string;
+    consecutiveUtcDays: number;
+    minimumConsecutiveDays: number;
+    matchedSampleMinimum: number;
+  };
+  coverage: TokenTelemetryCoverage;
+  dailyRollups: TokenTelemetryDailyRollup[];
+  completedIssueRollups: TokenTelemetryCompletedIssueRollup[];
+  cohortBaselines: TokenTelemetryCohortBaseline[];
+}
