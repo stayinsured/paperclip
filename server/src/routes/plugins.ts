@@ -2221,12 +2221,18 @@ export function pluginRoutes(
       // 3. If new capabilities, mark as upgrade_pending
       // 4. Otherwise, transition to ready
       const result = await lifecycle.upgrade(plugin.id, version);
+      const previousCapabilities = new Set(plugin.manifestJson.capabilities ?? []);
+      const addedCapabilities = (result.manifestJson.capabilities ?? []).filter(
+        (capability) => !previousCapabilities.has(capability),
+      );
       await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         previousVersion: plugin.version,
         version: result?.version ?? plugin.version,
         targetVersion: version ?? null,
+        addedCapabilities,
+        approvalRequired: result.status === "upgrade_pending",
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
       res.json(result);

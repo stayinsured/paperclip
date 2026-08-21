@@ -1779,24 +1779,11 @@ export function pluginLoader(
         );
       }
 
-      // 3. Detect capability escalation — new capabilities not in the old manifest
-      const oldCaps = new Set(oldManifest.capabilities ?? []);
-      const newCaps = newManifest.capabilities ?? [];
-      const escalated = newCaps.filter((c) => !oldCaps.has(c));
-
-      if (escalated.length > 0) {
-        log.warn(
-          { pluginId, escalated, oldVersion: oldManifest.version, newVersion: newManifest.version },
-          "plugin-loader: upgrade introduces new capabilities — requires admin approval",
-        );
-        throw new Error(
-          `Upgrade for "${pluginId}" introduces new capabilities that require approval: ${escalated.join(", ")}. ` +
-            `The previous version declared [${[...oldCaps].join(", ")}]. ` +
-            `Please review and approve the capability escalation before upgrading.`,
-        );
-      }
-
-      // 4. Update the existing record
+      // 3. Persist the validated package on the existing row. Capability
+      // escalation is intentionally handled by PluginLifecycleManager after
+      // this method returns both manifests: it transitions the row to
+      // upgrade_pending and keeps the new runtime stopped until an instance
+      // admin explicitly enables it.
       await registry.update(pluginId, {
         packageName: discovered.packageName,
         version: discovered.version,

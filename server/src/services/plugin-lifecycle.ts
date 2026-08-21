@@ -509,7 +509,13 @@ export function pluginLifecycleManager(
       }
 
       const result = await transition(pluginId, "ready", null, plugin);
-      await activateReadyPlugin(pluginId);
+      try {
+        await activateReadyPlugin(pluginId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await transition(pluginId, "error", "Activation failed: " + message, result);
+        throw error;
+      }
       emitDomain("plugin.enabled", {
         pluginId,
         pluginKey: result.pluginKey,
@@ -667,8 +673,15 @@ export function pluginLifecycleManager(
       await deactivatePluginRuntime(pluginId, plugin.pluginKey);
 
       // 1. Download and validate new package via loader
-      const { oldManifest, newManifest, discovered } =
-        await pluginLoaderInstance.upgradePlugin(pluginId, { version });
+      let upgradeResult: Awaited<ReturnType<PluginLoader["upgradePlugin"]>>;
+      try {
+        upgradeResult = await pluginLoaderInstance.upgradePlugin(pluginId, { version });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await transition(pluginId, "error", "Upgrade failed: " + message, plugin);
+        throw error;
+      }
+      const { oldManifest, newManifest, discovered } = upgradeResult;
 
       log.info(
         {
@@ -705,7 +718,13 @@ export function pluginLifecycleManager(
           version: discovered.version,
           manifestJson: newManifest,
         } as PluginRecord);
-        await activateReadyPlugin(pluginId);
+        try {
+          await activateReadyPlugin(pluginId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await transition(pluginId, "error", "Activation failed: " + message, result);
+          throw error;
+        }
 
         emitDomain("plugin.loaded", {
           pluginId,
