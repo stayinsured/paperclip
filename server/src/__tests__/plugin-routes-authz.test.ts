@@ -18,6 +18,8 @@ const mockLifecycle = vi.hoisted(() => ({
   disable: vi.fn(),
 }));
 
+const mockLogActivity = vi.hoisted(() => vi.fn());
+
 const mockSecretService = vi.hoisted(() => ({
   getById: vi.fn(),
   syncSecretRefsForTarget: vi.fn(),
@@ -32,7 +34,7 @@ vi.mock("../services/plugin-lifecycle.js", () => ({
 }));
 
 vi.mock("../services/activity-log.js", () => ({
-  logActivity: vi.fn(),
+  logActivity: mockLogActivity,
 }));
 
 vi.mock("../services/secrets.js", () => ({
@@ -387,10 +389,14 @@ describe.sequential("plugin install and upgrade authz", () => {
       id: pluginId,
       pluginKey: "paperclip.example",
       version: "1.0.0",
+      status: "ready",
+      manifestJson: { capabilities: ["events.subscribe"] },
     });
     mockLifecycle.upgrade.mockResolvedValue({
       id: pluginId,
       version: "1.1.0",
+      status: "upgrade_pending",
+      manifestJson: { capabilities: ["events.subscribe", "tools.profile.invoke"] },
     });
 
     const { app } = await createApp({
@@ -398,15 +404,24 @@ describe.sequential("plugin install and upgrade authz", () => {
       userId: "admin-1",
       source: "session",
       isInstanceAdmin: true,
-      companyIds: [],
+      companyIds: [companyA],
     });
 
     const res = await request(app)
-      .post(`/api/plugins/${pluginId}/upgrade`)
+      .post("/api/plugins/" + pluginId + "/upgrade")
       .send({ version: "1.1.0" });
 
     expect(res.status).toBe(200);
     expect(mockLifecycle.upgrade).toHaveBeenCalledWith(pluginId, "1.1.0");
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "plugin.upgraded",
+      details: expect.objectContaining({
+        previousVersion: "1.0.0",
+        version: "1.1.0",
+        addedCapabilities: ["tools.profile.invoke"],
+        approvalRequired: true,
+      }),
+    }));
   }, 20_000);
 });
 
