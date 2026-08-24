@@ -306,6 +306,31 @@ describe("task watchdog subtree classifier", () => {
     expect(result.includedIssueIds).toEqual([sourceId]);
   });
 
+  it("excludes task-watchdog-origin blocker paths from the source stop fingerprint", () => {
+    const source = issue({ status: "blocked" });
+    const initial = classify({ issues: [source] });
+    expect(initial.state).toBe("stopped");
+    if (initial.state !== "stopped") return;
+
+    const withWatchdogRecoveryPath = classify({
+      watchdog: { companyId, issueId: sourceId, lastReviewedFingerprint: initial.stopFingerprint },
+      issues: [
+        source,
+        issue({ id: watchdogId, identifier: "PAP-3", title: "Watchdog", parentId: sourceId, originKind: "task_watchdog", status: "done" }),
+        issue({ id: "watchdog-child-1", identifier: "PAP-4", title: "Nested watchdog work", parentId: watchdogId, status: "done" }),
+      ],
+      blockers: [
+        { companyId, blockerIssueId: watchdogId, blockedIssueId: sourceId },
+        { companyId, blockerIssueId: "watchdog-child-1", blockedIssueId: sourceId },
+      ],
+    });
+
+    expect(withWatchdogRecoveryPath).toMatchObject({
+      state: "already_reviewed",
+      stopFingerprint: initial.stopFingerprint,
+    });
+  });
+
   it("defers a stopped verdict for an issue created inside the first-run grace window", () => {
     const createdAt = new Date("2026-06-18T16:32:45.731Z");
     const result = classify({

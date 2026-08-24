@@ -610,7 +610,7 @@ Task watchdog evaluation is conservative. If any included issue has a live run, 
 
 If no included issue has a live path, Paperclip computes a stop fingerprint from durable subtree state, including at least:
 
-- included leaf issue ids, statuses, assignees, and latest durable update timestamps
+- included leaf issue ids, statuses, and assignees; durable update timestamps remain review evidence but do not change the material stop fingerprint by themselves
 - first-class blockers and unresolved blocker leaf summaries
 - pending interactions and approvals that define waiting paths
 - active monitors and scheduled retries
@@ -618,6 +618,8 @@ If no included issue has a live path, Paperclip computes a stop fingerprint from
 - the watchdog configuration revision, including watchdog agent and instructions changes
 
 If the fingerprint equals the watchdog's last reviewed fingerprint, Paperclip suppresses another watchdog wake. If the fingerprint is new, Paperclip creates or reopens the reusable watchdog issue and wakes the configured watchdog agent with the source issue, watchdog config, stop fingerprint, leaf summary, default mandate, custom instructions, and server-derived capability metadata that names the allowed operations, denied operations, reusable watchdog issue, and non-watchdog target scope.
+
+Mutations on the reusable watchdog issue or any descendant below it do not enqueue source-watchdog evaluation and cannot contribute blocker or action paths to the source stop fingerprint. Terminalizing a watchdog review therefore folds the exact reviewed frontier; only a material change in the included non-watchdog source subtree re-arms evaluation.
 
 Changing the watchdog agent or custom instructions invalidates the reviewed fingerprint and forces a fresh evaluation even if the subtree state did not otherwise change.
 
