@@ -15,6 +15,7 @@ import {
   type RuntimeProgressPhase,
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
+import { WORKSPACE_HEAVY_DIR_EXCLUDES } from "./workspace-heavy-excludes.js";
 
 export interface SshConnectionConfig {
   host: string;
@@ -454,6 +455,53 @@ function tarSpawnEnv(): NodeJS.ProcessEnv {
     // Prevent macOS bsdtar from emitting AppleDouble metadata files like ._README.md.
     COPYFILE_DISABLE: "1",
   };
+}
+
+const DEFAULT_SSH_SYNC_MAX_BYTES = 16 * 1024 * 1024 * 1024;
+
+export function resolveSshSyncMaxBytes(): number | null {
+  const raw = process.env.PAPERCLIP_SSH_SYNC_MAX_BYTES?.trim();
+  if (!raw) return DEFAULT_SSH_SYNC_MAX_BYTES;
+  const parsed = Number(raw);
+  if (parsed === 0) return null;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_SSH_SYNC_MAX_BYTES;
+  }
+  return Math.trunc(parsed);
+}
+
+function createSshTransferByteLimit(direction: "to" | "from"): Transform | null {
+  const maxBytes = resolveSshSyncMaxBytes();
+  if (maxBytes === null) return null;
+  let transferred = 0;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      transferred += Buffer.byteLength(chunk);
+      if (transferred > maxBytes) {
+        callback(
+          new Error(
+            "SSH workspace transfer " + direction + " remote exceeded the configured " +
+            maxBytes + "-byte limit (PAPERCLIP_SSH_SYNC_MAX_BYTES). " +
+            "Dependency/build caches must stay outside managed workspace transfers.",
+          ),
+        );
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+function pipeWithOptionalTransforms(
+  source: NodeJS.ReadableStream,
+  destination: NodeJS.WritableStream,
+  transforms: Array<Transform | null>,
+): void {
+  let current: NodeJS.ReadableStream = source;
+  for (const transform of transforms) {
+    if (transform) current = current.pipe(transform);
+  }
+  current.pipe(destination);
 }
 
 // Converts a tar `--exclude` pattern into a regexp for the local-size estimate.
@@ -1397,11 +1445,12 @@ export async function syncDirectoryToSsh(input: {
       reject(error);
     };
 
-    if (progress) {
-      progress.counter.on("error", fail);
-      tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
-    } else {
-      tar.stdout?.pipe(ssh.stdin ?? null);
+    const byteLimit = createSshTransferByteLimit("to");
+    for (const transform of [byteLimit, progress?.counter ?? null]) {
+      transform?.on("error", fail);
+    }
+    if (tar.stdout && ssh.stdin) {
+      pipeWithOptionalTransforms(tar.stdout, ssh.stdin, [byteLimit, progress?.counter ?? null]);
     }
     tar.stderr?.on("data", (chunk) => {
       tarStderr += String(chunk);
@@ -1519,11 +1568,12 @@ export async function syncDirectoryFromSsh(input: {
         reject(error);
       };
 
-      if (progress) {
-        progress.counter.on("error", fail);
-        ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
-      } else {
-        ssh.stdout?.pipe(tar.stdin ?? null);
+      const byteLimit = createSshTransferByteLimit("from");
+      for (const transform of [byteLimit, progress?.counter ?? null]) {
+        transform?.on("error", fail);
+      }
+      if (ssh.stdout && tar.stdin) {
+        pipeWithOptionalTransforms(ssh.stdout, tar.stdin, [byteLimit, progress?.counter ?? null]);
       }
       ssh.stderr?.on("data", (chunk) => {
         sshStderr += String(chunk);
@@ -1583,7 +1633,7 @@ export async function prepareWorkspaceForSshExecution(input: {
       spec: input.spec,
       localDir: input.localDir,
       remoteDir,
-      exclude: [".git", ".paperclip-runtime"],
+      exclude: [...WORKSPACE_HEAVY_DIR_EXCLUDES, ".git", ".paperclip-runtime"],
       onProgress: input.onProgress,
       progressLabel: "workspace",
     });
@@ -1604,7 +1654,7 @@ export async function prepareWorkspaceForSshExecution(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir,
-    exclude: [".paperclip-runtime"],
+    exclude: [...WORKSPACE_HEAVY_DIR_EXCLUDES, ".paperclip-runtime"],
     onProgress: input.onProgress,
     progressLabel: "workspace",
   });
@@ -1687,7 +1737,7 @@ export async function restoreWorkspaceFromSshExecution(input: {
       spec: input.spec,
       remoteDir,
       localDir: input.localDir,
-      exclude: [".git", ".paperclip-runtime"],
+      exclude: [...WORKSPACE_HEAVY_DIR_EXCLUDES, ".git", ".paperclip-runtime"],
       preserveLocalEntries: [".git"],
       onProgress: input.onProgress,
       progressLabel: "workspace",
@@ -1699,7 +1749,7 @@ export async function restoreWorkspaceFromSshExecution(input: {
     spec: input.spec,
     remoteDir,
     localDir: input.localDir,
-    exclude: [".paperclip-runtime"],
+    exclude: [...WORKSPACE_HEAVY_DIR_EXCLUDES, ".paperclip-runtime"],
     onProgress: input.onProgress,
     progressLabel: "workspace",
   });

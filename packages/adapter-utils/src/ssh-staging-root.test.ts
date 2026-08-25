@@ -2,7 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveSshSyncStagingRoot } from "./ssh.js";
+import {
+  resolveSshSyncMaxBytes,
+  resolveSshSyncStagingRoot,
+} from "./ssh.js";
 
 async function withEnv<T>(
   values: Record<string, string | undefined>,
@@ -76,6 +79,29 @@ describe("resolveSshSyncStagingRoot", () => {
       const resolved = resolveSshSyncStagingRoot();
       expect(resolved.root).toBe(os.tmpdir());
       expect(resolved.explicit).toBe(false);
+    });
+  });
+});
+
+describe("resolveSshSyncMaxBytes", () => {
+  it("defaults to a 16 GiB hard transfer limit", async () => {
+    await withEnv({ PAPERCLIP_SSH_SYNC_MAX_BYTES: undefined }, () => {
+      expect(resolveSshSyncMaxBytes()).toBe(16 * 1024 * 1024 * 1024);
+    });
+  });
+
+  it("accepts a positive operator override", async () => {
+    await withEnv({ PAPERCLIP_SSH_SYNC_MAX_BYTES: "1048576" }, () => {
+      expect(resolveSshSyncMaxBytes()).toBe(1024 * 1024);
+    });
+  });
+
+  it("allows an explicit zero to disable the cap and rejects invalid values", async () => {
+    await withEnv({ PAPERCLIP_SSH_SYNC_MAX_BYTES: "0" }, () => {
+      expect(resolveSshSyncMaxBytes()).toBeNull();
+    });
+    await withEnv({ PAPERCLIP_SSH_SYNC_MAX_BYTES: "-1" }, () => {
+      expect(resolveSshSyncMaxBytes()).toBe(16 * 1024 * 1024 * 1024);
     });
   });
 });

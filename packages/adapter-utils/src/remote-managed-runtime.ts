@@ -13,19 +13,15 @@ import type {
 } from "./sandbox-managed-runtime.js";
 import { captureDirectorySnapshot } from "./workspace-restore-merge.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
+import { WORKSPACE_HEAVY_DIR_EXCLUDES } from "./workspace-heavy-excludes.js";
 
 const REMOTE_ADDITIONAL_SOURCE_HEAVY_DIR_EXCLUDES = [
-  "node_modules",
-  "vendor",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".cache",
+  ...WORKSPACE_HEAVY_DIR_EXCLUDES,
   ".git",
-].flatMap((entry) => [entry, `${entry}/*`, `*/${entry}`, `*/${entry}/*`]);
+  ".git/*",
+  "*/.git",
+  "*/.git/*",
+];
 
 export interface RemoteManagedRuntimeAsset {
   key: string;
@@ -116,14 +112,22 @@ export async function prepareRemoteManagedRuntime(input: {
 }): Promise<PreparedRemoteManagedRuntime> {
   const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
   const syncWorkspace = input.syncWorkspace !== false;
-  const workspaceRemoteDir = syncWorkspace
-    ? path.posix.join(
-        baseWorkspaceRemoteDir,
-        ".paperclip-runtime",
-        "runs",
-        input.runId,
-        "workspace",
-      )
+  if (
+    syncWorkspace &&
+    (
+      input.runId.length === 0 ||
+      input.runId.includes("/") ||
+      input.runId.includes("\\") ||
+      input.runId.includes("..")
+    )
+  ) {
+    throw new Error("remote managed runtime runId is not a simple path segment");
+  }
+  const remoteRunDir = syncWorkspace
+    ? path.posix.join(baseWorkspaceRemoteDir, ".paperclip-runtime", "runs", input.runId)
+    : null;
+  const workspaceRemoteDir = remoteRunDir
+    ? path.posix.join(remoteRunDir, "workspace")
     : baseWorkspaceRemoteDir;
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
 
@@ -138,8 +142,8 @@ export async function prepareRemoteManagedRuntime(input: {
   const baselineSnapshot = preparedWorkspace
     ? await captureDirectorySnapshot(input.workspaceLocalDir, {
         exclude: preparedWorkspace.gitBacked
-          ? [...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"]
-          : [".paperclip-runtime"],
+          ? [...WORKSPACE_HEAVY_DIR_EXCLUDES, ...GIT_ARCHIVE_EXCLUDES, ".paperclip-runtime"]
+          : [...WORKSPACE_HEAVY_DIR_EXCLUDES, ".paperclip-runtime"],
       })
     : null;
 
@@ -217,22 +221,35 @@ export async function prepareRemoteManagedRuntime(input: {
     assetDirs,
     additionalSourceDirs,
     restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
-      if (preparedWorkspace && baselineSnapshot) {
-        await restoreWorkspaceFromSshExecution({
-          spec: input.spec,
-          localDir: input.workspaceLocalDir,
-          remoteDir: workspaceRemoteDir,
-          baselineSnapshot,
-          restoreGitHistory: preparedWorkspace.gitBacked,
-          onProgress,
-        });
-      }
-      for (const asset of input.assets ?? []) {
-        if (!asset.restore) continue;
-        await asset.restore({
-          assetDir: path.posix.join(runtimeRootDir, asset.key),
-          readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
-        });
+      try {
+        if (preparedWorkspace && baselineSnapshot) {
+          await restoreWorkspaceFromSshExecution({
+            spec: input.spec,
+            localDir: input.workspaceLocalDir,
+            remoteDir: workspaceRemoteDir,
+            baselineSnapshot,
+            restoreGitHistory: preparedWorkspace.gitBacked,
+            onProgress,
+          });
+        }
+        for (const asset of input.assets ?? []) {
+          if (!asset.restore) continue;
+          await asset.restore({
+            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+          });
+        }
+      } finally {
+        if (remoteRunDir) {
+          await runSshCommand(
+            input.spec,
+            `rm -rf -- ${shellQuote(remoteRunDir)}`,
+          ).catch((error) => {
+            console.warn(
+              `[paperclip] Failed to remove completed SSH run workspace ${input.runId}; TTL cleanup will retry. ${String(error)}`,
+            );
+          });
+        }
       }
     },
   };
