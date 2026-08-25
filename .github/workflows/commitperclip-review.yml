@@ -36,12 +36,18 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
-        run: |
-          TOKEN=$(node .github/scripts/get-bot-token.mjs)
-          echo "::add-mask::$TOKEN"
-          echo "value=$TOKEN" >> $GITHUB_OUTPUT
         env:
           COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$COMMITPERCLIP_KEY" ]; then
+            TOKEN=$(node .github/scripts/get-bot-token.mjs)
+          else
+            echo "::warning::COMMITPERCLIP_KEY is not configured; using the scoped workflow token."
+            TOKEN="$GITHUB_TOKEN"
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Run quality gates
         id: quality
