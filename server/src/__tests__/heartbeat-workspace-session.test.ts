@@ -1956,12 +1956,40 @@ describe("shouldResetTaskSessionForWake", () => {
 });
 
 describe("shouldDeferFollowupWakeForSameIssue", () => {
-  it("defers a same-agent follow-up for mention-style comment wakes while a run is active", () => {
+  it("defers a human comment while a run is active", () => {
     expect(
       shouldDeferFollowupWakeForSameIssue({
         activeRunStatus: "running",
         isSameExecutionAgent: true,
         wakeCommentId: "comment-1",
+        wakeReason: "issue_commented",
+        requestedByActorType: "user",
+        forceFreshSession: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("coalesces a non-user status comment while a run is active", () => {
+    expect(
+      shouldDeferFollowupWakeForSameIssue({
+        activeRunStatus: "running",
+        isSameExecutionAgent: true,
+        wakeCommentId: "comment-1",
+        wakeReason: "issue_commented",
+        requestedByActorType: "agent",
+        forceFreshSession: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("preserves an explicit mention from a non-user actor", () => {
+    expect(
+      shouldDeferFollowupWakeForSameIssue({
+        activeRunStatus: "running",
+        isSameExecutionAgent: true,
+        wakeCommentId: "comment-1",
+        wakeReason: "issue_comment_mentioned",
+        requestedByActorType: "agent",
         forceFreshSession: false,
       }),
     ).toBe(true);
