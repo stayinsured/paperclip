@@ -213,6 +213,15 @@ export function costRoutes(
     res.json(report);
   });
 
+  router.get("/companies/:companyId/costs/shadow-routing-cohort", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseTokenTelemetryBaselineRange(req.query);
+    const report = await costs.shadowRoutingCohort(companyId, range);
+    res.json(report);
+  });
+
   router.get("/issues/:id/cost-summary", async (req, res) => {
     const rawId = req.params.id as string;
     const issue = await getAccessibleResource(req, res, resolveIssueByRef(rawId), "Issue not found");
