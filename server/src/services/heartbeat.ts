@@ -99,6 +99,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { resolveTelemetryModelLabel } from "./token-telemetry.js";
+import { decideShadowRouting, parsePilot } from "./task-aware-routing.js";
 import { pluginExecutionAttemptService, PLUGIN_EXECUTION_RUNTIME_MS } from "./plugin-execution-attempts.js";
 import { evaluateExecutionAdmission, type ExecutionAdmissionResult } from "./execution-admission.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
@@ -15069,6 +15070,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
         "Failed to resolve adapter model profiles; falling back to primary adapter config",
       );
+    }
+    const routingPilot = parsePilot(context.paperclipRoutingPilot);
+    if (routingPilot) {
+      // Resolve cheap only for shadow eligibility; never apply it to adapter config or session state.
+      const cheap = resolveModelProfileApplication({
+        adapterModelProfiles,
+        agentRuntimeConfig: agent.runtimeConfig,
+        issueModelProfile: "cheap",
+        contextSnapshot: null,
+        profileResolutionFallbackReason,
+      });
+      context.paperclipRoutingDecision = decideShadowRouting(routingPilot, cheap.fallbackReason);
     }
     const modelProfileApplication = resolveModelProfileApplication({
       adapterModelProfiles,
