@@ -11,6 +11,7 @@ import type {
   FinanceByKind,
   FinanceEvent,
   ProviderQuotaResult,
+  TokenTelemetryBaselineReport,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -25,6 +26,10 @@ function dateParams(from?: string, to?: string): string {
 export const costsApi = {
   summary: (companyId: string, from?: string, to?: string) =>
     api.get<CostSummary>(`/companies/${companyId}/costs/summary${dateParams(from, to)}`),
+  tokenTelemetryBaseline: (companyId: string, from?: string, toExclusive?: string) =>
+    api.get<TokenTelemetryBaselineReport>(
+      `/companies/${companyId}/costs/token-telemetry-baseline${dateParams(from, toExclusive)}`,
+    ),
   byAgent: (companyId: string, from?: string, to?: string) =>
     api.get<CostByAgent[]>(`/companies/${companyId}/costs/by-agent${dateParams(from, to)}`),
   byAgentModel: (companyId: string, from?: string, to?: string) =>

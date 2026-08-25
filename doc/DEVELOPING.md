@@ -753,6 +753,17 @@ Expected:
 - `/api/health` returns `{"status":"ok"}`
 - `/api/companies` returns a JSON array
 
+For an attributed token pilot baseline, request:
+
+```sh
+curl "http://localhost:3100/api/companies/<company-id>/costs/token-telemetry-baseline"
+```
+
+The default report covers the previous 14 complete UTC days. Optional `from` and
+exclusive `to` ISO timestamps may select a window up to 90 days. The response
+contains coverage gates, dimensioned daily rollups, per-completed-issue rollups,
+and matched-cohort p50/p75/p95 baselines.
+
 ## Reset Local Dev Database
 
 To wipe local dev data and start fresh:

@@ -1,10 +1,14 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import {
+  buildTokenTelemetryBaselineReport,
+  type TokenTelemetryFact,
+} from "./token-telemetry.js";
 
 export interface CostDateRange {
   from?: Date;
@@ -134,6 +138,108 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         budgetCents: company.budgetMonthlyCents,
         utilizationPercent: Number(utilization.toFixed(2)),
       };
+    },
+
+    tokenTelemetryBaseline: async (
+      companyId: string,
+      range: { from: Date; toExclusive: Date },
+    ) => {
+      const issueAssignees = alias(agents, "token_telemetry_issue_assignees");
+      const effectiveIssueId = sql<string | null>`coalesce(${costEvents.issueId}::text, ${heartbeatRuns.contextSnapshot} ->> 'issueId')`;
+      const effectiveProjectId = sql<string | null>`coalesce(${costEvents.projectId}::text, ${issues.projectId}::text, ${heartbeatRuns.contextSnapshot} ->> 'projectId')`;
+
+      const loadFacts = async (dateCondition: SQL): Promise<TokenTelemetryFact[]> => {
+        const rows = await db
+          .select({
+            eventId: costEvents.id,
+            occurredAt: costEvents.occurredAt,
+            heartbeatRunId: costEvents.heartbeatRunId,
+            runStartedAt: heartbeatRuns.startedAt,
+            runFinishedAt: heartbeatRuns.finishedAt,
+            runStatus: heartbeatRuns.status,
+            triggerDetail: heartbeatRuns.triggerDetail,
+            invocationSource: heartbeatRuns.invocationSource,
+            usageJson: heartbeatRuns.usageJson,
+            resultJson: heartbeatRuns.resultJson,
+            contextSnapshot: heartbeatRuns.contextSnapshot,
+            agentId: costEvents.agentId,
+            agentName: agents.name,
+            agentConfig: agents.adapterConfig,
+            issueId: issues.id,
+            issueIdentifier: issues.identifier,
+            issueTitle: issues.title,
+            issueStatus: issues.status,
+            issueCompletedAt: issues.completedAt,
+            issuePriority: issues.priority,
+            issueWorkMode: issues.workMode,
+            issueAssigneeAgentId: issues.assigneeAgentId,
+            issueAssigneeAgentName: issueAssignees.name,
+            projectId: projects.id,
+            projectName: projects.name,
+            model: costEvents.model,
+            billingType: costEvents.billingType,
+            inputTokens: costEvents.inputTokens,
+            cachedInputTokens: costEvents.cachedInputTokens,
+            outputTokens: costEvents.outputTokens,
+            costCents: costEvents.costCents,
+          })
+          .from(costEvents)
+          .leftJoin(
+            heartbeatRuns,
+            and(
+              eq(heartbeatRuns.companyId, companyId),
+              eq(heartbeatRuns.id, costEvents.heartbeatRunId),
+            ),
+          )
+          .leftJoin(
+            issues,
+            and(
+              eq(issues.companyId, companyId),
+              sql`${issues.id}::text = ${effectiveIssueId}`,
+            ),
+          )
+          .leftJoin(issueAssignees, eq(issueAssignees.id, issues.assigneeAgentId))
+          .leftJoin(
+            projects,
+            and(
+              eq(projects.companyId, companyId),
+              sql`${projects.id}::text = ${effectiveProjectId}`,
+            ),
+          )
+          .innerJoin(agents, eq(agents.id, costEvents.agentId))
+          .where(and(eq(costEvents.companyId, companyId), dateCondition));
+
+        return rows.map((row) => ({
+          ...row,
+          usageJson: row.usageJson ?? null,
+          resultJson: row.resultJson ?? null,
+          contextSnapshot: row.contextSnapshot ?? null,
+          agentConfig: row.agentConfig ?? null,
+          inputTokens: Number(row.inputTokens ?? 0),
+          cachedInputTokens: Number(row.cachedInputTokens ?? 0),
+          outputTokens: Number(row.outputTokens ?? 0),
+          costCents: Number(row.costCents ?? 0),
+        }));
+      };
+
+      const [dailyFacts, completedIssueFacts] = await Promise.all([
+        loadFacts(and(
+          gte(costEvents.occurredAt, range.from),
+          lt(costEvents.occurredAt, range.toExclusive),
+        )!),
+        loadFacts(and(
+          gte(issues.completedAt, range.from),
+          lt(issues.completedAt, range.toExclusive),
+        )!),
+      ]);
+
+      return buildTokenTelemetryBaselineReport({
+        companyId,
+        from: range.from,
+        toExclusive: range.toExclusive,
+        dailyFacts,
+        completedIssueFacts,
+      });
     },
 
     issueTreeSummary: async (

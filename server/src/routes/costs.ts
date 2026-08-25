@@ -45,6 +45,31 @@ export function parseCostLimit(query: Record<string, unknown>) {
   return limit;
 }
 
+export function parseTokenTelemetryBaselineRange(
+  query: Record<string, unknown>,
+  now = new Date(),
+) {
+  const defaultToExclusive = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  ));
+  const toRaw = query.to as string | undefined;
+  const toExclusive = toRaw ? new Date(toRaw) : defaultToExclusive;
+  if (isNaN(toExclusive.getTime())) throw badRequest("invalid 'to' date");
+
+  const fromRaw = query.from as string | undefined;
+  const from = fromRaw
+    ? new Date(fromRaw)
+    : new Date(toExclusive.getTime() - 14 * 24 * 60 * 60 * 1000);
+  if (isNaN(from.getTime())) throw badRequest("invalid 'from' date");
+  if (from >= toExclusive) throw badRequest("'from' must be before exclusive 'to'");
+  if (toExclusive.getTime() - from.getTime() > 90 * 24 * 60 * 60 * 1000) {
+    throw badRequest("token telemetry baseline range cannot exceed 90 days");
+  }
+  return { from, toExclusive };
+}
+
 export function costRoutes(
   db: Db,
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
@@ -177,6 +202,15 @@ export function costRoutes(
     const range = parseCostDateRange(req.query);
     const summary = await costs.summary(companyId, range);
     res.json(summary);
+  });
+
+  router.get("/companies/:companyId/costs/token-telemetry-baseline", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseTokenTelemetryBaselineRange(req.query);
+    const report = await costs.tokenTelemetryBaseline(companyId, range);
+    res.json(report);
   });
 
   router.get("/issues/:id/cost-summary", async (req, res) => {

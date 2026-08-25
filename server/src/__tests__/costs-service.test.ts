@@ -68,6 +68,14 @@ const mockFetchAllQuotaWindows = vi.hoisted(() => vi.fn());
 const mockCostService = vi.hoisted(() => ({
   createEvent: vi.fn(),
   summary: vi.fn().mockResolvedValue({ spendCents: 0 }),
+  tokenTelemetryBaseline: vi.fn().mockResolvedValue({
+    companyId: "company-1",
+    window: { consecutiveUtcDays: 14 },
+    coverage: { exactModelThresholdMet: true },
+    dailyRollups: [],
+    completedIssueRollups: [],
+    cohortBaselines: [],
+  }),
   byAgent: vi.fn().mockResolvedValue([]),
   byAgentModel: vi.fn().mockResolvedValue([]),
   byProvider: vi.fn().mockResolvedValue([]),
@@ -160,8 +168,12 @@ async function createAppWithActor(actor: any) {
 }
 
 async function loadCostParsers() {
-  const { parseCostDateRange, parseCostLimit } = await import("../routes/costs.js");
-  return { parseCostDateRange, parseCostLimit };
+  const {
+    parseCostDateRange,
+    parseCostLimit,
+    parseTokenTelemetryBaselineRange,
+  } = await import("../routes/costs.js");
+  return { parseCostDateRange, parseCostLimit, parseTokenTelemetryBaselineRange };
 }
 
 beforeEach(() => {
@@ -247,6 +259,28 @@ describe("cost routes", () => {
       estimatedDebitCents: 0,
       eventCount: 0,
     });
+  });
+
+  it("uses a complete 14-day UTC window for the default token telemetry baseline", async () => {
+    const { parseTokenTelemetryBaselineRange } = await loadCostParsers();
+    expect(parseTokenTelemetryBaselineRange({}, new Date("2026-08-21T18:30:00.000Z"))).toEqual({
+      from: new Date("2026-08-07T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-21T00:00:00.000Z"),
+    });
+  });
+
+  it("returns the token telemetry baseline through the company-scoped route", async () => {
+    const app = await createApp();
+    const res = await request(app)
+      .get("/api/companies/company-1/costs/token-telemetry-baseline")
+      .query({ from: "2026-08-01T00:00:00.000Z", to: "2026-08-15T00:00:00.000Z" });
+
+    expect(res.status).toBe(200);
+    expect(mockCostService.tokenTelemetryBaseline).toHaveBeenCalledWith("company-1", {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-15T00:00:00.000Z"),
+    });
+    expect(res.body.coverage.exactModelThresholdMet).toBe(true);
   });
 
   it("returns issue subtree cost summaries for issue refs", async () => {
@@ -474,6 +508,116 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(event.inputTokens).toBe(2_732_577);
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     expect(agent?.spentMonthlyCents).toBe(0);
+  });
+
+  it("builds attributed token telemetry from ledger, run, issue, and project rows", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const projectId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Telemetry Agent",
+      role: "devops",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.6-terra" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Telemetry Project",
+      status: "active",
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      projectId,
+      assigneeAgentId: agentId,
+      title: "Measured delivery",
+      status: "done",
+      priority: "high",
+      issueNumber: 1,
+      identifier: "TLM-1",
+      completedAt: new Date("2026-08-03T00:00:00.000Z"),
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "succeeded",
+      startedAt: new Date("2026-08-02T11:59:00.000Z"),
+      finishedAt: new Date("2026-08-02T12:00:00.000Z"),
+      contextSnapshot: { issueId, wakeReason: "issue_commented" },
+      usageJson: {
+        model: "gpt-5.6-sol",
+        taskSessionReused: false,
+        freshSession: true,
+      },
+    });
+    await db.insert(costEvents).values({
+      companyId,
+      agentId,
+      heartbeatRunId: runId,
+      provider: "openai",
+      biller: "openai",
+      billingType: "metered_api",
+      model: "unknown",
+      inputTokens: 40,
+      cachedInputTokens: 50,
+      outputTokens: 10,
+      costCents: 25,
+      occurredAt: new Date("2026-08-02T12:00:00.000Z"),
+    });
+
+    const report = await costs.tokenTelemetryBaseline(companyId, {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-15T00:00:00.000Z"),
+    });
+
+    expect(report.coverage).toMatchObject({
+      exactModelPaidSpendPercent: 100,
+      tokenBearingRunCount: 1,
+      issueAttributedRunCount: 1,
+      tokenBearingRunsAccountedPercent: 100,
+    });
+    expect(report.dailyRollups[0]).toMatchObject({
+      model: "gpt-5.6-sol",
+      modelSource: "run_usage",
+      wakeReason: "issue_commented",
+      taskSessionReused: false,
+      resetCause: "no_prior_session",
+      projectId,
+      metrics: {
+        uncachedInputTokens: 40,
+        cachedInputTokens: 50,
+        outputTokens: 10,
+        processedTokens: 100,
+        paidCostCents: 25,
+        meteredProcessedTokens: 100,
+        meteredCostCents: 25,
+        subscriptionProcessedTokens: 0,
+        subscriptionCostCents: 0,
+      },
+    });
+    expect(report.completedIssueRollups[0]).toMatchObject({
+      issueIdentifier: "TLM-1",
+      projectId,
+      assigneeAgentId: agentId,
+      runCount: 1,
+      runtimeMs: 60_000,
+    });
   });
 
   it("aggregates cost event sums above int32 without raising Postgres integer overflow", async () => {
