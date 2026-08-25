@@ -3265,6 +3265,10 @@ export function accessRoutes(
         {
           name: "paperclip-converting-plans-to-tasks",
           path: "/api/skills/paperclip-converting-plans-to-tasks"
+        },
+        {
+          name: "paperclip-workspace-hygiene",
+          path: "/api/skills/paperclip-workspace-hygiene"
         }
       ]
     });

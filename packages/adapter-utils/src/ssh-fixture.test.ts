@@ -441,6 +441,47 @@ describe("ssh env-lab fixture", () => {
     expect(result.stdout).toContain("{\"token\":\"secret\"}");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
+  it("excludes reproducible dependency trees while preparing an SSH workspace", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-heavy-excludes-"));
+    cleanupDirs.push(rootDir);
+    const statePath = path.join(rootDir, "state.json");
+    const localDir = path.join(rootDir, "local-workspace");
+    await mkdir(path.join(localDir, "node_modules", "root-package"), { recursive: true });
+    await mkdir(path.join(localDir, "packages", "ui", ".pnpm-store"), { recursive: true });
+    await mkdir(path.join(localDir, ".vite"), { recursive: true });
+    await writeFile(path.join(localDir, "source.ts"), "export const source = true;\n", "utf8");
+    await writeFile(path.join(localDir, "node_modules", "root-package", "cache.bin"), "cache\n", "utf8");
+    await writeFile(path.join(localDir, "packages", "ui", ".pnpm-store", "index.bin"), "cache\n", "utf8");
+    await writeFile(path.join(localDir, ".vite", "manifest.json"), "{}\n", "utf8");
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH heavy-exclude test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const remoteDir = path.posix.join(started.workspaceDir, "heavy-excludes");
+
+    await prepareWorkspaceForSshExecution({
+      spec: {
+        ...config,
+        remoteCwd: remoteDir,
+      },
+      localDir,
+      remoteDir,
+    });
+
+    const result = await runSshCommand(
+      config,
+      [
+        `test -f ${JSON.stringify(path.posix.join(remoteDir, "source.ts"))}`,
+        `test ! -e ${JSON.stringify(path.posix.join(remoteDir, "node_modules"))}`,
+        `test ! -e ${JSON.stringify(path.posix.join(remoteDir, "packages", "ui", ".pnpm-store"))}`,
+        `test ! -e ${JSON.stringify(path.posix.join(remoteDir, ".vite"))}`,
+        "printf excluded",
+      ].join(" && "),
+    );
+
+    expect(result.stdout).toContain("excluded");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
   it("round-trips a git workspace through the SSH fixture", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-fixture-"));
     cleanupDirs.push(rootDir);
