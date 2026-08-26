@@ -754,6 +754,84 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(JSON.stringify(report)).not.toContain("foreign-security");
   });
 
+  it("loads persisted session counterparts outside the selected cohort for boundary evidence", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const selectedIssueId = randomUUID();
+    const excludedIssueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Boundary Company",
+      issuePrefix: `B${companyId.slice(0, 6)}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Boundary Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      {
+        id: selectedIssueId,
+        companyId,
+        assigneeAgentId: agentId,
+        title: "Selected cohort issue",
+        status: "done",
+        priority: "high",
+        issueNumber: 1,
+        identifier: "BND-1",
+        createdAt: new Date("2026-08-01T00:00:00.000Z"),
+        completedAt: new Date("2026-08-02T00:00:00.000Z"),
+      },
+      {
+        id: excludedIssueId,
+        companyId,
+        assigneeAgentId: agentId,
+        title: "Excluded cohort issue",
+        status: "done",
+        priority: "high",
+        issueNumber: 2,
+        identifier: "BND-2",
+        createdAt: new Date("2026-08-01T00:00:00.000Z"),
+        completedAt: new Date("2026-08-02T00:00:00.000Z"),
+      },
+    ]);
+    await db.insert(heartbeatRuns).values([selectedIssueId, excludedIssueId].map((issueId) => ({
+      id: randomUUID(),
+      companyId,
+      agentId,
+      status: "succeeded" as const,
+      sessionIdBefore: "persisted-shared-session",
+      contextSnapshot: { issueId, companyId },
+      usageJson: {
+        taskSessionReused: true,
+        configFreshness: { session: { nextFingerprint: "security-fingerprint" } },
+      },
+    })));
+
+    const report = await costs.completedIssueTelemetry(
+      companyId,
+      {
+        from: new Date("2026-08-01T00:00:00.000Z"),
+        toExclusive: new Date("2026-08-15T00:00:00.000Z"),
+      },
+      [selectedIssueId],
+    );
+
+    expect(report.completedIssues).toHaveLength(1);
+    expect(report.completedIssues[0]?.issueId).toBe(selectedIssueId);
+    expect(report.completedIssues[0]?.boundary).toMatchObject({
+      evidenceComplete: false,
+      violations: ["session_reused_across_issues"],
+    });
+  });
+
   it("aggregates cost event sums above int32 without raising Postgres integer overflow", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

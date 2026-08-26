@@ -264,6 +264,54 @@ describe("completed issue telemetry", () => {
     expect(JSON.stringify(report)).not.toContain("same-private-session");
   });
 
+  it("marks reuse against an issue outside the selected telemetry cohort as leakage", () => {
+    const selectedIssueId = randomUUID();
+    const excludedIssueId = randomUUID();
+    const report = buildCompletedIssueTelemetry({
+      companyId,
+      from,
+      toExclusive,
+      issues: [{
+        id: selectedIssueId,
+        companyId,
+        identifier: "TLM-selected",
+        projectId: null,
+        assigneeAgentId: null,
+        workMode: "standard",
+        priority: "high",
+        createdAt: new Date("2026-08-02T00:00:00.000Z"),
+        completedAt: new Date("2026-08-03T00:00:00.000Z"),
+      }],
+      runs: [selectedIssueId, excludedIssueId].map((issueId, index) => ({
+        id: randomUUID(),
+        companyId,
+        agentId: randomUUID(),
+        responsibleUserId: `user-${index + 1}`,
+        status: "succeeded",
+        sessionIdBefore: "shared-outside-selected-cohort",
+        contextSnapshot: { issueId, companyId },
+        usageJson: {
+          taskSessionReused: true,
+          configFreshness: { session: { nextFingerprint: "security-fingerprint" } },
+        },
+        resultJson: null,
+      })),
+      costEvents: [],
+      wakeRequests: [],
+      activities: [],
+    });
+
+    expect(report.completedIssues).toHaveLength(1);
+    expect(report.completedIssues[0]?.boundary).toMatchObject({
+      evidenceComplete: false,
+      violations: [
+        "session_reused_across_issues",
+        "session_reused_across_security_principals",
+      ],
+    });
+    expect(JSON.stringify(report)).not.toContain("shared-outside-selected-cohort");
+  });
+
   it("keeps unknown billing separate and marks accounting evidence incomplete", () => {
     const issueId = randomUUID();
     const report = buildCompletedIssueTelemetry({

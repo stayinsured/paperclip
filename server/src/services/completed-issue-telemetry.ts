@@ -249,11 +249,7 @@ export function buildCompletedIssueTelemetry(input: {
   for (const run of input.runs) {
     if (run.companyId !== input.companyId) continue;
     const issueId = issueIdFromContext(run.contextSnapshot);
-    if (!issueId || !selectedIssueIds.has(issueId)) continue;
-    runToIssue.set(run.id, issueId);
-    const group = issueRuns.get(issueId) ?? [];
-    group.push(run);
-    issueRuns.set(issueId, group);
+    if (!issueId) continue;
     const evidence = sessionEvidence(run);
     if (evidence.reused && run.sessionIdBefore) {
       const sessionFingerprint = hash(run.sessionIdBefore);
@@ -264,6 +260,11 @@ export function buildCompletedIssueTelemetry(input: {
       principals.add(run.responsibleUserId ?? "none");
       sharedSessionPrincipals.set(sessionFingerprint, principals);
     }
+    if (!selectedIssueIds.has(issueId)) continue;
+    runToIssue.set(run.id, issueId);
+    const group = issueRuns.get(issueId) ?? [];
+    group.push(run);
+    issueRuns.set(issueId, group);
   }
 
   const issueCosts = new Map<string, CompletedIssueCostSource[]>();

@@ -302,23 +302,38 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       }
 
       const effectiveRunIssueId = sql<string>`coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId', ${heartbeatRuns.contextSnapshot} ->> 'taskId')`;
-      const runs = await db
-        .select({
-          id: heartbeatRuns.id,
-          companyId: heartbeatRuns.companyId,
-          agentId: heartbeatRuns.agentId,
-          responsibleUserId: heartbeatRuns.responsibleUserId,
-          status: heartbeatRuns.status,
-          sessionIdBefore: heartbeatRuns.sessionIdBefore,
-          contextSnapshot: heartbeatRuns.contextSnapshot,
-          usageJson: heartbeatRuns.usageJson,
-          resultJson: heartbeatRuns.resultJson,
-        })
+      const runSelection = {
+        id: heartbeatRuns.id,
+        companyId: heartbeatRuns.companyId,
+        agentId: heartbeatRuns.agentId,
+        responsibleUserId: heartbeatRuns.responsibleUserId,
+        status: heartbeatRuns.status,
+        sessionIdBefore: heartbeatRuns.sessionIdBefore,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+        usageJson: heartbeatRuns.usageJson,
+        resultJson: heartbeatRuns.resultJson,
+      };
+      const selectedRuns = await db
+        .select(runSelection)
         .from(heartbeatRuns)
         .where(and(
           eq(heartbeatRuns.companyId, companyId),
           inArray(effectiveRunIssueId, issueIds),
         ));
+      const selectedSessionIds = [...new Set(selectedRuns
+        .map((run) => run.sessionIdBefore)
+        .filter((sessionId): sessionId is string => sessionId !== null))];
+      const boundaryRuns = selectedSessionIds.length === 0
+        ? []
+        : await db
+            .select(runSelection)
+            .from(heartbeatRuns)
+            .where(and(
+              eq(heartbeatRuns.companyId, companyId),
+              inArray(heartbeatRuns.sessionIdBefore, selectedSessionIds),
+            ));
+      const runs = [...new Map([...selectedRuns, ...boundaryRuns]
+        .map((run) => [run.id, run])).values()];
       const runIds = runs.map((run) => run.id);
       const eventScope = runIds.length > 0
         ? or(inArray(costEvents.issueId, issueIds), inArray(costEvents.heartbeatRunId, runIds))
