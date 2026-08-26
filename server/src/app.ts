@@ -154,12 +154,16 @@ export function shouldEnablePrivateHostnameGuard(opts: {
   );
 }
 
-export function createManagedBundledPluginWorkerRecovery(input: {
-  managedBundledPluginKeys: readonly string[];
+type PluginWorkerRecoveryTarget = { id: string; pluginKey: string };
+
+type PluginWorkerRecoveryInput = {
   workerManager: Pick<PluginWorkerManager, "getWorker" | "isRunning" | "stopWorker">;
   getLoader: () => Pick<PluginLoader, "loadSingle"> | null;
-}): (plugin: { id: string; pluginKey: string }) => Promise<boolean> {
-  const recoverablePluginKeys = new Set(input.managedBundledPluginKeys);
+};
+
+function createPluginWorkerRecovery(
+  input: PluginWorkerRecoveryInput & { canRecover: (plugin: PluginWorkerRecoveryTarget) => boolean },
+): (plugin: PluginWorkerRecoveryTarget) => Promise<boolean> {
   const inFlightStarts = new Map<string, Promise<boolean>>();
 
   // A failed attempt can leave behind the dead handle it registered (e.g. the
@@ -170,7 +174,7 @@ export function createManagedBundledPluginWorkerRecovery(input: {
   // blocked by the handle-presence gate until the process restarts. Handles
   // in starting/running/backoff states belong to the worker manager's own
   // lifecycle and are left alone.
-  const discardDeadRecoveryHandle = async (plugin: { id: string; pluginKey: string }) => {
+  const discardDeadRecoveryHandle = async (plugin: PluginWorkerRecoveryTarget) => {
     const handle = input.workerManager.getWorker(plugin.id);
     if (!handle || (handle.status !== "crashed" && handle.status !== "stopped")) return;
     try {
@@ -188,7 +192,7 @@ export function createManagedBundledPluginWorkerRecovery(input: {
   };
 
   return async (plugin) => {
-    if (!recoverablePluginKeys.has(plugin.pluginKey)) return false;
+    if (!input.canRecover(plugin)) return false;
 
     const inFlight = inFlightStarts.get(plugin.id);
     if (inFlight) return inFlight;
@@ -217,7 +221,7 @@ export function createManagedBundledPluginWorkerRecovery(input: {
             pluginKey: plugin.pluginKey,
             err: err instanceof Error ? err.message : String(err),
           },
-          "managed bundled plugin lazy worker recovery failed",
+          "plugin lazy worker recovery failed",
         );
         await discardDeadRecoveryHandle(plugin);
         throw err;
@@ -233,6 +237,30 @@ export function createManagedBundledPluginWorkerRecovery(input: {
       }
     }
   };
+}
+
+/**
+ * Recover any already-enabled plugin worker. Callers must first establish that
+ * the persisted plugin row is still `ready`; this helper never changes shared
+ * lifecycle state and suppresses error-state writes during the bounded retry.
+ */
+export function createReadyPluginWorkerRecovery(
+  input: PluginWorkerRecoveryInput,
+): (plugin: PluginWorkerRecoveryTarget) => Promise<boolean> {
+  return createPluginWorkerRecovery({
+    ...input,
+    canRecover: () => true,
+  });
+}
+
+export function createManagedBundledPluginWorkerRecovery(
+  input: PluginWorkerRecoveryInput & { managedBundledPluginKeys: readonly string[] },
+): (plugin: PluginWorkerRecoveryTarget) => Promise<boolean> {
+  const recoverablePluginKeys = new Set(input.managedBundledPluginKeys);
+  return createPluginWorkerRecovery({
+    ...input,
+    canRecover: (plugin) => recoverablePluginKeys.has(plugin.pluginKey),
+  });
 }
 
 export async function createApp(
@@ -358,6 +386,10 @@ export async function createApp(
         })
       : undefined;
 
+  const recoverReadyPluginWorker = createReadyPluginWorkerRecovery({
+    workerManager,
+    getLoader: () => runtimePluginLoader,
+  });
   // Mount API routes
   const api = Router();
   api.use(boardMutationGuard());
@@ -434,13 +466,11 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
-    recoverMissingWorker: recoverManagedBundledPluginWorker
-      ? async (pluginId) => {
-          const plugin = await pluginRegistry.getById(pluginId);
-          if (!plugin) return false;
-          return recoverManagedBundledPluginWorker(plugin);
-        }
-      : undefined,
+    recoverMissingWorker: async (pluginId) => {
+      const plugin = await pluginRegistry.getById(pluginId);
+      if (!plugin || plugin.status !== "ready") return false;
+      return recoverReadyPluginWorker(plugin);
+    },
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,
