@@ -251,3 +251,46 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
     jti: typeof claims.jti === "string" ? claims.jti : undefined,
   };
 }
+
+/**
+ * Returns a typed reason only when the token is otherwise structurally valid,
+ * signed for this control-plane instance/company, and expired. Invalid or
+ * forged tokens intentionally stay indistinguishable from missing auth.
+ */
+export function getLocalAgentJwtFailureReason(token: string): "token_expired" | null {
+  if (!token) return null;
+  const config = jwtConfig();
+  if (!config) return null;
+
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, claimsB64, signature] = parts;
+  const header = parseJson(base64UrlDecode(headerB64));
+  const claims = parseJson(base64UrlDecode(claimsB64));
+  if (!header || header.alg !== JWT_ALGORITHM || !claims) return null;
+
+  const sub = typeof claims.sub === "string" ? claims.sub : null;
+  const companyId = typeof claims.company_id === "string" ? claims.company_id : null;
+  const adapterType = typeof claims.adapter_type === "string" ? claims.adapter_type : null;
+  const runId = typeof claims.run_id === "string" ? claims.run_id : null;
+  const iat = typeof claims.iat === "number" ? claims.iat : null;
+  const exp = typeof claims.exp === "number" ? claims.exp : null;
+  if (!sub || !companyId || !adapterType || !runId || !iat || !exp) return null;
+
+  const signingInput = `${headerB64}.${claimsB64}`;
+  const perCompanyKey = deriveCompanySigningKey(config.secret, companyId, config.instanceId);
+  let signatureOk = safeCompare(signature, signPayload(perCompanyKey, signingInput));
+  if (!signatureOk && !config.disableLegacyFallback) {
+    signatureOk = safeCompare(signature, signPayload(config.secret, signingInput));
+  }
+  if (!signatureOk) return null;
+
+  const issuer = typeof claims.iss === "string" ? claims.iss : undefined;
+  const audience = typeof claims.aud === "string" ? claims.aud : undefined;
+  const instanceClaim = typeof claims.instance_id === "string" ? claims.instance_id : undefined;
+  if (issuer && issuer !== config.issuer) return null;
+  if (audience && audience !== config.audience) return null;
+  if (instanceClaim && instanceClaim !== config.instanceId) return null;
+
+  return exp < Math.floor(Date.now() / 1000) ? "token_expired" : null;
+}

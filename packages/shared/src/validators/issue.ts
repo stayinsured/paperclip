@@ -687,6 +687,15 @@ export const addIssueCommentSchema = z.object({
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
 
+export const terminalIssueCompletionSchema = z.object({
+  status: z.enum(["done", "cancelled"]),
+  result: multilineTextSchema.pipe(z.string().trim().min(1)),
+  acceptanceRevision: z.string().trim().min(1).max(255),
+  idempotencyKey: z.string().trim().min(1).max(255),
+}).strict();
+
+export type TerminalIssueCompletion = z.infer<typeof terminalIssueCompletionSchema>;
+
 export const issueThreadInteractionStatusSchema = z.enum(ISSUE_THREAD_INTERACTION_STATUSES);
 export const issueThreadInteractionKindSchema = z.enum(ISSUE_THREAD_INTERACTION_KINDS);
 export const issueThreadInteractionResolverPolicySchema = z.enum(ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES);

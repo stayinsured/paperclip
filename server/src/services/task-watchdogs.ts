@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -10,6 +10,7 @@ import {
   issueDocuments,
   issueApprovals,
   issueRelations,
+  issueTerminalOperations,
   issues,
   issueThreadInteractions,
   issueWatchdogs,
@@ -74,6 +75,8 @@ export type TaskWatchdogClassifierIssue = Pick<
   latestCommentAt?: Date | string | null;
   latestDocumentAt?: Date | string | null;
   latestWorkProductAt?: Date | string | null;
+  acceptanceRevision?: string | null;
+  terminalOperationStatus?: "done" | "cancelled" | null;
 };
 
 export type TaskWatchdogClassifierPath = {
@@ -131,6 +134,12 @@ export type TaskWatchdogMaterialLeaf = Pick<
   | "pendingApprovalIds"
 >;
 
+export type TaskWatchdogAcceptanceState = {
+  issueId: string;
+  acceptanceRevision: string;
+  terminalStatus: "done" | "cancelled";
+};
+
 export type TaskWatchdogWaitsByIssueId = Record<string, {
   pendingInteractionIds: string[];
   pendingApprovalIds: string[];
@@ -141,8 +150,8 @@ export type TaskWatchdogStopSnapshot = {
   fingerprint: string;
   materialLeaves: TaskWatchdogMaterialLeaf[];
   waitsByIssueId: TaskWatchdogWaitsByIssueId;
+  acceptanceStates?: TaskWatchdogAcceptanceState[];
 };
-
 type TaskWatchdogPendingInteractionsByIssueId = Record<string, Array<{
   id: string;
   kind: string | null;
@@ -306,6 +315,7 @@ function stableStopFingerprint(input: {
   watchedIssueId: string;
   materialLeaves: TaskWatchdogMaterialLeaf[];
   waitsByIssueId: TaskWatchdogWaitsByIssueId;
+  acceptanceStates: TaskWatchdogAcceptanceState[];
 }) {
   const payload = JSON.stringify({
     version: 2,
@@ -313,6 +323,7 @@ function stableStopFingerprint(input: {
     watchedIssueId: input.watchedIssueId,
     materialLeaves: input.materialLeaves,
     waitsByIssueId: input.waitsByIssueId,
+    ...(input.acceptanceStates.length > 0 ? { acceptanceStates: input.acceptanceStates } : {}),
   });
   return `task_watchdog_stop:${createHash("sha256").update(payload).digest("hex")}`;
 }
@@ -361,6 +372,7 @@ function isShrinkOfReviewedSnapshot(
   reviewed: TaskWatchdogStopSnapshot | null | undefined,
 ) {
   if (!reviewed || canonicalJson(current.waitsByIssueId) !== canonicalJson(reviewed.waitsByIssueId)) return false;
+  if (canonicalJson(current.acceptanceStates ?? []) !== canonicalJson(reviewed.acceptanceStates ?? [])) return false;
   const reviewedLeaves = new Map(reviewed.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
   return current.materialLeaves.every((leaf) => {
     const previous = reviewedLeaves.get(leaf.issueId);
@@ -504,17 +516,31 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
       latestWorkProductAt: optionalIso(issue.latestWorkProductAt),
     }));
   const materialLeaves = leaves.map(materialLeaf);
+  const acceptanceStates = included
+    .filter((issue) =>
+      issue.acceptanceRevision &&
+      issue.terminalOperationStatus &&
+      issue.status === issue.terminalOperationStatus
+    )
+    .map((issue) => ({
+      issueId: issue.id,
+      acceptanceRevision: issue.acceptanceRevision!,
+      terminalStatus: issue.terminalOperationStatus!,
+    }))
+    .sort((left, right) => left.issueId.localeCompare(right.issueId));
   const stopFingerprint = stableStopFingerprint({
     companyId: input.watchdog.companyId,
     watchedIssueId: input.watchdog.issueId,
     materialLeaves,
     waitsByIssueId,
+    acceptanceStates,
   });
   const currentStopSnapshot: TaskWatchdogStopSnapshot = {
     version: 2,
     fingerprint: stopFingerprint,
     materialLeaves,
     waitsByIssueId,
+    ...(acceptanceStates.length > 0 ? { acceptanceStates } : {}),
   };
 
   if (
@@ -949,6 +975,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       commentActivityRows,
       documentActivityRows,
       workProductActivityRows,
+      terminalOperationRows,
     ] = await Promise.all([
       db
         .select({
@@ -1073,10 +1100,28 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           inArray(issueWorkProducts.issueId, subtreeIssueIds),
         ))
         .groupBy(issueWorkProducts.issueId),
+      db
+        .select({
+          issueId: issueTerminalOperations.issueId,
+          acceptanceRevision: issueTerminalOperations.acceptanceRevision,
+          terminalStatus: issueTerminalOperations.terminalStatus,
+        })
+        .from(issueTerminalOperations)
+        .where(and(
+          eq(issueTerminalOperations.companyId, companyId),
+          inArray(issueTerminalOperations.issueId, subtreeIssueIds),
+        ))
+        .orderBy(desc(issueTerminalOperations.createdAt)),
     ]);
     const latestCommentByIssueId = new Map(commentActivityRows.map((row) => [row.issueId, row.latestAt]));
     const latestDocumentByIssueId = new Map(documentActivityRows.map((row) => [row.issueId, row.latestAt]));
     const latestWorkProductByIssueId = new Map(workProductActivityRows.map((row) => [row.issueId, row.latestAt]));
+    const latestTerminalOperationByIssueId = new Map<string, (typeof terminalOperationRows)[number]>();
+    for (const row of terminalOperationRows) {
+      if (!latestTerminalOperationByIssueId.has(row.issueId)) {
+        latestTerminalOperationByIssueId.set(row.issueId, row);
+      }
+    }
 
     const evaluatedAt = new Date();
     const evaluatedAtMs = evaluatedAt.getTime();
@@ -1102,6 +1147,8 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         latestCommentAt: latestCommentByIssueId.get(issue.id) ?? null,
         latestDocumentAt: latestDocumentByIssueId.get(issue.id) ?? null,
         latestWorkProductAt: latestWorkProductByIssueId.get(issue.id) ?? null,
+        acceptanceRevision: latestTerminalOperationByIssueId.get(issue.id)?.acceptanceRevision ?? null,
+        terminalOperationStatus: latestTerminalOperationByIssueId.get(issue.id)?.terminalStatus ?? null,
       })),
       activeRuns: activeRunRows.map((row) => ({
         companyId: row.companyId,

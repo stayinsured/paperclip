@@ -27,6 +27,7 @@ import {
   createIssueSchema,
   updateIssueSchema,
   stalledReviewDecisionSchema,
+  terminalIssueCompletionSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
   checkoutIssueSchema,
@@ -934,6 +935,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/issues/{id}/approvals",
   "POST /api/companies/{companyId}/issues",
   "POST /api/issues/{id}/children",
+  "POST /api/issues/{id}/terminal",
   "POST /api/issues/{id}/interactions",
   "POST /api/issues/{id}/comments",
   "POST /api/companies/{companyId}/issues/{issueId}/attachments",
@@ -2106,6 +2108,27 @@ registry.registerPath({
     403: r.forbidden,
     404: r.notFound,
     409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/terminal",
+  tags: ["issues"],
+  summary: "Atomically persist an agent result and terminal issue status",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(terminalIssueCompletionSchema),
+  },
+  responses: {
+    200: r.ok(),
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
   },
 });
 

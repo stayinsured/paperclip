@@ -497,6 +497,13 @@ Side effects:
 - entering `done` sets `completed_at`
 - entering `cancelled` sets `cancelled_at`
 
+Agent-run terminal completion uses `POST /api/issues/{id}/terminal` with a non-empty result,
+the requested `done` or `cancelled` status, an acceptance revision, an idempotency key, and
+`X-Paperclip-Run-Id`. The result comment, status transition, and terminal receipt commit in one
+transaction. An identical replay returns the stored result; conflicting key reuse returns `409`.
+Typed context failures distinguish missing tasks, expired tokens, wrong-company access, and a
+missing run header.
+
 V1 non-terminal liveness rule:
 
 - agent-owned `todo`, `in_progress`, `in_review`, and `blocked` issues must have a live execution path, an explicit waiting path, or an explicit recovery path

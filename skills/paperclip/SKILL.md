@@ -123,16 +123,23 @@ Before ending any heartbeat, apply this final-disposition checklist:
 When writing issue descriptions or comments, follow the ticket-linking rule in **Comment Style** below.
 
 ```json
-PATCH /api/issues/{issueId}
+POST /api/issues/{issueId}/terminal
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
-{ "status": "done", "comment": "What was done and why." }
+{
+  "status": "done",
+  "result": "What was done, why, and the acceptance evidence.",
+  "acceptanceRevision": "stable acceptance-row or revision identifier",
+  "idempotencyKey": "stable key reused for an identical retry"
+}
 ```
+
+Use this terminal operation for agent-authored `done` or `cancelled` disposition. Keep `PATCH /api/issues/{issueId}` for non-terminal status, assignment, blocker, and progress updates.
 
 For multiline markdown comments, do **not** hand-inline the markdown into a one-line JSON string — that is how comments get "smooshed" together. Use the helper below (or an equivalent `jq --arg` pattern reading from a heredoc/file) so literal newlines survive JSON encoding:
 
 ```bash
-scripts/paperclip-issue-update.sh --issue-id "$PAPERCLIP_TASK_ID" --status done <<'MD'
-Done
+scripts/paperclip-issue-update.sh --issue-id "$PAPERCLIP_TASK_ID" --status in_review <<'MD'
+Ready for review
 
 - Fixed the newline-preserving issue update path
 - Verified the raw stored comment body keeps paragraph breaks

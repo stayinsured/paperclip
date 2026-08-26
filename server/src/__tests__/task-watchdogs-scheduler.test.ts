@@ -229,9 +229,9 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(watchdog?.triggerCount).toBe(1);
   });
 
-  it("does not append duplicate review comments for an already-open same-fingerprint review", async () => {
+  it("does not schedule duplicate recovery for an unchanged blocked state with a live owner", async () => {
     const companyId = await seedCompany();
-    const sourceId = await seedIssue(companyId, { identifier: "WDOG-DUPE", status: "done" });
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-DUPE", status: "blocked" });
     const agentId = await seedAgent(companyId);
     await seedWatchdog(companyId, sourceId, agentId);
     const { service, wakes } = createService();
