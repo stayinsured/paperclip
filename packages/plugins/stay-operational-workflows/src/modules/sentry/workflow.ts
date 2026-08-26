@@ -73,9 +73,9 @@ export async function assertSentryActivationAuthorized(input: {
   readAuthorization: (token: string) => Promise<Parameters<typeof assertLiveSentryAuthorization>[1]>;
 }): Promise<void> {
   assertRuntimeAuthorization(input.config, input.now);
-  await input.verifyExactConfigurationApproval();
   const token = await input.resolveSecret();
   assertLiveSentryAuthorization(input.config, await input.readAuthorization(token));
+  await input.verifyExactConfigurationApproval();
 }
 function prefixFromIdentifier(identifier: string | null): string | null {
   return identifier?.match(/^([A-Z][A-Z0-9]*)-\d+$/)?.[1] ?? null;
@@ -415,11 +415,11 @@ export class SentryWorkflow {
   ): Promise<void> {
     let pollRun = null;
     try {
-      const triageAgentId = await this.controlPlane.resolveTriageAgent(config.companyId);
       assertRuntimeAuthorization(config, this.now());
-      await this.controlPlane.verifyExactConfigurationApproval(config);
       const token = await this.resolveSecret(config, "sentry");
       assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
+      await this.controlPlane.verifyExactConfigurationApproval(config);
+      const triageAgentId = await this.controlPlane.resolveTriageAgent(config.companyId);
       pollRun = await this.repository.claimPollRun(config, this.now(), mode);
       if (!pollRun) {
         output.duplicates += 1;
@@ -427,8 +427,8 @@ export class SentryWorkflow {
       }
       for (let pageIndex = pollRun.pageCount; pageIndex < config.maxPages; pageIndex += 1) {
         assertRuntimeAuthorization(config, this.now());
-        await this.controlPlane.verifyExactConfigurationApproval(config);
         assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
+        await this.controlPlane.verifyExactConfigurationApproval(config);
         const page = await this.sentry.listIssues({
           config,
           token,
@@ -503,8 +503,8 @@ export class SentryWorkflow {
             end: this.now().toISOString(),
             beforeRead: async () => {
               assertRuntimeAuthorization(config, this.now());
-              await this.controlPlane.verifyExactConfigurationApproval(config);
               assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
+              await this.controlPlane.verifyExactConfigurationApproval(config);
             },
           });
           shouldReopen = occurrences >= 3;

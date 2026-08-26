@@ -573,10 +573,10 @@ describe("Sentry and Slack provider boundaries", () => {
       order.push("persist");
     };
     await activate();
-    expect(order).toEqual(["document", "secret", "live", "persist"]);
+    expect(order).toEqual(["secret", "live", "document", "persist"]);
     order.length = 0;
     await expect(activate({ ...live, environment: "production" })).rejects.toThrow(/live Sentry .*target/i);
-    expect(order).toEqual(["document", "secret", "live"]);
+    expect(order).toEqual(["secret", "live"]);
   });
 
   it("keeps polling and Slack disabled with zero provider writes", async () => {
@@ -608,7 +608,7 @@ describe("Sentry and Slack provider boundaries", () => {
       advancePollRun: vi.fn(async (_run, cursor) => { run.nextCursor = cursor; run.pageCount += 1; }),
       completePollRun: vi.fn(), listIssueStates: vi.fn().mockResolvedValue([]), createException: vi.fn(), failPollRun: vi.fn(),
     } as unknown as SentryWorkflowRepository;
-    const controlPlane = { verifyExactConfigurationApproval: vi.fn(async () => { order.push("document"); }), resolveTriageAgent: vi.fn().mockResolvedValue(TRIAGE_AGENT_ID) } as unknown as SentryControlPlanePort;
+    const controlPlane = { verifyExactConfigurationApproval: vi.fn(async () => { order.push("document"); }), resolveTriageAgent: vi.fn(async () => { order.push("triage"); return TRIAGE_AGENT_ID; }) } as unknown as SentryControlPlanePort;
     const live = { principalId: "4534765", scopes: NARROW_SENTRY_SCOPES, organizationId: "4511354603896832", organizationSlug: "stay-ki", projectId: "4511354624540752", projectSlug: "bff", environment: "test" };
     const pages = [{ issues: [], nextCursor: "next:1" }, { issues: [], nextCursor: null }];
     const sentry = { readAuthorization: vi.fn(async () => { order.push("live"); return live; }), listIssues: vi.fn(async () => { order.push("page"); return pages.shift()!; }), countRecentOccurrences: vi.fn() };
@@ -616,7 +616,7 @@ describe("Sentry and Slack provider boundaries", () => {
     const result = await workflow.reconcileCompany({ companyId: COMPANY_ID, mode: "manual", audit: { actorType: "system", actorId: null, runId: null } });
     expect(result).toMatchObject({ pages: 2, exceptions: 0 });
     expect(result).not.toHaveProperty("externalWrites");
-    expect(order).toEqual(["document", "secret", "live", "claim", "document", "live", "page", "document", "live", "page"]);
+    expect(order).toEqual(["secret", "live", "document", "triage", "claim", "live", "document", "page", "live", "document", "page"]);
   });
 
   it("stops live drift before claiming a poll or reading an issue page", async () => {
@@ -624,12 +624,16 @@ describe("Sentry and Slack provider boundaries", () => {
     const claimPollRun = vi.fn();
     const listIssues = vi.fn();
     const createException = vi.fn();
+    const verifyExactConfigurationApproval = vi.fn();
+    const resolveTriageAgent = vi.fn().mockResolvedValue(TRIAGE_AGENT_ID);
     const repository = { listConfigs: vi.fn().mockResolvedValueOnce([config]).mockResolvedValue([]), listIssueStates: vi.fn().mockResolvedValue([]), claimPollRun, createException } as unknown as SentryWorkflowRepository;
-    const controlPlane = { verifyExactConfigurationApproval: vi.fn(), resolveTriageAgent: vi.fn().mockResolvedValue(TRIAGE_AGENT_ID) } as unknown as SentryControlPlanePort;
+    const controlPlane = { verifyExactConfigurationApproval, resolveTriageAgent } as unknown as SentryControlPlanePort;
     const sentry = { readAuthorization: vi.fn().mockResolvedValue({ principalId: "4534765", scopes: NARROW_SENTRY_SCOPES, organizationId: "4511354603896832", organizationSlug: "stay-ki", projectId: "4511354624540752", projectSlug: "bff", environment: "production" }), listIssues, countRecentOccurrences: vi.fn() };
     const workflow = new SentryWorkflow(repository, controlPlane, sentry, {} as never, async () => "not-persisted", () => new Date("2026-08-07T12:00:00.000Z"));
     const result = await workflow.reconcileCompany({ companyId: COMPANY_ID, audit: { actorType: "system", actorId: null, runId: null } });
     expect(result.exceptions).toBe(1);
+    expect(verifyExactConfigurationApproval).not.toHaveBeenCalled();
+    expect(resolveTriageAgent).not.toHaveBeenCalled();
     expect(claimPollRun).not.toHaveBeenCalled();
     expect(listIssues).not.toHaveBeenCalled();
     expect(createException).toHaveBeenCalledTimes(1);
