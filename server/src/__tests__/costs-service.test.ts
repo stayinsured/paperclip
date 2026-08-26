@@ -620,6 +620,34 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     });
   });
 
+  it("hydrates cohort outcomes from persisted completion and reopen lifecycle evidence", async () => {
+    const companyId = randomUUID(), agentId = randomUUID(), projectId = randomUUID();
+    const shadowIssueId = randomUUID(), controlIssueId = randomUUID(), shadowRunId = randomUUID(), controlRunId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Routing Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Routing Project", status: "active" });
+    await db.insert(issues).values([
+      { id: shadowIssueId, companyId, projectId, assigneeAgentId: agentId, title: "Shadow", status: "done", priority: "high", issueNumber: 11, identifier: "RTE-11", completedAt: new Date("2026-08-03T00:00:00.000Z") },
+      { id: controlIssueId, companyId, projectId, assigneeAgentId: agentId, title: "Control", status: "done", priority: "high", issueNumber: 12, identifier: "RTE-12", completedAt: new Date("2026-08-03T00:00:00.000Z") },
+    ]);
+    const decision = { mode: "shadow", taskClass: "read_only_check", proposedLane: "economy", appliedLane: "strongest", decisionReason: "routine_candidate", escalationReason: null, profileFallbackReason: null };
+    await db.insert(heartbeatRuns).values([
+      { id: shadowRunId, companyId, agentId, status: "succeeded", startedAt: new Date("2026-08-02T11:59:00.000Z"), finishedAt: new Date("2026-08-02T12:00:00.000Z"), contextSnapshot: { issueId: shadowIssueId }, resultJson: { paperclipRoutingDecision: decision }, usageJson: { model: "gpt-5" } },
+      { id: controlRunId, companyId, agentId, status: "succeeded", startedAt: new Date("2026-08-02T12:59:00.000Z"), finishedAt: new Date("2026-08-02T13:00:00.000Z"), contextSnapshot: { issueId: controlIssueId }, usageJson: { model: "gpt-5" } },
+    ]);
+    await db.insert(costEvents).values([
+      { companyId, agentId, heartbeatRunId: shadowRunId, provider: "openai", biller: "openai", billingType: "metered_api", model: "gpt-5", inputTokens: 40, cachedInputTokens: 50, outputTokens: 10, costCents: 25, occurredAt: new Date("2026-08-02T12:00:00.000Z") },
+      { companyId, agentId, heartbeatRunId: controlRunId, provider: "openai", biller: "openai", billingType: "metered_api", model: "gpt-5", inputTokens: 40, cachedInputTokens: 50, outputTokens: 10, costCents: 25, occurredAt: new Date("2026-08-02T13:00:00.000Z") },
+    ]);
+    await db.insert(activityLog).values({ companyId, actorType: "user", actorId: "board", action: "issue.updated", entityType: "issue", entityId: shadowIssueId, details: { reopened: true, reopenedFrom: "done" } });
+    const report = await costs.shadowRoutingCohort(companyId, { from: new Date("2026-08-01T00:00:00.000Z"), toExclusive: new Date("2026-08-15T00:00:00.000Z") });
+    expect(report.outcomes.firstPassAcceptance.shadow).toEqual({ count: 0, total: 1, rate: 0 });
+    expect(report.outcomes.firstPassAcceptance.control).toEqual({ count: 1, total: 1, rate: 1 });
+    expect(report.outcomes.reopen.shadow).toEqual({ count: 1, total: 1, rate: 1 });
+    expect(report.outcomes.reopen.control).toEqual({ count: 0, total: 1, rate: 0 });
+    expect(report.outcomes.verdict).toBe("block");
+  });
+
   it("aggregates cost event sums above int32 without raising Postgres integer overflow", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

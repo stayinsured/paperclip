@@ -99,6 +99,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { resolveTelemetryModelLabel } from "./token-telemetry.js";
+import { classifyShadowPilot, decideShadowRouting, parsePilot, persistShadowRoutingDecision } from "./task-aware-routing.js";
 import { pluginExecutionAttemptService, PLUGIN_EXECUTION_RUNTIME_MS } from "./plugin-execution-attempts.js";
 import { evaluateExecutionAdmission, type ExecutionAdmissionResult } from "./execution-admission.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
@@ -4217,13 +4218,21 @@ export function shouldDeferFollowupWakeForSameIssue(input: {
   activeRunStatus: string | null | undefined;
   isSameExecutionAgent: boolean;
   wakeCommentId: string | null | undefined;
+  wakeReason?: string | null;
+  requestedByActorType?: string | null;
   forceFreshSession: boolean;
 }) {
-  // A comment follow-up or explicit fresh-session wake needs a new run boundary.
+  // Explicit fresh-session requests always need a new run boundary. Human
+  // comments and mentions do too: they may carry new instructions that an
+  // already-running adapter has not seen. Ordinary agent/system comments are
+  // status chatter by default and can be folded into the active issue run;
+  // agents that need another agent to act must use an explicit mention.
   if (!input.isSameExecutionAgent) return false;
   if (input.activeRunStatus !== "running") return false;
-  if (input.wakeCommentId) return true;
   if (input.forceFreshSession) return true;
+  if (!input.wakeCommentId) return false;
+  if (input.wakeReason === "issue_comment_mentioned") return true;
+  if (input.requestedByActorType === "user" || input.requestedByActorType === "board") return true;
   return false;
 }
 
@@ -5253,9 +5262,14 @@ export function shouldAutoCheckoutIssueForWake(input: {
 function shouldQueueFollowupForRunningIssueWake(input: {
   contextSnapshot: Record<string, unknown> | null | undefined;
   wakeCommentId: string | null;
+  requestedByActorType?: string | null;
 }) {
-  if (input.wakeCommentId) return true;
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
+  if (input.wakeCommentId) {
+    return wakeReason === "issue_comment_mentioned" ||
+      input.requestedByActorType === "user" ||
+      input.requestedByActorType === "board";
+  }
   return Boolean(wakeReason && RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP.has(wakeReason));
 }
 
@@ -14564,6 +14578,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await executeResponseOnlySkillTestRun({ run, agent, issueId: issueId!, snapshot: responseOnlySnapshot });
       return;
     }
+    const serverRoutingPilot = classifyShadowPilot({
+      issue: issueContext,
+      wakeReason: readNonEmptyString(context.wakeReason),
+      scheduledRetryAttempt: run.scheduledRetryAttempt,
+    });
+    // This field is server-owned. Never enroll a run from caller-supplied adapter context.
+    if (serverRoutingPilot) context.paperclipRoutingPilot = serverRoutingPilot;
+    else {
+      delete context.paperclipRoutingPilot;
+      delete context.paperclipRoutingDecision;
+    }
     const wakeCommentId = deriveCommentId(context, null);
     const wakeCommentContext =
       issueContext && wakeCommentId
@@ -15069,6 +15094,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
         "Failed to resolve adapter model profiles; falling back to primary adapter config",
       );
+    }
+    const routingPilot = parsePilot(context.paperclipRoutingPilot);
+    let shadowRoutingDecision: ReturnType<typeof decideShadowRouting> = null;
+    if (routingPilot) {
+      // Resolve cheap only for shadow eligibility; never apply it to adapter config or session state.
+      const cheap = resolveModelProfileApplication({
+        adapterModelProfiles,
+        agentRuntimeConfig: agent.runtimeConfig,
+        issueModelProfile: "cheap",
+        contextSnapshot: null,
+        profileResolutionFallbackReason,
+      });
+      shadowRoutingDecision = decideShadowRouting(routingPilot, cheap.fallbackReason);
+      context.paperclipRoutingDecision = shadowRoutingDecision;
     }
     const modelProfileApplication = resolveModelProfileApplication({
       adapterModelProfiles,
@@ -16913,10 +16952,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         mergeRunStopMetadataForAgent(agent, outcome, {
           resultJson: mergeModelProfileRunMetadata(
             mergeAdapterRecoveryMetadata({
-              resultJson: {
+              resultJson: persistShadowRoutingDecision({
                 ...parseObject(adapterResult.resultJson),
                 configFreshness: configFreshnessResultMetadata,
-              },
+              }, shadowRoutingDecision),
               errorFamily: adapterResult.errorFamily ?? null,
               retryNotBefore: adapterResult.retryNotBefore ?? null,
             }),
@@ -19102,10 +19141,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             activeRunStatus: activeExecutionRun.status,
             isSameExecutionAgent,
             wakeCommentId,
+            wakeReason: readNonEmptyString(enrichedContextSnapshot.wakeReason) ?? reason,
+            requestedByActorType: opts.requestedByActorType ?? null,
             forceFreshSession: enrichedContextSnapshot.forceFreshSession === true,
           });
           const shouldQueueFollowupForRunningWake =
-            shouldQueueFollowupForRunningIssueWake({ contextSnapshot: enrichedContextSnapshot, wakeCommentId }) &&
+            shouldQueueFollowupForRunningIssueWake({
+              contextSnapshot: enrichedContextSnapshot,
+              wakeCommentId,
+              requestedByActorType: opts.requestedByActorType ?? null,
+            }) &&
             activeExecutionRun.status === "running" &&
             isSameExecutionAgent;
           const availableActiveExecutionRun = isSameExecutionAgent
@@ -19456,7 +19501,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const shouldQueueFollowupForRunningWake =
       Boolean(sameScopeRunningRun) &&
       !sameScopeQueuedRun &&
-      shouldQueueFollowupForRunningIssueWake({ contextSnapshot: enrichedContextSnapshot, wakeCommentId });
+      shouldQueueFollowupForRunningIssueWake({
+        contextSnapshot: enrichedContextSnapshot,
+        wakeCommentId,
+        requestedByActorType: opts.requestedByActorType ?? null,
+      });
     const rawCoalescedTarget =
       sameScopeQueuedRun ??
       sameScopeScheduledRetryRun ??

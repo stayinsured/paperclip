@@ -1,3 +1,4 @@
+export { evaluateSessionReusePilotSchema, type EvaluateSessionReusePilot } from "./validators/issue.js";
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
   decisionEffectStalenessSchema,
