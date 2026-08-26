@@ -41,9 +41,11 @@ const BROAD_SENTRY_SCOPES = [
   "event:read",
   "event:write",
   "member:admin",
+  "member:invite",
   "member:read",
   "member:write",
   "org:admin",
+  "org:integrations",
   "org:read",
   "org:write",
   "project:admin",
@@ -365,7 +367,7 @@ describe("Sentry workflow contracts", () => {
     });
     await expect(control.verifyExactConfigurationApproval(config)).resolves.toBeUndefined();
   });
-  it("binds the full fingerprint, principal, target, secret metadata, and complete 18-scope set", () => {
+  it("binds the full fingerprint, principal, target, secret metadata, and complete 20-scope set", () => {
     const config = activeConfig(false, BROAD_SENTRY_SCOPES);
     expect(config.exactConfigurationApproval?.configurationFingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(config.sentry.broadScopeException).toMatchObject({
@@ -384,7 +386,7 @@ describe("Sentry workflow contracts", () => {
     expect(() => assertLiveSentryAuthorization(config, live)).not.toThrow();
     for (const mismatch of [
       { ...live, principalId: "wrong" },
-      { ...live, scopes: [...BROAD_SENTRY_SCOPES, "member:invite"] },
+      { ...live, scopes: [...BROAD_SENTRY_SCOPES, "unexpected:scope"] },
       { ...live, organizationId: "wrong" },
       { ...live, projectSlug: "wrong" },
       { ...live, environment: "production" },
@@ -396,7 +398,7 @@ describe("Sentry workflow contracts", () => {
       (value: SentryPilotConfig) => { value.sentry.broadScopeException!.authorizationRevisionId = "changed"; },
       (value: SentryPilotConfig) => { (value.sentry.broadScopeException as unknown as Record<string, unknown>).secretBindingPath = "changed.path"; },
       (value: SentryPilotConfig) => { (value.sentry.broadScopeException as unknown as Record<string, unknown>).environment = "changed"; },
-      (value: SentryPilotConfig) => { value.sentry.broadScopeException!.observedScopes = [...exception.observedScopes, "member:invite"].sort(); },
+      (value: SentryPilotConfig) => { value.sentry.broadScopeException!.observedScopes = [...exception.observedScopes, "unexpected:scope"].sort(); },
     ]) {
       const changed = structuredClone(config);
       mutate(changed);
@@ -416,7 +418,7 @@ describe("Sentry workflow contracts", () => {
       (value: SentryPilotConfig) => { (value.sentry.broadScopeException as unknown as Record<string, unknown>).secretBindingPath = "changed.path"; },
       (value: SentryPilotConfig) => { value.sentry.broadScopeException!.projectId = "999"; },
       (value: SentryPilotConfig) => { (value.sentry.broadScopeException as unknown as Record<string, unknown>).environment = "production"; },
-      (value: SentryPilotConfig) => { value.sentry.broadScopeException!.observedScopes = [...exception.observedScopes, "member:invite"].sort(); },
+      (value: SentryPilotConfig) => { value.sentry.broadScopeException!.observedScopes = [...exception.observedScopes, "unexpected:scope"].sort(); },
     ]) {
       const changed = structuredClone(config);
       mutate(changed);
