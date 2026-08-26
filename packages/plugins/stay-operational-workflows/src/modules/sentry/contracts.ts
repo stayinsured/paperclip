@@ -106,26 +106,6 @@ export interface SentryPilotConfig {
   exactConfigurationApproval: ExactConfigurationApproval | null;
 }
 
-export interface SanitizedSentryIssue {
-  stableIssueId: string;
-  shortId: string;
-  projectId: string;
-  projectSlug: string;
-  environment: "test";
-  title: string;
-  providerUrl: string;
-  firstSeen: string;
-  lastSeen: string;
-  count: number;
-  release: string | null;
-  priority: string;
-  level: string;
-  category: string;
-  platform: string;
-  fingerprintSummary: string;
-  regressed: boolean;
-}
-
 export interface FrozenSentrySnapshot {
   stableIssueId: string;
   organizationId: string;
@@ -145,7 +125,7 @@ export interface FrozenSentrySnapshot {
 }
 
 export interface SentryIssuePage {
-  issues: SanitizedSentryIssue[];
+  issues: FrozenSentrySnapshot[];
   nextCursor: string | null;
 }
 
@@ -316,6 +296,15 @@ function assertExactScopes(actual: string[], required: readonly string[], provid
   }
 }
 
+function assertRequiredScopes(actual: string[], required: readonly string[], provider: string): void {
+  if (required.some((scope) => !actual.includes(scope))) {
+    throw new SentryWorkflowConfigError(
+      "required_read_scope_missing",
+      `${provider} scopes must include ${required.join(", ")}`,
+    );
+  }
+}
+
 export function parseSentryPilotConfig(input: Record<string, unknown>): SentryPilotConfig {
   const sentryInput = record(input.sentry, "sentry");
   const slackInput = record(input.slack, "slack");
@@ -367,11 +356,14 @@ export function parseSentryPilotConfig(input: Record<string, unknown>): SentryPi
     throw new SentryWorkflowConfigError("wrong_environment", "Only the approved Sentry test environment is allowed");
   }
   if (pollingEnabled) {
-    if (!config.sentry.tokenRef || !sentryProof || !broadScopeException || !approval?.authorizedCapabilities.includes("sentry.poll")) {
+    if (!config.sentry.tokenRef || !sentryProof || !approval?.authorizedCapabilities.includes("sentry.poll")) {
       throw new SentryWorkflowConfigError("sentry_activation_unproven", "Sentry polling requires a token ref, identity proof, and exact approval");
     }
-    assertExactScopes(sentryProof.scopes, REQUIRED_SENTRY_SCOPES, "Sentry");
-    assertExactScopes(broadScopeException.observedScopes, REQUIRED_SENTRY_SCOPES, "Sentry broad-scope exception");
+    assertRequiredScopes(sentryProof.scopes, REQUIRED_SENTRY_SCOPES, "Sentry");
+    if (sentryProof.scopes.length > REQUIRED_SENTRY_SCOPES.length && !broadScopeException) {
+      throw new SentryWorkflowConfigError("broad_scope_exception_required", "Sentry credentials with additional scopes require an exact revision-bound exception");
+    }
+    if (broadScopeException) assertRequiredScopes(broadScopeException.observedScopes, REQUIRED_SENTRY_SCOPES, "Sentry broad-scope exception");
   }
   if (slackEnabled) {
     if (
@@ -408,6 +400,18 @@ export function configurationFingerprint(config: SentryPilotConfig): string {
       principalId: config.sentry.identityProof?.principalId ?? null,
       scopes: config.sentry.identityProof?.scopes ?? [],
       tokenRef: config.sentry.tokenRef,
+      broadScopeException: config.sentry.broadScopeException ? {
+        authorizationRevisionId: config.sentry.broadScopeException.authorizationRevisionId,
+        principalId: config.sentry.broadScopeException.principalId,
+        secretBinding: config.sentry.broadScopeException.secretBinding,
+        secretBindingPath: config.sentry.broadScopeException.secretBindingPath,
+        organizationId: config.sentry.broadScopeException.organizationId,
+        organizationSlug: config.sentry.broadScopeException.organizationSlug,
+        projectId: config.sentry.broadScopeException.projectId,
+        projectSlug: config.sentry.broadScopeException.projectSlug,
+        environment: config.sentry.broadScopeException.environment,
+        observedScopes: config.sentry.broadScopeException.observedScopes,
+      } : null,
     },
     slack: {
       teamId: config.slack.teamId,
@@ -425,7 +429,8 @@ export function configurationFingerprint(config: SentryPilotConfig): string {
 
 export function assertRuntimeAuthorization(config: SentryPilotConfig, now: Date): void {
   const approval = config.exactConfigurationApproval;
-  if (!approval || approval.configurationFingerprint !== configurationFingerprint(config)) {
+  const fingerprint = configurationFingerprint(config);
+  if (!approval || approval.configurationFingerprint !== fingerprint) {
     throw new SentryWorkflowConfigError("stale_configuration_approval", "The accepted configuration fingerprint is missing or stale");
   }
   if (config.pollingEnabled && (!config.sentry.identityProof || Date.parse(config.sentry.identityProof.expiresAt) <= now.getTime())) {
@@ -434,17 +439,27 @@ export function assertRuntimeAuthorization(config: SentryPilotConfig, now: Date)
   if (config.pollingEnabled) {
     const exception = config.sentry.broadScopeException;
     const proof = config.sentry.identityProof;
-    if (!exception || !proof
-      || exception.authorizationRevisionId !== approval.revisionId
+    if (!proof) {
+      throw new SentryWorkflowConfigError("sentry_identity_expired", "The Sentry identity proof is missing or expired");
+    }
+    assertRequiredScopes(proof.scopes, REQUIRED_SENTRY_SCOPES, "Sentry");
+    if (proof.scopes.length > REQUIRED_SENTRY_SCOPES.length && !exception) {
+      throw new SentryWorkflowConfigError("broad_scope_exception_required", "The current broad Sentry credential lacks an exact exception");
+    }
+    if (exception && (
+      exception.authorizationRevisionId !== approval.revisionId
+      || exception.configurationFingerprint !== fingerprint
       || exception.configurationFingerprint !== approval.configurationFingerprint
       || exception.principalId !== proof.principalId
       || JSON.stringify(exception.secretBinding) !== JSON.stringify(config.sentry.tokenRef)
+      || exception.secretBindingPath !== "sentry.sentry.tokenRef"
       || exception.organizationId !== config.sentry.organizationId
       || exception.organizationSlug !== config.sentry.organizationSlug
       || exception.projectId !== config.sentry.projectId
       || exception.projectSlug !== config.sentry.projectSlug
       || exception.environment !== config.sentry.environment
-      || exception.observedScopes.join("\u001f") !== proof.scopes.join("\u001f")) {
+      || exception.observedScopes.join("\u001f") !== proof.scopes.join("\u001f")
+    )) {
       throw new SentryWorkflowConfigError("broad_scope_exception_mismatch", "The Sentry broad-scope exception does not exactly match the current authorization");
     }
   }
@@ -454,43 +469,51 @@ export function assertRuntimeAuthorization(config: SentryPilotConfig, now: Date)
 }
 
 export function assertLiveSentryAuthorization(config: SentryPilotConfig, live: LiveSentryAuthorization): void {
-  const exception = config.sentry.broadScopeException;
+  const proof = config.sentry.identityProof;
   const scopes = [...new Set(live.scopes)].sort();
-  if (!exception
-    || live.principalId !== exception.principalId
-    || scopes.join("\u001f") !== exception.observedScopes.join("\u001f")
-    || live.organizationId !== exception.organizationId
-    || live.organizationSlug !== exception.organizationSlug
-    || live.projectId !== exception.projectId
-    || live.projectSlug !== exception.projectSlug
-    || live.environment !== exception.environment) {
-    throw new SentryWorkflowConfigError("live_sentry_authorization_mismatch", "Live Sentry identity, scopes, or exact target drifted from the authorized exception");
+  if (!proof
+    || live.principalId !== proof.principalId
+    || scopes.join("\u001f") !== proof.scopes.join("\u001f")
+    || live.organizationId !== config.sentry.organizationId
+    || live.organizationSlug !== config.sentry.organizationSlug
+    || live.projectId !== config.sentry.projectId
+    || live.projectSlug !== config.sentry.projectSlug
+    || live.environment !== config.sentry.environment) {
+
+    throw new SentryWorkflowConfigError("live_sentry_authorization_mismatch", "Live Sentry identity, complete scopes, or exact target drifted from the authorized configuration");
   }
 }
+export interface SentryAllowlistedObservation {
+  stableIssueId: string;
+  status: FrozenSentrySnapshot["status"];
+  level: FrozenSentrySnapshot["level"];
+  firstSeen: string;
+  lastSeen: string;
+  aggregateEventCount: number;
+  providerOccurrenceTimestamp: string;
+}
 
-export function freezeSentrySnapshot(config: SentryPilotConfig, issue: SanitizedSentryIssue, processedAt: Date): FrozenSentrySnapshot {
+export function freezeSentrySnapshot(config: SentryPilotConfig, issue: SentryAllowlistedObservation, processedAt: Date): FrozenSentrySnapshot {
   const stableIdentity = [config.companyId, config.sentry.organizationId, config.sentry.projectId, issue.stableIssueId].join(":");
   const correlationKey = createHash("sha256").update(stableIdentity).digest("hex");
-  const allowedLevels = ["fatal", "error", "warning", "info", "debug"] as const;
-  return {
+  return Object.freeze({
     stableIssueId: issue.stableIssueId,
     organizationId: config.sentry.organizationId,
     projectId: config.sentry.projectId,
     environment: config.sentry.environment,
-    status: issue.regressed ? "regressed" : "unresolved",
-    level: (allowedLevels as readonly string[]).includes(issue.level) ? issue.level as FrozenSentrySnapshot["level"] : "unknown",
+    status: issue.status,
+    level: issue.level,
     firstSeen: issue.firstSeen,
     lastSeen: issue.lastSeen,
-    aggregateEventCount: issue.count,
-    providerOccurrenceTimestamp: issue.lastSeen,
+    aggregateEventCount: issue.aggregateEventCount,
+    providerOccurrenceTimestamp: issue.providerOccurrenceTimestamp,
     sanitizerVersion: "sentry-frozen-allowlist-v2",
     policyVersion: config.policyVersion,
-    dedupeKey: createHash("sha256").update([stableIdentity, issue.lastSeen, issue.count].join("\u001f")).digest("hex"),
+    dedupeKey: createHash("sha256").update([stableIdentity, issue.lastSeen, issue.aggregateEventCount].join("\u001f")).digest("hex"),
     correlationKey,
     processedAt: processedAt.toISOString(),
-  };
+  });
 }
-
 export function stableSentryIdentity(config: SentryPilotConfig, stableIssueId: string): string {
   return [config.companyId, config.sentry.organizationId, config.sentry.projectId, stableIssueId].join(":");
 }
@@ -501,31 +524,6 @@ export function notificationIdentity(config: SentryPilotConfig, stableIssueId: s
     .digest("hex");
 }
 
-export function sanitizeSentryTitle(value: unknown): string {
-  const source = typeof value === "string" ? value : "Untitled Sentry issue";
-  let sanitized = source.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-  for (const pattern of PROHIBITED_TEXT) sanitized = sanitized.replace(pattern, "[redacted]");
-  return sanitized.slice(0, 180) || "Untitled Sentry issue";
-}
-
-function safeProviderUrl(value: unknown, organizationSlug: string): string {
-  if (typeof value !== "string") throw new SentryWorkflowConfigError("invalid_source_schema", "Sentry permalink is missing");
-  const url = new URL(value);
-  const organizationHost = `${organizationSlug}.sentry.io`;
-  const globalOrganizationPath = `/organizations/${organizationSlug}/issues/`;
-  if (
-    url.protocol !== "https:"
-    || url.username
-    || url.password
-    || !url.pathname.includes("/issues/")
-    || (url.hostname !== organizationHost && (url.hostname !== "sentry.io" || !url.pathname.includes(globalOrganizationPath)))
-  ) {
-    throw new SentryWorkflowConfigError("wrong_sentry_scope", "Sentry permalink does not match the configured organization");
-  }
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
 
 function safeDate(value: unknown, field: string): string {
   if (typeof value !== "string") throw new SentryWorkflowConfigError("invalid_source_schema", `${field} is missing`);
@@ -542,57 +540,41 @@ function safeAggregateCount(value: unknown): number {
   return count;
 }
 
-function safeClassification(value: unknown, fallback: string): string {
-  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,80}$/.test(value)) return fallback;
-  return value;
-}
 
-function safeRelease(value: unknown): string | null {
-  if (value == null) return null;
-  if (typeof value !== "string" || !/^[A-Za-z0-9._:+-]{1,120}$/.test(value)) return null;
-  return value;
-}
-
-export function sanitizeSentryIssue(raw: unknown, config: SentryPilotConfig): SanitizedSentryIssue {
+export function sanitizeSentryIssue(raw: unknown, config: SentryPilotConfig, processedAt: Date = new Date()): FrozenSentrySnapshot {
   const input = record(raw, "Sentry issue");
   const project = record(input.project, "Sentry issue project");
   if (String(project.id) !== config.sentry.projectId || project.slug !== config.sentry.projectSlug) {
     throw new SentryWorkflowConfigError("wrong_sentry_scope", "Sentry returned an issue outside the approved project");
   }
   const observedEnvironment = input.matchingEventEnvironment;
-  if (observedEnvironment != null && observedEnvironment !== config.sentry.environment) {
+  if (observedEnvironment !== config.sentry.environment) {
     throw new SentryWorkflowConfigError("wrong_environment", "Sentry returned an issue from a prohibited environment");
   }
   const statusDetails = input.statusDetails && typeof input.statusDetails === "object"
     ? input.statusDetails as Record<string, unknown>
     : {};
-  const substatus = safeClassification(input.substatus, "unknown");
-  return {
+  const substatus = typeof input.substatus === "string" ? input.substatus : "unknown";
+  const rawStatus = typeof input.status === "string" ? input.status : "unknown";
+  const status: FrozenSentrySnapshot["status"] = rawStatus === "regressed" || substatus === "regressed" || statusDetails.regressed === true
+    ? "regressed"
+    : rawStatus === "unresolved" || rawStatus === "resolved" ? rawStatus : "unknown";
+  const allowedLevels = ["fatal", "error", "warning", "info", "debug"] as const;
+  const level: FrozenSentrySnapshot["level"] = typeof input.level === "string" && (allowedLevels as readonly string[]).includes(input.level)
+    ? input.level as FrozenSentrySnapshot["level"]
+    : "unknown";
+  const firstSeen = safeDate(input.firstSeen, "firstSeen");
+  const lastSeen = safeDate(input.lastSeen, "lastSeen");
+  const aggregateEventCount = safeAggregateCount(input.count);
+  return freezeSentrySnapshot(config, {
     stableIssueId: requiredString(input.id, "Sentry issue id", /^\d{1,30}$/),
-    shortId: requiredString(input.shortId, "Sentry short id", /^[A-Z0-9_-]{1,80}$/),
-    projectId: config.sentry.projectId,
-    projectSlug: config.sentry.projectSlug,
-    environment: "test",
-    title: sanitizeSentryTitle(input.title ?? (input.metadata as Record<string, unknown> | undefined)?.title),
-    providerUrl: safeProviderUrl(input.permalink, config.sentry.organizationSlug),
-    firstSeen: safeDate(input.firstSeen, "firstSeen"),
-    lastSeen: safeDate(input.lastSeen, "lastSeen"),
-    count: safeAggregateCount(input.count),
-    release: safeRelease(
-      (input.firstRelease && typeof input.firstRelease === "object"
-        ? (input.firstRelease as Record<string, unknown>).version
-        : undefined)
-      ?? (input.lastRelease && typeof input.lastRelease === "object"
-        ? (input.lastRelease as Record<string, unknown>).version
-        : undefined),
-    ),
-    priority: safeClassification(input.priority, "unknown"),
-    level: safeClassification(input.level, "unknown"),
-    category: safeClassification(input.issueCategory ?? input.type, "unknown"),
-    platform: safeClassification(input.platform ?? project.platform, "unknown"),
-    fingerprintSummary: `sha256:${createHash("sha256").update(String(input.id)).digest("hex").slice(0, 16)}`,
-    regressed: input.status === "regressed" || substatus === "regressed" || statusDetails.regressed === true,
-  };
+    status,
+    level,
+    firstSeen,
+    lastSeen,
+    aggregateEventCount,
+    providerOccurrenceTimestamp: lastSeen,
+  }, processedAt);
 }
 
 const PROPOSAL_KEYS = [
@@ -629,7 +611,7 @@ function assertSafeTextTree(value: unknown, path = "proposal"): void {
   }
 }
 
-export function parseRemediationProposal(body: string, source: SanitizedSentryIssue | FrozenSentrySnapshot): RemediationProposal {
+export function parseRemediationProposal(body: string, source: FrozenSentrySnapshot): RemediationProposal {
   if (body.length > 60_000) throw new SentryWorkflowConfigError("invalid_proposal", "Proposal document is too large");
   let parsed: unknown;
   try {
@@ -675,21 +657,20 @@ export function parseRemediationProposal(body: string, source: SanitizedSentryIs
 }
 
 export function buildSlackSummary(input: {
-  source: SanitizedSentryIssue | FrozenSentrySnapshot;
+  source: FrozenSentrySnapshot;
   proposal: RemediationProposal;
   paperclipIssueUrl: string;
 }): string {
   const impact = input.proposal.customer_impact.confirmed.length > 0
     ? input.proposal.customer_impact.confirmed.join("; ").slice(0, 500)
     : "Impact is not confirmed.";
-  const count = "aggregateEventCount" in input.source ? input.source.aggregateEventCount : input.source.count;
   const text = [
     "Sentry issue: " + input.source.stableIssueId,
-    `Severity:  ( confidence)`,
+    `Severity: ${input.proposal.severity.level} (${input.proposal.severity.confidence} confidence)`,
     "Project ID: " + input.source.projectId,
     "First seen: " + input.source.firstSeen,
     "Last seen: " + input.source.lastSeen,
-    "Count: " + count,
+    "Count: " + input.source.aggregateEventCount,
     "Impact: " + impact,
     "Paperclip triage: " + input.paperclipIssueUrl,
     "Approval is in Paperclip.",

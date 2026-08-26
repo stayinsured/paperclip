@@ -17,7 +17,7 @@ import {
   stableSentryIdentity,
   SentryWorkflowConfigError,
   type RemediationProposal,
-  type SanitizedSentryIssue,
+  type FrozenSentrySnapshot,
   type SentryPilotConfig,
 } from "./contracts.js";
 import { ProviderRequestError, type SentryReadPort, type SlackNotifyPort } from "./providers.js";
@@ -35,15 +35,14 @@ export interface SentryWorkflowResult {
   remediationCreated: number;
   duplicates: number;
   exceptions: number;
-  externalWrites: 0;
 }
 
 export interface SentryControlPlanePort {
   verifyExactConfigurationApproval(config: SentryPilotConfig): Promise<void>;
   resolveTriageAgent(companyId: string): Promise<string>;
   findTriageIssue(config: SentryPilotConfig, originId: string): Promise<Issue | null>;
-  createTriageIssue(config: SentryPilotConfig, source: SanitizedSentryIssue, triageAgentId: string, originId: string): Promise<Issue>;
-  updateTriageIssue(issue: Issue, source: SanitizedSentryIssue, triageAgentId: string, reopen: boolean): Promise<Issue>;
+  createTriageIssue(config: SentryPilotConfig, source: FrozenSentrySnapshot, triageAgentId: string, originId: string): Promise<Issue>;
+  updateTriageIssue(issue: Issue, source: FrozenSentrySnapshot, triageAgentId: string, reopen: boolean): Promise<Issue>;
   requestTriage(issue: Issue): Promise<void>;
   getIssue(issueId: string, companyId: string): Promise<Issue | null>;
   getProposal(issueId: string, companyId: string): Promise<IssueDocument | null>;
@@ -66,6 +65,18 @@ export interface SentryControlPlanePort {
   }): Promise<Issue>;
 }
 
+export async function assertSentryActivationAuthorized(input: {
+  config: SentryPilotConfig;
+  now: Date;
+  verifyExactConfigurationApproval: () => Promise<void>;
+  resolveSecret: () => Promise<string>;
+  readAuthorization: (token: string) => Promise<Parameters<typeof assertLiveSentryAuthorization>[1]>;
+}): Promise<void> {
+  assertRuntimeAuthorization(input.config, input.now);
+  await input.verifyExactConfigurationApproval();
+  const token = await input.resolveSecret();
+  assertLiveSentryAuthorization(input.config, await input.readAuthorization(token));
+}
 function prefixFromIdentifier(identifier: string | null): string | null {
   return identifier?.match(/^([A-Z][A-Z0-9]*)-\d+$/)?.[1] ?? null;
 }
@@ -75,7 +86,7 @@ function triageUrl(issue: Issue): string {
   return prefix && issue.identifier ? `/${prefix}/issues/${issue.identifier}` : `/issues/${issue.id}`;
 }
 
-function triageDescription(source: SanitizedSentryIssue): string {
+function triageDescription(source: FrozenSentrySnapshot): string {
   return [
     "## Sentry triage input",
     "",
@@ -87,9 +98,9 @@ function triageDescription(source: SanitizedSentryIssue): string {
     "Normalized level: " + source.level,
     "First seen: " + source.firstSeen,
     "Last seen: " + source.lastSeen,
-    "Aggregate count: " + source.count,
-    "Status: " + (source.regressed ? "regressed" : "unresolved"),
-    "Provider title, URL, release, fingerprint, and raw content were discarded before persistence.",
+    "Aggregate count: " + source.aggregateEventCount,
+    "Status: " + source.status,
+    "Sanitizer / policy: " + source.sanitizerVersion + " / " + source.policyVersion,
   ].join("\n");
 }
 
@@ -159,14 +170,14 @@ export class PluginSentryControlPlane implements SentryControlPlanePort {
     return issues[0] ?? null;
   }
 
-  createTriageIssue(config: SentryPilotConfig, source: SanitizedSentryIssue, triageAgentId: string, originId: string): Promise<Issue> {
+  createTriageIssue(config: SentryPilotConfig, source: FrozenSentrySnapshot, triageAgentId: string, originId: string): Promise<Issue> {
     return this.ctx.issues.create({
       companyId: config.companyId,
       projectId: config.projectId,
       title: "[Sentry " + source.stableIssueId + "] triage",
       description: triageDescription(source),
       status: "todo",
-      priority: source.priority === "high" || source.priority === "critical" ? "high" : "medium",
+      priority: source.level === "fatal" ? "critical" : source.level === "error" ? "high" : "medium",
       assigneeAgentId: triageAgentId,
       originKind: SENTRY_TRIAGE_ORIGIN_KIND,
       originId,
@@ -175,7 +186,7 @@ export class PluginSentryControlPlane implements SentryControlPlanePort {
     });
   }
 
-  updateTriageIssue(issue: Issue, source: SanitizedSentryIssue, triageAgentId: string, reopen: boolean): Promise<Issue> {
+  updateTriageIssue(issue: Issue, source: FrozenSentrySnapshot, triageAgentId: string, reopen: boolean): Promise<Issue> {
     return this.ctx.issues.update(
       issue.id,
       {
@@ -336,7 +347,6 @@ function freshResult(companyId: string): SentryWorkflowResult {
     remediationCreated: 0,
     duplicates: 0,
     exceptions: 0,
-    externalWrites: 0,
   };
 }
 
@@ -405,16 +415,16 @@ export class SentryWorkflow {
   ): Promise<void> {
     let pollRun = null;
     try {
+      const triageAgentId = await this.controlPlane.resolveTriageAgent(config.companyId);
       assertRuntimeAuthorization(config, this.now());
       await this.controlPlane.verifyExactConfigurationApproval(config);
-      const triageAgentId = await this.controlPlane.resolveTriageAgent(config.companyId);
+      const token = await this.resolveSecret(config, "sentry");
+      assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
       pollRun = await this.repository.claimPollRun(config, this.now(), mode);
       if (!pollRun) {
         output.duplicates += 1;
         return;
       }
-      const token = await this.resolveSecret(config, "sentry");
-      assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
       for (let pageIndex = pollRun.pageCount; pageIndex < config.maxPages; pageIndex += 1) {
         assertRuntimeAuthorization(config, this.now());
         await this.controlPlane.verifyExactConfigurationApproval(config);
@@ -459,7 +469,7 @@ export class SentryWorkflow {
 
   private async observeIssue(
     config: SentryPilotConfig,
-    source: SanitizedSentryIssue,
+    source: FrozenSentrySnapshot,
     triageAgentId: string,
     token: string,
     audit: AuditIdentity,
@@ -480,20 +490,22 @@ export class SentryWorkflow {
 
     if (triage.status === "done") {
       if (!state.resolvedAt) {
-        await this.repository.markResolved(state, new Date(triage.completedAt ?? triage.updatedAt).toISOString(), source.count);
+        await this.repository.markResolved(state, new Date(triage.completedAt ?? triage.updatedAt).toISOString(), source.aggregateEventCount);
       } else {
-        let shouldReopen = source.regressed;
-        if (!shouldReopen && source.count - (state.resolvedCount ?? source.count) >= 3) {
+        let shouldReopen = source.status === "regressed";
+        if (!shouldReopen && source.aggregateEventCount - (state.resolvedCount ?? source.aggregateEventCount) >= 3) {
           const rollingStart = new Date(Math.max(Date.parse(state.resolvedAt), this.now().getTime() - 15 * 60 * 1_000)).toISOString();
-          assertRuntimeAuthorization(config, this.now());
-          await this.controlPlane.verifyExactConfigurationApproval(config);
-          assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
           const occurrences = await this.sentry.countRecentOccurrences({
             config,
             token,
             stableIssueId: source.stableIssueId,
             start: rollingStart,
             end: this.now().toISOString(),
+            beforeRead: async () => {
+              assertRuntimeAuthorization(config, this.now());
+              await this.controlPlane.verifyExactConfigurationApproval(config);
+              assertLiveSentryAuthorization(config, await this.sentry.readAuthorization(config, token));
+            },
           });
           shouldReopen = occurrences >= 3;
         }

@@ -17,8 +17,7 @@ import { assertOutlineModuleActivationUsable, parseOutlineModuleActivation } fro
 import { PostgresOutlineAssessmentRepository } from "./modules/outline/assessment.js";
 import { createOutlineRuntime } from "./modules/outline/runtime.js";
 import {
-  assertLiveSentryAuthorization,
-  assertRuntimeAuthorization,
+  assertSentryActivationAuthorized,
   parseSentryPilotConfig,
   PluginSentryControlPlane,
   PostgresSentryWorkflowRepository,
@@ -202,11 +201,16 @@ const plugin = definePlugin({
             "Project not found",
           );
         }
-        await sentryControlPlane.verifyExactConfigurationApproval(config);
         if (config.pollingEnabled) {
-          assertRuntimeAuthorization(config, new Date());
-          const token = await resolveSentrySecret(config);
-          assertLiveSentryAuthorization(config, await sentryClient.readAuthorization(config, token));
+          await assertSentryActivationAuthorized({
+            config,
+            now: new Date(),
+            verifyExactConfigurationApproval: () => sentryControlPlane.verifyExactConfigurationApproval(config),
+            resolveSecret: () => resolveSentrySecret(config),
+            readAuthorization: (token) => sentryClient.readAuthorization(config, token),
+          });
+        } else {
+          await sentryControlPlane.verifyExactConfigurationApproval(config);
         }
         await sentryRepository.upsertConfig(config, audit);
         await ctx.activity.log({
