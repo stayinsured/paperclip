@@ -2586,6 +2586,175 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("expires cross-issue document confirmations without crossing company boundaries", async () => {
+    const companyId = randomUUID();
+    const otherCompanyId = randomUUID();
+    const goalId = randomUUID();
+    const otherGoalId = randomUUID();
+    const targetIssueId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const otherIssueId = randomUUID();
+    const agentId = randomUUID();
+    const documentId = randomUUID();
+    const revisionId = randomUUID();
+    const nextRevisionId = randomUUID();
+    const actorRunId = randomUUID();
+
+    await db.insert(companies).values([
+      {
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: otherCompanyId,
+        name: "Other company",
+        issuePrefix: `O${otherCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+    await db.insert(goals).values([
+      { id: goalId, companyId, title: "Cross-issue target", level: "task", status: "active" },
+      { id: otherGoalId, companyId: otherCompanyId, title: "Isolation", level: "task", status: "active" },
+    ]);
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Review agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: actorRunId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "running",
+      startedAt: new Date(),
+    });
+    await db.insert(issues).values([
+      { id: targetIssueId, companyId, goalId, title: "Target issue", status: "in_progress", priority: "medium" },
+      { id: sourceIssueId, companyId, goalId, title: "Source review", status: "in_review", priority: "medium", assigneeAgentId: agentId },
+      { id: otherIssueId, companyId: otherCompanyId, goalId: otherGoalId, title: "Other source", status: "in_review", priority: "medium" },
+    ]);
+    await db.insert(documents).values({
+      id: documentId,
+      companyId,
+      title: "Plan",
+      format: "markdown",
+      latestBody: "v1",
+      latestRevisionId: revisionId,
+      latestRevisionNumber: 1,
+    });
+    await db.insert(issueDocuments).values({ companyId, issueId: targetIssueId, documentId, key: "plan" });
+    await db.insert(documentRevisions).values({
+      id: revisionId,
+      companyId,
+      documentId,
+      revisionNumber: 1,
+      title: "Plan",
+      format: "markdown",
+      body: "v1",
+    });
+
+    const stale = await interactionsSvc.create({ id: sourceIssueId, companyId }, {
+      kind: "request_confirmation",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Approve the target plan?",
+        target: { type: "issue_document", issueId: targetIssueId, documentId, key: "plan", revisionId, revisionNumber: 1 },
+      },
+    }, { userId: "local-board" });
+    await db.insert(issueThreadInteractions).values({
+      companyId: otherCompanyId,
+      issueId: otherIssueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      requestedResolverPolicy: "board_only",
+      effectiveResolverPolicy: "board_only",
+      payload: {
+        version: 1,
+        prompt: "Must remain isolated",
+        target: { type: "issue_document", issueId: targetIssueId, documentId, key: "plan", revisionId, revisionNumber: 1 },
+      },
+    });
+
+    let attention = await issuesSvc.listReviewAttention(companyId, [await issuesSvc.getById(sourceIssueId)]);
+    expect(attention.get(sourceIssueId)).toMatchObject({ state: "covered" });
+
+    await db.insert(documentRevisions).values({
+      id: nextRevisionId,
+      companyId,
+      documentId,
+      revisionNumber: 2,
+      title: "Plan",
+      format: "markdown",
+      body: "v2",
+    });
+    await db.update(documents).set({
+      latestBody: "v2",
+      latestRevisionId: nextRevisionId,
+      latestRevisionNumber: 2,
+    }).where(eq(documents.id, documentId));
+
+    const replacement = await interactionsSvc.create({ id: targetIssueId, companyId }, {
+      kind: "request_confirmation",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Approve the replacement plan?",
+        target: { type: "issue_document", issueId: targetIssueId, documentId, key: "plan", revisionId: nextRevisionId, revisionNumber: 2 },
+      },
+    }, { userId: "local-board" });
+
+    const expired = await interactionsSvc.expireStaleRequestConfirmationsForIssueDocument(
+      { id: targetIssueId, companyId },
+      { id: documentId, key: "plan", latestRevisionId: nextRevisionId, latestRevisionNumber: 2 },
+      { agentId, runId: actorRunId, userId: "local-board" },
+    );
+
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({
+      id: stale.id,
+      issueId: sourceIssueId,
+      status: "expired",
+      resolvedByAgentId: agentId,
+      resolvedByRunId: actorRunId,
+      resolvedByUserId: "local-board",
+      result: { outcome: "stale_target", staleTarget: { revisionId } },
+    });
+    await expect(interactionsSvc.acceptInteraction(
+      { id: sourceIssueId, companyId, goalId, projectId: null },
+      stale.id,
+      {},
+      { userId: "local-board" },
+    )).rejects.toThrow();
+
+    attention = await issuesSvc.listReviewAttention(companyId, [await issuesSvc.getById(sourceIssueId)]);
+    expect(attention.get(sourceIssueId)).toMatchObject({ state: "stalled", paths: [] });
+    expect(await interactionsSvc.listForIssue(targetIssueId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: replacement.id, status: "pending" }),
+    ]));
+    const acceptedReplacement = await interactionsSvc.acceptInteraction(
+      { id: targetIssueId, companyId, goalId, projectId: null },
+      replacement.id,
+      {},
+      { userId: "local-board" },
+    );
+    expect(acceptedReplacement.interaction.status).toBe("accepted");
+    expect(await interactionsSvc.listForIssue(otherIssueId)).toEqual([
+      expect.objectContaining({ status: "pending" }),
+    ]);
+  });
+
   describe("workspace_finalize accept gate", () => {
     type AcceptGateInteractionKind = "request_confirmation" | "request_checkbox_confirmation";
 

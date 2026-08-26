@@ -3508,13 +3508,17 @@ export function issueRoutes(
 
   async function logExpiredRequestConfirmations(input: {
     issue: { id: string; companyId: string; identifier?: string | null };
-    interactions: Array<{ id: string; kind: string; status: string; result?: unknown }>;
+    interactions: Array<{ id: string; issueId: string; kind: string; status: string; result?: unknown }>;
     actor: ReturnType<typeof getActorInfo>;
     source: string;
   }) {
     for (const interaction of input.interactions) {
+      const sourceIssue = interaction.issueId === input.issue.id
+        ? input.issue
+        : await svc.getById(interaction.issueId);
+      if (!sourceIssue || sourceIssue.companyId !== input.issue.companyId) continue;
       await logActivity(db, {
-        companyId: input.issue.companyId,
+        companyId: sourceIssue.companyId,
         actorType: input.actor.actorType,
         actorId: input.actor.actorId,
         agentId: input.actor.agentId,
@@ -3522,9 +3526,9 @@ export function issueRoutes(
         agentApiKeyId: input.actor.agentApiKeyId,
         action: "issue.thread_interaction_expired",
         entityType: "issue",
-        entityId: input.issue.id,
+        entityId: sourceIssue.id,
         details: {
-          identifier: input.issue.identifier ?? null,
+          identifier: sourceIssue.identifier ?? null,
           interactionId: interaction.id,
           interactionKind: interaction.kind,
           interactionStatus: interaction.status,
@@ -3537,73 +3541,88 @@ export function issueRoutes(
 
   async function queueExpiredInteractionReviewPathRecovery(input: {
     issue: IssueRouteSnapshot;
-    interactions: Array<{ id: string }>;
+    interactions: Array<{ id: string; issueId: string }>;
     actor: ReturnType<typeof getActorInfo>;
     source: string;
   }) {
-    if (
-      input.interactions.length === 0
-      || input.issue.status !== "in_review"
-      || !input.issue.assigneeAgentId
-    ) {
-      return null;
+    if (input.interactions.length === 0) return null;
+
+    const interactionsBySourceIssueId = new Map<string, Array<{ id: string; issueId: string }>>();
+    for (const interaction of input.interactions) {
+      const grouped = interactionsBySourceIssueId.get(interaction.issueId) ?? [];
+      grouped.push(interaction);
+      interactionsBySourceIssueId.set(interaction.issueId, grouped);
     }
 
-    const reviewAttention = await svc
-      .listReviewAttention(input.issue.companyId, [input.issue])
-      .then((attention) => attention.get(input.issue.id));
-    if (!reviewAttention || reviewAttention.state !== "stalled") return null;
+    const recoveryRuns: Array<{ id: string }> = [];
+    for (const [sourceIssueId, interactions] of interactionsBySourceIssueId) {
+      const sourceIssue = sourceIssueId === input.issue.id
+        ? input.issue
+        : await svc.getById(sourceIssueId);
+      if (
+        !sourceIssue
+        || sourceIssue.companyId !== input.issue.companyId
+        || sourceIssue.status !== "in_review"
+        || !sourceIssue.assigneeAgentId
+      ) continue;
 
-    const interactionIds = [...new Set(input.interactions.map((interaction) => interaction.id))].sort();
-    const consumedPathRef = interactionIds.length === 1
-      ? interactionIds[0]!
-      : `interactions:${interactionIds.join(",")}`;
-    const decision = decideIssueReviewPathRecovery({
-      issueId: input.issue.id,
-      sourceRunId: input.actor.runId,
-      assigneeAgentId: input.issue.assigneeAgentId,
-      contextSnapshot: {
-        source: input.source,
-        reviewPathConsumedRef: consumedPathRef,
-      },
-      reviewAttention,
-      existingWake: false,
-    });
-    if (decision.kind !== "enqueue") return null;
+      const reviewAttention = await svc
+        .listReviewAttention(sourceIssue.companyId, [sourceIssue])
+        .then((attention) => attention.get(sourceIssue.id));
+      if (!reviewAttention || reviewAttention.state !== "stalled") continue;
 
-    const recoveryRun = await heartbeat.wakeup(input.issue.assigneeAgentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: ISSUE_REVIEW_PATH_LOST_WAKE_REASON,
-      idempotencyKey: decision.idempotencyKey,
-      payload: decision.payload,
-      contextSnapshot: decision.contextSnapshot,
-      requestedByActorType: input.actor.actorType,
-      requestedByActorId: input.actor.actorId,
-    }).catch((error: unknown) => {
-      if (isReviewPathRecoveryIdempotencyConflict(error)) return null;
-      throw error;
-    });
-    if (!recoveryRun) return null;
+      const interactionIds = [...new Set(interactions.map((interaction) => interaction.id))].sort();
+      const consumedPathRef = interactionIds.length === 1
+        ? interactionIds[0]!
+        : `interactions:${interactionIds.join(",")}`;
+      const decision = decideIssueReviewPathRecovery({
+        issueId: sourceIssue.id,
+        sourceRunId: input.actor.runId,
+        assigneeAgentId: sourceIssue.assigneeAgentId,
+        contextSnapshot: {
+          source: input.source,
+          reviewPathConsumedRef: consumedPathRef,
+        },
+        reviewAttention,
+        existingWake: false,
+      });
+      if (decision.kind !== "enqueue") continue;
 
-    await logActivity(db, {
-      companyId: input.issue.companyId,
-      actorType: "system",
-      actorId: "issue_route",
-      agentId: input.issue.assigneeAgentId,
-      runId: input.actor.runId,
-      action: "issue.review_path_recovery_queued",
-      entityType: "issue",
-      entityId: input.issue.id,
-      details: {
-        source: input.source,
-        recoveryRunId: recoveryRun.id,
-        consumedPathRef,
-        recoveryAttempt: 1,
-        maxRecoveryAttempts: 1,
-      },
-    });
-    return recoveryRun;
+      const recoveryRun = await heartbeat.wakeup(sourceIssue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: ISSUE_REVIEW_PATH_LOST_WAKE_REASON,
+        idempotencyKey: decision.idempotencyKey,
+        payload: decision.payload,
+        contextSnapshot: decision.contextSnapshot,
+        requestedByActorType: input.actor.actorType,
+        requestedByActorId: input.actor.actorId,
+      }).catch((error: unknown) => {
+        if (isReviewPathRecoveryIdempotencyConflict(error)) return null;
+        throw error;
+      });
+      if (!recoveryRun) continue;
+
+      await logActivity(db, {
+        companyId: sourceIssue.companyId,
+        actorType: "system",
+        actorId: "issue_route",
+        agentId: sourceIssue.assigneeAgentId,
+        runId: input.actor.runId,
+        action: "issue.review_path_recovery_queued",
+        entityType: "issue",
+        entityId: sourceIssue.id,
+        details: {
+          source: input.source,
+          recoveryRunId: recoveryRun.id,
+          consumedPathRef,
+          recoveryAttempt: 1,
+          maxRecoveryAttempts: 1,
+        },
+      });
+      recoveryRuns.push(recoveryRun);
+    }
+    return recoveryRuns;
   }
 
   function parseDateQuery(value: unknown, field: string) {
