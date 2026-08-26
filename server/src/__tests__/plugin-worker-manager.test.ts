@@ -468,6 +468,48 @@ describe("plugin-worker-manager stderr failure context", () => {
       await handle.stop().catch(() => undefined);
     }
   });
+
+  it("allows an unscoped companies.list call while another company invocation is active", async () => {
+    const companiesList = vi.fn(async () => [{ id: "company-1" }]);
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: ["companies.read"],
+      services: {
+        companies: {
+          list: companiesList,
+        },
+      } as unknown as HostServices,
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers,
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: {
+          mode: "omit",
+          hostMethod: "companies.list",
+          requestedCompanyId: "company-1",
+        },
+      } as HostToWorkerMethods["getData"][0])).resolves.toEqual([{ id: "company-1" }]);
+
+      expect(companiesList).toHaveBeenCalledWith({ companyId: "company-1" });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
 });
 
 
