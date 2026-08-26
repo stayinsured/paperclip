@@ -3,7 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
-import { createManagedBundledPluginWorkerRecovery } from "../app.js";
+import {
+  createManagedBundledPluginWorkerRecovery,
+  createReadyPluginWorkerRecovery,
+} from "../app.js";
 import { listReadyPluginEnvironmentDrivers } from "../services/plugin-environment-driver.js";
 import { pluginLoader, type PluginLoader } from "../services/plugin-loader.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -511,5 +514,28 @@ describe("listReadyPluginEnvironmentDrivers worker recovery", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("ready plugin worker recovery", () => {
+  it("recovers a ready non-managed plugin for scheduled-job dispatch", async () => {
+    const plugin = createPlugin("ready", {
+      id: "plugin-workflows",
+      pluginKey: "staydigital.stay-operational-workflows",
+    });
+    const worker = createWorkerManager();
+    const loadSingle = vi.fn(async () => {
+      worker.markRunning();
+      return { plugin, success: true } as never;
+    });
+    const recoverWorker = createReadyPluginWorkerRecovery({
+      workerManager: worker.workerManager,
+      getLoader: () => ({ loadSingle }) as Pick<PluginLoader, "loadSingle">,
+    });
+
+    await expect(recoverWorker(plugin)).resolves.toBe(true);
+    expect(loadSingle).toHaveBeenCalledWith(plugin.id, {
+      markErrorOnFailure: false,
+    });
   });
 });
