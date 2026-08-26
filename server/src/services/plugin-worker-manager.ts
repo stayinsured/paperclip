@@ -540,6 +540,29 @@ export function createPluginWorkerHandle(
       : JSONRPC_ERROR_CODES.INTERNAL_ERROR;
   }
 
+  const safeSecretResolutionErrorCodes = new Set([
+    "binding_missing",
+    "binding_not_allowed",
+    "disabled",
+    "secret_deleted",
+    "secret_inactive",
+    "version_missing",
+    "version_inactive",
+  ]);
+
+  function errorDataForWorkerHostError(
+    method: WorkerToHostMethodName,
+    err: unknown,
+  ): { code: string } | undefined {
+    if (method !== "secrets.resolve" || !err || typeof err !== "object") return undefined;
+    const details = (err as { details?: unknown }).details;
+    if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+    const code = (details as { code?: unknown }).code;
+    return typeof code === "string" && safeSecretResolutionErrorCodes.has(code)
+      ? { code }
+      : undefined;
+  }
+
   // -----------------------------------------------------------------------
   // Incoming message handling
   // -----------------------------------------------------------------------
@@ -771,6 +794,7 @@ export function createPluginWorkerHandle(
             request.id,
             errorCodeForWorkerHostError(err),
             errorMessage,
+            errorDataForWorkerHostError(method, err),
           ),
         );
       } catch {
