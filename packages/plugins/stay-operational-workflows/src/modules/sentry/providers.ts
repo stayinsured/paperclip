@@ -2,7 +2,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import {
   sanitizeSentryIssue,
   SentryWorkflowConfigError,
-  type SanitizedSentryIssue,
+  type LiveSentryAuthorization,
   type SentryIssuePage,
   type SentryPilotConfig,
 } from "./contracts.js";
@@ -22,6 +22,7 @@ export class ProviderRequestError extends Error {
 }
 
 export interface SentryReadPort {
+  readAuthorization(config: SentryPilotConfig, token: string): Promise<LiveSentryAuthorization>;
   listIssues(input: {
     config: SentryPilotConfig;
     token: string;
@@ -35,6 +36,7 @@ export interface SentryReadPort {
     stableIssueId: string;
     start: string;
     end: string;
+    beforeRead: () => Promise<void>;
   }): Promise<number>;
 }
 
@@ -93,9 +95,145 @@ function sentryError(response: Response): ProviderRequestError {
     false,
   );
 }
+export type SentryGetTarget = "root" | "organization" | "project" | "environment" | "issues" | "events";
+
+export function assertSentryGetTarget(input: {
+  config: SentryPilotConfig;
+  method: string | undefined;
+  url: string;
+  target: SentryGetTarget;
+  stableIssueId?: string;
+}): void {
+  if (input.method !== "GET") {
+    throw new ProviderRequestError("sentry", "method_not_allowed", null, null, false);
+  }
+  let url: URL;
+  try {
+    url = new URL(input.url);
+  } catch {
+    throw new ProviderRequestError("sentry", "target_scope_mismatch", null, null, false);
+  }
+  const base = new URL(input.config.sentry.apiBaseUrl);
+  const org = encodeURIComponent(input.config.sentry.organizationSlug);
+  const project = encodeURIComponent(input.config.sentry.projectSlug);
+  const paths: Record<Exclude<SentryGetTarget, "events">, string> = {
+    root: "/api/0/",
+    organization: `/api/0/organizations/${org}/`,
+    project: `/api/0/projects/${org}/${project}/`,
+    environment: `/api/0/projects/${org}/${project}/environments/${encodeURIComponent(input.config.sentry.environment)}/`,
+    issues: `/api/0/organizations/${org}/issues/`,
+  };
+  const expectedPath = input.target === "events"
+    ? `/api/0/organizations/${org}/issues/${encodeURIComponent(input.stableIssueId ?? "")}/events/`
+    : paths[input.target];
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.origin !== base.origin || url.pathname !== expectedPath) {
+    throw new ProviderRequestError("sentry", "target_scope_mismatch", null, null, false);
+  }
+  if (input.target === "root" || input.target === "organization" || input.target === "project" || input.target === "environment") {
+    if (url.search !== "") throw new ProviderRequestError("sentry", "target_scope_mismatch", null, null, false);
+    return;
+  }
+  const allowed = input.target === "issues"
+    ? new Set(["project", "environment", "start", "end", "query", "sort", "limit", "collapse", "cursor"])
+    : new Set(["environment", "start", "end", "full", "per_page", "cursor"]);
+  const exactlyOne = (key: string): boolean => url.searchParams.getAll(key).length === 1;
+  const cursorValues = url.searchParams.getAll("cursor");
+  if ([...url.searchParams.keys()].some((key) => !allowed.has(key))
+    || !["environment", "start", "end"].every(exactlyOne)
+    || cursorValues.length > 1
+    || (cursorValues[0] != null && (cursorValues[0].length > 500 || !/^[A-Za-z0-9:._-]+$/.test(cursorValues[0])))
+    || url.searchParams.get("environment") !== input.config.sentry.environment
+    || !url.searchParams.get("start")
+    || !url.searchParams.get("end")) {
+    throw new ProviderRequestError("sentry", "unfiltered_target", null, null, false);
+  }
+  if (input.target === "issues") {
+    const collapse = url.searchParams.getAll("collapse").sort();
+    if (!["project", "query", "sort", "limit"].every(exactlyOne)
+      || url.searchParams.get("project") !== input.config.sentry.projectId
+      || url.searchParams.get("query") !== ""
+      || url.searchParams.get("sort") !== "date"
+      || url.searchParams.get("limit") !== String(input.config.batchSize)
+      || collapse.join("\u001f") !== ["filtered", "owners", "unhandled"].join("\u001f")) {
+      throw new ProviderRequestError("sentry", "unfiltered_target", null, null, false);
+    }
+  } else if (!input.stableIssueId || !/^\d{1,30}$/.test(input.stableIssueId)
+    || !["full", "per_page"].every(exactlyOne)
+    || url.searchParams.get("full") !== "false"
+    || url.searchParams.get("per_page") !== "100") {
+    throw new ProviderRequestError("sentry", "unfiltered_target", null, null, false);
+  }
+}
 
 export class SentryApiClient implements SentryReadPort {
-  constructor(private readonly http: PluginContext["http"]) {}
+  constructor(
+    private readonly http: PluginContext["http"],
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  private parseScopes(value: unknown): string[] {
+    const values = Array.isArray(value)
+      ? value
+      : typeof value === "string" ? value.split(",") : [];
+    return [...new Set(values.filter((scope): scope is string => typeof scope === "string")
+      .map((scope) => scope.trim())
+      .filter(Boolean))]
+      .sort();
+  }
+
+  async readAuthorization(config: SentryPilotConfig, token: string): Promise<LiveSentryAuthorization> {
+    const targets: Array<{ path: string; target: Exclude<SentryGetTarget, "issues" | "events"> }> = [
+      { path: "/api/0/", target: "root" },
+      { path: `/api/0/organizations/${encodeURIComponent(config.sentry.organizationSlug)}/`, target: "organization" },
+      { path: `/api/0/projects/${encodeURIComponent(config.sentry.organizationSlug)}/${encodeURIComponent(config.sentry.projectSlug)}/`, target: "project" },
+      { path: `/api/0/projects/${encodeURIComponent(config.sentry.organizationSlug)}/${encodeURIComponent(config.sentry.projectSlug)}/environments/${encodeURIComponent(config.sentry.environment)}/`, target: "environment" },
+    ];
+    const bodies: Record<string, unknown>[] = [];
+    let headerScopes: string[] = [];
+    for (const item of targets) {
+      const target = new URL(item.path, config.sentry.apiBaseUrl);
+      const request = { method: "GET", headers: { authorization: `Bearer ${token}`, accept: "application/json" } };
+      assertSentryGetTarget({ config, method: request.method, url: target.toString(), target: item.target });
+      let response: Response;
+      try {
+        response = await this.http.fetch(target.toString(), request);
+      } catch {
+        throw new ProviderRequestError("sentry", "identity_network_failure", null, null, false);
+      }
+      if (!response.ok) throw sentryError(response);
+      const payload = await json(response, "sentry");
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new ProviderRequestError("sentry", "invalid_identity_response", response.status, null, false);
+      }
+      bodies.push(payload as Record<string, unknown>);
+      if (item.target === "root") headerScopes = this.parseScopes(response.headers.get("x-sentry-scopes"));
+    }
+    const [root, organization, project, environment] = bodies;
+    const auth = root.auth && typeof root.auth === "object" && !Array.isArray(root.auth)
+      ? root.auth as Record<string, unknown>
+      : {};
+    const rootUser = root.user && typeof root.user === "object" && !Array.isArray(root.user)
+      ? root.user as Record<string, unknown>
+      : {};
+    const authUser = auth.user && typeof auth.user === "object" && !Array.isArray(auth.user)
+      ? auth.user as Record<string, unknown>
+      : {};
+    const principalId = String(rootUser.id ?? authUser.id ?? "");
+    const bodyScopes = this.parseScopes(auth.scopes);
+    const scopes = bodyScopes.length > 0 ? bodyScopes : headerScopes;
+    if (!principalId || scopes.length === 0) {
+      throw new ProviderRequestError("sentry", "invalid_identity_response", null, null, false);
+    }
+    return {
+      principalId,
+      scopes,
+      organizationId: String(organization.id ?? ""),
+      organizationSlug: String(organization.slug ?? ""),
+      projectId: String(project.id ?? ""),
+      projectSlug: String(project.slug ?? ""),
+      environment: String(environment.name ?? ""),
+    };
+  }
 
   async listIssues(input: {
     config: SentryPilotConfig;
@@ -117,6 +255,7 @@ export class SentryApiClient implements SentryReadPort {
     url.searchParams.append("collapse", "unhandled");
     if (input.cursor) url.searchParams.set("cursor", input.cursor);
 
+    assertSentryGetTarget({ config: input.config, method: "GET", url: url.toString(), target: "issues" });
     let response: Response;
     try {
       response = await this.http.fetch(url.toString(), {
@@ -134,8 +273,7 @@ export class SentryApiClient implements SentryReadPort {
     if (!Array.isArray(payload)) {
       throw new ProviderRequestError("sentry", "invalid_issue_page", response.status, null, false);
     }
-    const issues: SanitizedSentryIssue[] = [];
-    for (const raw of payload) issues.push(sanitizeSentryIssue(raw, input.config));
+    const issues = payload.map((raw) => sanitizeSentryIssue(raw, input.config, this.now()));
     return {
       issues,
       nextCursor: nextCursorFromLink(response.headers.get("link"), url),
@@ -148,6 +286,7 @@ export class SentryApiClient implements SentryReadPort {
     stableIssueId: string;
     start: string;
     end: string;
+    beforeRead: () => Promise<void>;
   }): Promise<number> {
     let cursor: string | null = null;
     let count = 0;
@@ -163,6 +302,14 @@ export class SentryApiClient implements SentryReadPort {
       url.searchParams.set("per_page", "100");
       if (cursor) url.searchParams.set("cursor", cursor);
       let response: Response;
+      await input.beforeRead();
+      assertSentryGetTarget({
+        config: input.config,
+        method: "GET",
+        url: url.toString(),
+        target: "events",
+        stableIssueId: input.stableIssueId,
+      });
       try {
         response = await this.http.fetch(url.toString(), {
           method: "GET",

@@ -4,7 +4,7 @@ import type { AuditIdentity } from "../../contracts.js";
 import {
   configurationFingerprint,
   stableSentryIdentity,
-  type SanitizedSentryIssue,
+  type FrozenSentrySnapshot,
   type SentryPilotConfig,
   type SentryPollWindow,
 } from "./contracts.js";
@@ -14,7 +14,7 @@ export interface SentryIssueState {
   companyId: string;
   projectId: string;
   stableSentryIssueId: string;
-  snapshot: SanitizedSentryIssue;
+  snapshot: FrozenSentrySnapshot;
   triageIssueId: string | null;
   resolvedAt: string | null;
   resolvedCount: number | null;
@@ -85,7 +85,7 @@ export interface SentryWorkflowRepository {
   advancePollRun(run: SentryPollRun, nextCursor: string | null, observed: number): Promise<void>;
   completePollRun(run: SentryPollRun): Promise<void>;
   failPollRun(run: SentryPollRun, input: { code: string; retryAt: string | null }): Promise<void>;
-  upsertIssue(config: SentryPilotConfig, issue: SanitizedSentryIssue, now: Date): Promise<SentryIssueState>;
+  upsertIssue(config: SentryPilotConfig, issue: FrozenSentrySnapshot, now: Date): Promise<SentryIssueState>;
   getIssueState(companyId: string, stableIssueId: string): Promise<SentryIssueState | null>;
   listIssueStates(companyId: string): Promise<SentryIssueState[]>;
   bindTriageIssue(state: SentryIssueState, triageIssueId: string): Promise<void>;
@@ -123,7 +123,7 @@ type StateRow = {
   company_id: string;
   project_id: string;
   stable_sentry_issue_id: string;
-  sanitized_snapshot: SanitizedSentryIssue;
+  sanitized_snapshot: FrozenSentrySnapshot;
   triage_issue_id: string | null;
   resolved_at: string | null;
   resolved_count: number | null;
@@ -343,7 +343,7 @@ export class PostgresSentryWorkflowRepository implements SentryWorkflowRepositor
     return rows[0] ? stateFromRow(rows[0]) : null;
   }
 
-  async upsertIssue(config: SentryPilotConfig, issue: SanitizedSentryIssue, now: Date): Promise<SentryIssueState> {
+  async upsertIssue(config: SentryPilotConfig, issue: FrozenSentrySnapshot, now: Date): Promise<SentryIssueState> {
     await this.db.execute(
       `INSERT INTO ${this.table("sentry_issue_states")}
        (id, company_id, project_id, sentry_organization_id, sentry_project_id,
