@@ -20,6 +20,7 @@ describe("evaluateSessionReusePilot", () => {
     observations.push(row({ forceFreshSession: true, sessionReused: false, contextMode: "full" }));
     const result = evaluate(observations);
     expect(result.passed).toBe(true);
+    expect(result).toMatchObject({ diagnosticOnly: true, terminalVerdict: null, realizedProductionSavings: false });
     expect(result.sample).toEqual({ observationCount: 11, eligibleRepeatCount: 10, reusedRepeatCount: 7 });
     expect(result.metrics).toMatchObject({ reuseRatePercent: 70, medianProcessedTokenReductionPercent: 30 });
   });

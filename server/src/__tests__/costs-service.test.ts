@@ -76,6 +76,14 @@ const mockCostService = vi.hoisted(() => ({
     completedIssueRollups: [],
     cohortBaselines: [],
   }),
+  completedIssueTelemetry: vi.fn().mockResolvedValue({
+    companyId: "company-1",
+    completedIssues: [],
+  }),
+  sessionReuseEvaluation: vi.fn().mockResolvedValue({
+    verdict: "CONDITIONAL",
+    decision: { action: "keep_disabled", rollbackRequired: false },
+  }),
   byAgent: vi.fn().mockResolvedValue([]),
   byAgentModel: vi.fn().mockResolvedValue([]),
   byProvider: vi.fn().mockResolvedValue([]),
@@ -281,6 +289,57 @@ describe("cost routes", () => {
       toExclusive: new Date("2026-08-15T00:00:00.000Z"),
     });
     expect(res.body.coverage.exactModelThresholdMet).toBe(true);
+  });
+
+  it("returns completed-issue telemetry through the requested company scope", async () => {
+    const app = await createApp();
+    const res = await request(app)
+      .get("/api/companies/company-1/costs/completed-issue-telemetry")
+      .query({ from: "2026-08-01T00:00:00.000Z", to: "2026-08-15T00:00:00.000Z" });
+
+    expect(res.status).toBe(200);
+    expect(mockCostService.completedIssueTelemetry).toHaveBeenCalledWith("company-1", {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-15T00:00:00.000Z"),
+    });
+  });
+
+  it("runs the authoritative evaluator through the requested company scope", async () => {
+    const app = await createApp();
+    const body = {
+      from: "2026-08-01T00:00:00.000Z",
+      toExclusive: "2026-08-15T00:00:00.000Z",
+      pilotIssueIds: [randomUUID()],
+      controlIssueIds: [randomUUID()],
+    };
+    const res = await request(app)
+      .post("/api/companies/company-1/costs/session-reuse-evaluation")
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(mockCostService.sessionReuseEvaluation).toHaveBeenCalledWith("company-1", body);
+    expect(res.body).toMatchObject({ verdict: "CONDITIONAL", decision: { action: "keep_disabled" } });
+  });
+
+  it("denies cross-company telemetry reads before invoking the evaluator", async () => {
+    const app = await createAppWithActor({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: ["company-2"],
+    });
+    const res = await request(app)
+      .post("/api/companies/company-1/costs/session-reuse-evaluation")
+      .send({
+        from: "2026-08-01T00:00:00.000Z",
+        toExclusive: "2026-08-15T00:00:00.000Z",
+        pilotIssueIds: [randomUUID()],
+        controlIssueIds: [randomUUID()],
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockCostService.sessionReuseEvaluation).not.toHaveBeenCalled();
   });
 
   it("returns issue subtree cost summaries for issue refs", async () => {
@@ -646,6 +705,53 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(report.outcomes.reopen.shadow).toEqual({ count: 1, total: 1, rate: 1 });
     expect(report.outcomes.reopen.control).toEqual({ count: 0, total: 1, rate: 0 });
     expect(report.outcomes.verdict).toBe("block");
+  });
+
+  it("keeps completed-issue telemetry company-scoped across persisted sources", async () => {
+    const targetCompanyId = randomUUID();
+    const foreignCompanyId = randomUUID();
+    const targetAgentId = randomUUID();
+    const foreignAgentId = randomUUID();
+    const targetIssueId = randomUUID();
+    const foreignIssueId = randomUUID();
+    const targetRunId = randomUUID();
+    const foreignRunId = randomUUID();
+    await db.insert(companies).values([
+      { id: targetCompanyId, name: "Target", issuePrefix: `A${targetCompanyId.slice(0, 6)}`, requireBoardApprovalForNewAgents: false },
+      { id: foreignCompanyId, name: "Foreign", issuePrefix: `B${foreignCompanyId.slice(0, 6)}`, requireBoardApprovalForNewAgents: false },
+    ]);
+    await db.insert(agents).values([
+      { id: targetAgentId, companyId: targetCompanyId, name: "Target Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: foreignAgentId, companyId: foreignCompanyId, name: "Foreign Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(issues).values([
+      { id: targetIssueId, companyId: targetCompanyId, assigneeAgentId: targetAgentId, title: "Target", status: "done", priority: "high", issueNumber: 1, identifier: "TGT-1", createdAt: new Date("2026-08-01T00:00:00.000Z"), completedAt: new Date("2026-08-02T00:00:00.000Z") },
+      { id: foreignIssueId, companyId: foreignCompanyId, assigneeAgentId: foreignAgentId, title: "Foreign", status: "done", priority: "high", issueNumber: 1, identifier: "FRN-1", createdAt: new Date("2026-08-01T00:00:00.000Z"), completedAt: new Date("2026-08-02T00:00:00.000Z") },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      { id: targetRunId, companyId: targetCompanyId, agentId: targetAgentId, status: "succeeded", sessionIdBefore: "target-session", contextSnapshot: { issueId: targetIssueId }, usageJson: { taskSessionReused: true, configFreshness: { session: { nextFingerprint: "target-security" } } } },
+      { id: foreignRunId, companyId: foreignCompanyId, agentId: foreignAgentId, status: "succeeded", sessionIdBefore: "foreign-session", contextSnapshot: { issueId: foreignIssueId }, usageJson: { taskSessionReused: true, configFreshness: { session: { nextFingerprint: "foreign-security" } } } },
+    ]);
+    await db.insert(costEvents).values([
+      { companyId: targetCompanyId, agentId: targetAgentId, heartbeatRunId: targetRunId, provider: "openai", biller: "openai", billingType: "metered_api", model: "gpt-5", inputTokens: 10, cachedInputTokens: 20, outputTokens: 5, costCents: 3, occurredAt: new Date("2026-08-02T00:00:00.000Z") },
+      { companyId: foreignCompanyId, agentId: foreignAgentId, heartbeatRunId: foreignRunId, provider: "openai", biller: "openai", billingType: "metered_api", model: "gpt-5", inputTokens: 999, cachedInputTokens: 999, outputTokens: 999, costCents: 999, occurredAt: new Date("2026-08-02T00:00:00.000Z") },
+    ]);
+
+    const report = await costs.completedIssueTelemetry(targetCompanyId, {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-15T00:00:00.000Z"),
+    });
+
+    expect(report.companyId).toBe(targetCompanyId);
+    expect(report.completedIssues).toHaveLength(1);
+    expect(report.completedIssues[0]).toMatchObject({
+      issueId: targetIssueId,
+      companyId: targetCompanyId,
+      accounting: { total: { processedTokens: 35, costCents: 3 } },
+      boundary: { evidenceComplete: true, sessionConfigFingerprints: ["target-security"] },
+    });
+    expect(JSON.stringify(report)).not.toContain(foreignIssueId);
+    expect(JSON.stringify(report)).not.toContain("foreign-security");
   });
 
   it("aggregates cost event sums above int32 without raising Postgres integer overflow", async () => {

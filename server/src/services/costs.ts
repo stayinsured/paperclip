@@ -1,7 +1,8 @@
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { activityLog, agentWakeupRequests, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import type { EvaluateAuthoritativeSessionReuse } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
@@ -10,6 +11,10 @@ import {
   type TokenTelemetryFact,
 } from "./token-telemetry.js";
 import { buildShadowCohortReport, parseDecision } from "./task-aware-routing.js";
+import {
+  buildCompletedIssueTelemetry,
+  evaluateAuthoritativeSessionReuse,
+} from "./completed-issue-telemetry.js";
 
 export interface CostDateRange {
   from?: Date;
@@ -241,6 +246,146 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         dailyFacts,
         completedIssueFacts,
       });
+    },
+
+    completedIssueTelemetry: async (
+      companyId: string,
+      range: { from: Date; toExclusive: Date },
+      selectedIssueIds?: string[],
+    ) => {
+      const issueConditions = [
+        eq(issues.companyId, companyId),
+        eq(issues.status, "done"),
+        isNotNull(issues.completedAt),
+        gte(issues.completedAt, range.from),
+        lt(issues.completedAt, range.toExclusive),
+      ];
+      if (selectedIssueIds) {
+        if (selectedIssueIds.length === 0) {
+          return buildCompletedIssueTelemetry({
+            companyId,
+            ...range,
+            issues: [],
+            runs: [],
+            costEvents: [],
+            wakeRequests: [],
+            activities: [],
+          });
+        }
+        issueConditions.push(inArray(issues.id, selectedIssueIds));
+      }
+      const completedIssues = await db
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          identifier: issues.identifier,
+          projectId: issues.projectId,
+          assigneeAgentId: issues.assigneeAgentId,
+          workMode: issues.workMode,
+          priority: issues.priority,
+          createdAt: issues.createdAt,
+          completedAt: issues.completedAt,
+        })
+        .from(issues)
+        .where(and(...issueConditions));
+      const issueIds = completedIssues.map((issue) => issue.id);
+      if (issueIds.length === 0) {
+        return buildCompletedIssueTelemetry({
+          companyId,
+          ...range,
+          issues: [],
+          runs: [],
+          costEvents: [],
+          wakeRequests: [],
+          activities: [],
+        });
+      }
+
+      const effectiveRunIssueId = sql<string>`coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId', ${heartbeatRuns.contextSnapshot} ->> 'taskId')`;
+      const runs = await db
+        .select({
+          id: heartbeatRuns.id,
+          companyId: heartbeatRuns.companyId,
+          agentId: heartbeatRuns.agentId,
+          responsibleUserId: heartbeatRuns.responsibleUserId,
+          status: heartbeatRuns.status,
+          sessionIdBefore: heartbeatRuns.sessionIdBefore,
+          contextSnapshot: heartbeatRuns.contextSnapshot,
+          usageJson: heartbeatRuns.usageJson,
+          resultJson: heartbeatRuns.resultJson,
+        })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, companyId),
+          inArray(effectiveRunIssueId, issueIds),
+        ));
+      const runIds = runs.map((run) => run.id);
+      const eventScope = runIds.length > 0
+        ? or(inArray(costEvents.issueId, issueIds), inArray(costEvents.heartbeatRunId, runIds))
+        : inArray(costEvents.issueId, issueIds);
+      const wakeScope = runIds.length > 0
+        ? or(
+            inArray(sql<string>`${agentWakeupRequests.payload} ->> 'issueId'`, issueIds),
+            inArray(sql<string>`${agentWakeupRequests.payload} ->> 'taskId'`, issueIds),
+            inArray(agentWakeupRequests.runId, runIds),
+          )
+        : or(
+            inArray(sql<string>`${agentWakeupRequests.payload} ->> 'issueId'`, issueIds),
+            inArray(sql<string>`${agentWakeupRequests.payload} ->> 'taskId'`, issueIds),
+          );
+      const [events, wakeRequests, activities] = await Promise.all([
+        db.select({
+          id: costEvents.id,
+          companyId: costEvents.companyId,
+          issueId: costEvents.issueId,
+          heartbeatRunId: costEvents.heartbeatRunId,
+          billingType: costEvents.billingType,
+          inputTokens: costEvents.inputTokens,
+          cachedInputTokens: costEvents.cachedInputTokens,
+          outputTokens: costEvents.outputTokens,
+          costCents: costEvents.costCents,
+        }).from(costEvents).where(and(eq(costEvents.companyId, companyId), eventScope)),
+        db.select({
+          id: agentWakeupRequests.id,
+          companyId: agentWakeupRequests.companyId,
+          runId: agentWakeupRequests.runId,
+          status: agentWakeupRequests.status,
+          coalescedCount: agentWakeupRequests.coalescedCount,
+          payload: agentWakeupRequests.payload,
+        }).from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), wakeScope)),
+        db.select({
+          companyId: activityLog.companyId,
+          entityId: activityLog.entityId,
+          action: activityLog.action,
+          details: activityLog.details,
+          createdAt: activityLog.createdAt,
+        }).from(activityLog).where(and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.entityType, "issue"),
+          inArray(activityLog.entityId, issueIds),
+        )),
+      ]);
+
+      return buildCompletedIssueTelemetry({
+        companyId,
+        ...range,
+        issues: completedIssues,
+        runs,
+        costEvents: events,
+        wakeRequests,
+        activities,
+      });
+    },
+
+    sessionReuseEvaluation: async (companyId: string, config: EvaluateAuthoritativeSessionReuse) => {
+      const range = { from: new Date(config.from), toExclusive: new Date(config.toExclusive) };
+      const selectedIssueIds = [...new Set([...config.pilotIssueIds, ...config.controlIssueIds])];
+      const telemetry = await costService(db, budgetHooks).completedIssueTelemetry(
+        companyId,
+        range,
+        selectedIssueIds,
+      );
+      return evaluateAuthoritativeSessionReuse({ companyId, config, telemetry });
     },
 
     shadowRoutingCohort: async (companyId: string, range: { from: Date; toExclusive: Date }) => {

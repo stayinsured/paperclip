@@ -794,6 +794,13 @@ export type {
   TokenTelemetryCohortBaseline,
   TokenTelemetryCoverage,
   TokenTelemetryBaselineReport,
+  CompletedIssueTokenDimensions,
+  CompletedIssueAccounting,
+  CompletedIssueTelemetryRow,
+  CompletedIssueTelemetryReport,
+  SessionReuseEvaluationVerdict,
+  SessionReuseCriterionStatus,
+  SessionReuseEvaluationReport,
 } from "./cost.js";
 export type { FinanceEvent, FinanceSummary, FinanceByBiller, FinanceByKind } from "./finance.js";
 export type {

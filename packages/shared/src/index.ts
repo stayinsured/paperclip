@@ -1,4 +1,9 @@
-export { evaluateSessionReusePilotSchema, type EvaluateSessionReusePilot } from "./validators/issue.js";
+export {
+  evaluateAuthoritativeSessionReuseSchema,
+  evaluateSessionReusePilotSchema,
+  type EvaluateAuthoritativeSessionReuse,
+  type EvaluateSessionReusePilot,
+} from "./validators/issue.js";
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
   decisionEffectStalenessSchema,
@@ -1073,6 +1078,13 @@ export type {
   TokenTelemetryCohortBaseline,
   TokenTelemetryCoverage,
   TokenTelemetryBaselineReport,
+  CompletedIssueTokenDimensions,
+  CompletedIssueAccounting,
+  CompletedIssueTelemetryRow,
+  CompletedIssueTelemetryReport,
+  SessionReuseEvaluationVerdict,
+  SessionReuseCriterionStatus,
+  SessionReuseEvaluationReport,
   FinanceEvent,
   FinanceSummary,
   FinanceByBiller,
