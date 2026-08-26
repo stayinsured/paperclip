@@ -712,6 +712,15 @@ export function createPluginWorkerHandle(
       if (proactiveCompanyId && proactiveCompanyScopes.has(proactiveCompanyId)) {
         return { invocationScope: { companyId: proactiveCompanyId } };
       }
+      // `companies.list` is intentionally instance-scoped in the SDK gate: it
+      // does not inherit or require a company invocation scope. Scheduled jobs
+      // commonly use it to discover their configured companies. If two jobs
+      // overlap, another pending request may leave `activeInvocations` non-empty;
+      // treating this unscoped list call as a missing invocation then creates a
+      // false denial that depends only on timing. An echoed invocation id does
+      // not narrow `companies.list` either, so accepting the absent id here does
+      // not widen the capability granted by `companies.read`.
+      if (message.method === "companies.list") return {};
       const hasActiveInvocation = activeInvocations.size > 0 ||
         Array.from(pendingRequests.values()).some((pending) => pending.invocationId);
       return hasActiveInvocation ? { invalidInvocationScope: true } : {};
