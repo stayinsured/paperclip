@@ -1201,6 +1201,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   z.object({
     ...createIssueThreadInteractionCommon,
     kind: z.literal("request_confirmation"),
+    continuationIssueId: z.string().uuid().nullable().optional(),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
     sourceCommentId: z.string().uuid().nullable().optional(),
     sourceRunId: z.string().uuid().nullable().optional(),

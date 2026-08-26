@@ -8,6 +8,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueRelations,
   issueThreadInteractions,
   issues,
   toolActionRequests,
@@ -199,6 +200,7 @@ function isEquivalentCreateRequest(
     && row.requestedResolverPolicy === input.resolverPolicy
     && (row.addresseeAgentId ?? null) === (input.addresseeAgentId ?? null)
     && row.continuationPolicy === input.continuationPolicy
+    && (row.continuationIssueId ?? null) === ("continuationIssueId" in input ? input.continuationIssueId ?? null : null)
     && (row.idempotencyKey ?? null) === (input.idempotencyKey ?? null)
     && (row.sourceCommentId ?? null) === (input.sourceCommentId ?? null)
     && (row.sourceRunId ?? null) === (input.sourceRunId ?? null)
@@ -245,6 +247,7 @@ function hydrateInteraction(
     addresseeAgentId: row.addresseeAgentId ?? null,
     status: row.status as IssueThreadInteraction["status"],
     continuationPolicy: row.continuationPolicy as IssueThreadInteraction["continuationPolicy"],
+    continuationIssueId: row.continuationIssueId ?? null,
     resolverPolicy: row.requestedResolverPolicy,
     requestedResolverPolicy: row.requestedResolverPolicy,
     effectiveResolverPolicy: row.effectiveResolverPolicy,
@@ -300,6 +303,10 @@ async function touchIssue(db: IssueTouchDb, issueId: string) {
 
 function isTerminalIssueStatus(status: string) {
   return status === "done" || status === "cancelled";
+}
+
+function isExecutableContinuationStatus(status: string) {
+  return status === "todo" || status === "in_progress" || status === "in_review";
 }
 
 function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
@@ -1423,6 +1430,50 @@ export function issueThreadInteractionService(db: Db) {
       });
       const normalizedData = { ...data, resolverPolicy: policy.requestedResolverPolicy };
 
+      const declaredContinuationIssueId = data.kind === "request_confirmation"
+        ? data.continuationIssueId ?? null
+        : null;
+      const wakeCapable = data.kind === "request_confirmation" && (
+        data.continuationPolicy === "wake_assignee"
+        || data.continuationPolicy === "wake_assignee_on_accept"
+      );
+      let resolvedContinuationIssueId: string | null = null;
+      if (wakeCapable) {
+        const candidateId = declaredContinuationIssueId ?? issue.id;
+        const candidate = await db
+          .select({ id: issues.id, status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+          .from(issues)
+          .where(and(eq(issues.id, candidateId), eq(issues.companyId, issue.companyId)))
+          .then((rows) => rows[0] ?? null);
+        const unresolvedBlockers = candidate
+          ? await db
+            .select({ blockerId: issueRelations.issueId, blockerStatus: issues.status })
+            .from(issueRelations)
+            .innerJoin(issues, and(
+              eq(issues.id, issueRelations.issueId),
+              eq(issues.companyId, issueRelations.companyId),
+            ))
+            .where(and(
+              eq(issueRelations.companyId, issue.companyId),
+              eq(issueRelations.relatedIssueId, candidateId),
+              eq(issueRelations.type, "blocks"),
+            ))
+            .then((rows) => rows.filter((row) => !isTerminalIssueStatus(row.blockerStatus)))
+          : [];
+        if (
+          !candidate
+          || (!isTerminalIssueStatus(candidate.status) && !isExecutableContinuationStatus(candidate.status))
+          || unresolvedBlockers.length > 0
+          || (declaredContinuationIssueId && (isTerminalIssueStatus(candidate.status) || !candidate.assigneeAgentId))
+        ) {
+          throw unprocessable("continuationIssueId must reference an executable agent-owned issue in the same company");
+        }
+        resolvedContinuationIssueId = candidate.id;
+      } else if (declaredContinuationIssueId) {
+        throw unprocessable("continuationIssueId requires a wake-capable continuationPolicy");
+      }
+      const normalizedDataWithContinuation = { ...normalizedData, continuationIssueId: resolvedContinuationIssueId };
+
       if (normalizedData.addresseeAgentId) {
         if (normalizedData.addresseeAgentId === actor.agentId) {
           throw unprocessable("Agents cannot address issue-thread interactions to themselves");
@@ -1460,7 +1511,7 @@ export function issueThreadInteractionService(db: Db) {
           idempotencyKey: normalizedData.idempotencyKey,
         });
         if (existing) {
-          if (!isEquivalentCreateRequest(existing, normalizedData, actor)) {
+          if (!isEquivalentCreateRequest(existing, normalizedDataWithContinuation, actor)) {
             throw conflict("Interaction idempotency key already exists for a different request", {
               idempotencyKey: normalizedData.idempotencyKey,
             });
@@ -1533,6 +1584,7 @@ export function issueThreadInteractionService(db: Db) {
               kind: data.kind,
               status: "pending",
               continuationPolicy: data.continuationPolicy,
+              continuationIssueId: resolvedContinuationIssueId,
               requestedResolverPolicy: policy.requestedResolverPolicy,
               effectiveResolverPolicy: policy.effectiveResolverPolicy,
               idempotencyKey: data.idempotencyKey ?? null,
@@ -1593,7 +1645,7 @@ export function issueThreadInteractionService(db: Db) {
           idempotencyKey: normalizedData.idempotencyKey,
         });
         if (!existing) throw error;
-        if (!isEquivalentCreateRequest(existing, normalizedData, actor)) {
+        if (!isEquivalentCreateRequest(existing, normalizedDataWithContinuation, actor)) {
           throw conflict("Interaction idempotency key already exists for a different request", {
             idempotencyKey: normalizedData.idempotencyKey,
           });

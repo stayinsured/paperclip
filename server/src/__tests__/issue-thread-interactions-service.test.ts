@@ -1382,6 +1382,36 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("persists an explicit executable continuation target while rejecting a blocked default host", async () => {
+    const { companyId, goalId, issueId: hostId } = await seedConfirmationIssue("Targeted continuation");
+    const agentId = randomUUID();
+    const targetId = randomUUID();
+    const blockerId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Executor", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: targetId, companyId, goalId, title: "Executable target", status: "todo", priority: "medium", assigneeAgentId: agentId },
+      { id: blockerId, companyId, goalId, title: "Host blocker", status: "in_progress", priority: "medium", assigneeAgentId: agentId },
+    ]);
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: agentId }).where(eq(issues.id, hostId));
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: hostId, type: "blocks" });
+
+    await expect(interactionsSvc.create({ id: hostId, companyId }, {
+      kind: "request_confirmation", continuationPolicy: "wake_assignee",
+      payload: { version: 1, prompt: "Resume where?" },
+    }, { userId: "local-board" })).rejects.toMatchObject({ status: 422 });
+
+    const created = await interactionsSvc.create({ id: hostId, companyId }, {
+      kind: "request_confirmation", continuationPolicy: "wake_assignee", continuationIssueId: targetId,
+      payload: { version: 1, prompt: "Resume target?" },
+    }, { userId: "local-board" });
+    expect(created.continuationIssueId).toBe(targetId);
+    const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, created.id));
+    expect(stored.continuationIssueId).toBe(targetId);
+  });
+
   it("accepts request_confirmation interactions without creating child issues", async () => {
     const companyId = randomUUID();
     const goalId = randomUUID();

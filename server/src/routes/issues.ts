@@ -1962,6 +1962,27 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
   return `request_item_verdicts:${args.issueId}:${args.interactionId}:${bucket}`;
 }
 
+async function resolveStoredInteractionContinuationIssue(
+  db: Db,
+  host: { id: string; companyId: string; assigneeAgentId: string | null; status: string },
+  interaction: { continuationIssueId?: string | null },
+) {
+  if (!interaction.continuationIssueId || interaction.continuationIssueId === host.id) return host;
+  return db
+    .select({ id: issueRows.id, companyId: issueRows.companyId, assigneeAgentId: issueRows.assigneeAgentId, status: issueRows.status })
+    .from(issueRows)
+    .where(and(
+      eq(issueRows.id, interaction.continuationIssueId),
+      eq(issueRows.companyId, host.companyId),
+    ))
+    .then((rows) => rows[0] ?? {
+      id: interaction.continuationIssueId!,
+      companyId: host.companyId,
+      assigneeAgentId: null,
+      status: "cancelled",
+    });
+}
+
 async function queueResolvedInteractionContinuationWakeup(input: {
   db: Db;
   heartbeat: ReturnType<typeof heartbeatService>;
@@ -10379,7 +10400,9 @@ export function issueRoutes(
           };
         }
       }
-      const continuationWakeIssue = continuationIssue ?? issue;
+      const continuationWakeIssue = interaction.continuationIssueId
+        ? await resolveStoredInteractionContinuationIssue(db, issue, interaction)
+        : continuationIssue ?? issue;
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -10521,10 +10544,11 @@ export function issueRoutes(
         },
       });
 
+      const continuationWakeIssue = await resolveStoredInteractionContinuationIssue(db, issue, interaction);
       await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
-        issue,
+        issue: continuationWakeIssue,
         interaction,
         actor,
         source: "issue.interaction.reject",

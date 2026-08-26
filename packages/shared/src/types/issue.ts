@@ -1309,6 +1309,7 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   summary?: string | null;
   status: IssueThreadInteractionStatus;
   continuationPolicy: IssueThreadInteractionContinuationPolicy;
+  continuationIssueId?: string | null;
   resolverPolicy: IssueThreadInteractionResolverPolicy;
   requestedResolverPolicy: IssueThreadInteractionResolverPolicy;
   effectiveResolverPolicy: IssueThreadInteractionResolverPolicy;
