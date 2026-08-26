@@ -321,6 +321,8 @@ Issue-thread comments and document-scoped comments have different wake semantics
 
 A top-level issue comment created by a board user or other user on an agent-assigned, non-terminal issue may wake that issue's assignee. This is the normal "the owner should see new issue-thread feedback" path, and the wake payload should identify the issue comment that caused the wake when possible.
 
+While that assignee already has a running execution for the same issue, clustered ordinary agent or system comment wakes are status-only by default and coalesce into the active run instead of creating another run. Human comments, explicit mentions, approvals, blocker resolution, protected-action interaction continuations, recovery hand-backs, and explicit fresh-session requests retain a follow-up run boundary. An agent that needs another agent to act must use an explicit structured mention rather than relying on an unmentioned status comment.
+
 Issue document comments, document annotation comments, and document review comments do not wake the issue assignee by default. They remain visible as document activity and should be discoverable from the issue's document/review surfaces, but document activity is not itself an issue execution path. A document comment can provide evidence or context for the next run, but it must not be treated as a queued wake, monitor, approval, interaction response, blocker, or terminal disposition.
 
 Document-scoped activity may still route work when it is converted into an explicit action-path primitive. Valid routing exceptions include:
