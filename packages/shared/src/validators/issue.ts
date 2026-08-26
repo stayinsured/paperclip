@@ -1342,3 +1342,26 @@ export const restoreIssueDocumentRevisionSchema = z.object({});
 export type IssueDocumentFormat = z.infer<typeof issueDocumentFormatSchema>;
 export type UpsertIssueDocument = z.infer<typeof upsertIssueDocumentSchema>;
 export type RestoreIssueDocumentRevision = z.infer<typeof restoreIssueDocumentRevisionSchema>;
+
+export const SESSION_REUSE_FRESH_REQUIRED_REASONS = [
+  "company_changed", "issue_changed", "model_changed", "instructions_changed",
+  "environment_changed", "credentials_changed", "security_bindings_changed", "configuration_changed",
+] as const;
+
+export const evaluateSessionReusePilotSchema = z.object({
+  controlMedianProcessedTokens: z.number().int().positive(),
+  observations: z.array(z.object({
+    runId: z.string().trim().min(1).max(200),
+    issueId: z.string().uuid(),
+    companyId: z.string().uuid(),
+    repeatWake: z.boolean(),
+    sessionReused: z.boolean(),
+    forceFreshSession: z.boolean().optional().default(false),
+    freshRequiredReasons: z.array(z.enum(SESSION_REUSE_FRESH_REQUIRED_REASONS)).max(8).optional().default([]),
+    contextMode: z.enum(["full", "delta"]),
+    processedTokens: z.number().int().nonnegative(),
+    functionalOutcomeMatched: z.boolean(),
+  }).strict()).min(1).max(1_000),
+}).strict();
+
+export type EvaluateSessionReusePilot = z.infer<typeof evaluateSessionReusePilotSchema>;

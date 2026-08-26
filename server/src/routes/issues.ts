@@ -45,6 +45,7 @@ import {
   createDocumentAnnotationThreadSchema,
   createChildIssueSchema,
   createIssueSchema,
+  evaluateSessionReusePilotSchema,
   resolveCreateIssueStatusDefault,
   resolveIssueRecoveryActionSchema,
   feedbackTargetTypeSchema,
@@ -104,6 +105,7 @@ import {
 } from "@paperclipai/shared";
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
+import { evaluateSessionReusePilot } from "../services/session-reuse-pilot.js";
 import type { StorageService } from "../storage/types.js";
 import { validate } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
@@ -6024,6 +6026,13 @@ export function issueRoutes(
     );
 
     res.json(response);
+  });
+
+  router.post("/issues/:id/session-reuse-pilot/evaluate", validate(evaluateSessionReusePilotSchema), async (req, res) => {
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    res.json(evaluateSessionReusePilot({ expectedIssueId: issue.id, expectedCompanyId: issue.companyId, cohort: req.body }));
   });
 
   router.get("/issues/:id", async (req, res) => {
