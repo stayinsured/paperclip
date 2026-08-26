@@ -62,6 +62,9 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockTrackAgentCreated = vi.hoisted(() => vi.fn());
 const mockGetTelemetryClient = vi.hoisted(() => vi.fn());
 const mockSyncInstructionsBundleConfigFromFilePath = vi.hoisted(() => vi.fn());
+const mockChangeConsentGate = vi.hoisted(() => ({
+  assertConsented: vi.fn(),
+}));
 
 const mockAdapter = vi.hoisted(() => ({
   listSkills: vi.fn(),
@@ -111,6 +114,11 @@ vi.mock("../services/instance-settings.js", async (importOriginal) => ({
   instanceSettingsService: () => mockInstanceSettingsService,
 }));
 
+vi.mock("../services/change-consent-gate.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/change-consent-gate.js")>()),
+  changeConsentGateService: () => mockChangeConsentGate,
+}));
+
 vi.mock("../adapters/index.js", () => ({
   findServerAdapter: vi.fn(() => mockAdapter),
   findActiveServerAdapter: vi.fn(() => mockAdapter),
@@ -154,6 +162,11 @@ function registerModuleMocks() {
     instanceSettingsService: () => mockInstanceSettingsService,
   }));
 
+  vi.doMock("../services/change-consent-gate.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../services/change-consent-gate.js")>()),
+    changeConsentGateService: () => mockChangeConsentGate,
+  }));
+
   vi.doMock("../adapters/index.js", () => ({
     findServerAdapter: vi.fn(() => mockAdapter),
     findActiveServerAdapter: vi.fn(() => mockAdapter),
@@ -177,7 +190,16 @@ function createDb(requireBoardApprovalForNewAgents = false) {
   };
 }
 
-async function createApp(db: Record<string, unknown> = createDb()) {
+async function createApp(
+  db: Record<string, unknown> = createDb(),
+  actor: Record<string, unknown> = {
+    type: "board",
+    userId: "local-board",
+    companyIds: ["company-1"],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+  },
+) {
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -185,13 +207,7 @@ async function createApp(db: Record<string, unknown> = createDb()) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as any).actor = {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor;
     next();
   });
   app.use("/api", agentRoutes(db as any));
@@ -265,9 +281,11 @@ describe.sequential("agent skill routes", () => {
     mockTrackAgentCreated.mockReset();
     mockGetTelemetryClient.mockReset();
     mockSyncInstructionsBundleConfigFromFilePath.mockReset();
+    mockChangeConsentGate.assertConsented.mockReset();
     mockAdapter.listSkills.mockReset();
     mockAdapter.syncSkills.mockReset();
     mockSyncInstructionsBundleConfigFromFilePath.mockImplementation((_agent, config) => config);
+    mockChangeConsentGate.assertConsented.mockResolvedValue(true);
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
     let persistedAgent: Record<string, unknown> | null = null;
     mockAgentService.resolveByReference.mockResolvedValue({
@@ -369,6 +387,98 @@ describe.sequential("agent skill routes", () => {
     mockAccessService.listPrincipalGrants.mockResolvedValue([]);
     mockAccessService.ensureMembership.mockResolvedValue(undefined);
     mockAccessService.setPrincipalPermission.mockResolvedValue(undefined);
+  });
+
+  it("allows one Reflection Coach skill sync with accepted prior-run profile consent", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
+    mockAccessService.decide
+      .mockResolvedValueOnce({
+        allowed: false,
+        reason: "deny_missing_consent",
+        explanation: "Accepted protected-change consent is required.",
+      })
+      .mockResolvedValueOnce({
+        allowed: true,
+        reason: "allow_consented_change",
+        explanation: "Allowed by accepted consent.",
+      });
+
+    const res = await requestApp(
+      await createApp(createDb(), {
+        type: "agent",
+        agentId: "reflection-coach",
+        companyId: "company-1",
+        runId: "apply-run",
+      }),
+      (baseUrl) => request(baseUrl)
+        .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+        .send({ desiredSkills: ["paperclip"] }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockChangeConsentGate.assertConsented).toHaveBeenCalledTimes(1);
+    expect(mockChangeConsentGate.assertConsented).toHaveBeenCalledWith({
+      companyId: "company-1",
+      actorAgentId: "reflection-coach",
+      actorRunId: "apply-run",
+      targetKeys: ["agent:11111111-1111-4111-8111-111111111111:profile"],
+    });
+    expect(mockAgentService.update).toHaveBeenCalledTimes(1);
+    expect(mockAdapter.syncSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "pending",
+    "rejected",
+    "same-run",
+    "target-mismatched",
+    "already-consumed",
+  ])("denies Reflection Coach skill sync with %s consent", async (_consentState) => {
+    const { forbidden } = await import("../errors.js");
+    mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
+    mockAccessService.decide.mockResolvedValue({
+      allowed: false,
+      reason: "deny_missing_consent",
+      explanation: "Accepted protected-change consent is required.",
+    });
+    mockChangeConsentGate.assertConsented.mockRejectedValue(forbidden("Consent is not consumable", {
+      code: "reflection_coach_mutation_gate_required",
+    }));
+
+    const res = await requestApp(
+      await createApp(createDb(), {
+        type: "agent",
+        agentId: "reflection-coach",
+        companyId: "company-1",
+        runId: "apply-run",
+      }),
+      (baseUrl) => request(baseUrl)
+        .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+        .send({ desiredSkills: ["paperclip"] }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockChangeConsentGate.assertConsented).toHaveBeenCalledWith(expect.objectContaining({
+      targetKeys: ["agent:11111111-1111-4111-8111-111111111111:profile"],
+    }));
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockAdapter.syncSkills).not.toHaveBeenCalled();
+  });
+
+  it("preserves ordinary authorized board skill sync without consuming consent", async () => {
+    mockAgentService.getById.mockResolvedValue(makeAgent("claude_local"));
+
+    const res = await requestApp(
+      await createApp(),
+      (baseUrl) => request(baseUrl)
+        .post("/api/agents/11111111-1111-4111-8111-111111111111/skills/sync?companyId=company-1")
+        .send({ desiredSkills: ["paperclip"] }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockChangeConsentGate.assertConsented).not.toHaveBeenCalled();
+    expect(mockAgentService.update).toHaveBeenCalledTimes(1);
+    expect(mockAdapter.syncSkills).toHaveBeenCalledTimes(1);
   });
 
   it("skips runtime materialization when listing Claude skills", async () => {
