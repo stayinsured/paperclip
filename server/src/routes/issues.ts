@@ -4753,7 +4753,7 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: Parameters<typeof decideIssueAccess>[1],
-    options: { resumeIntent?: boolean } = {},
+    options: { resumeIntent?: boolean; watchdogNextAssigneeAgentId?: string | null } = {},
   ) {
     if (await assertLowTrustControlPlaneDenied(req, res, issue.companyId, issue)) return false;
 
@@ -4814,6 +4814,7 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
+    if (options.watchdogNextAssigneeAgentId) return true;
     if (!issue.assigneeAgentId) {
       res.status(409).json({
         error: "Issue follow-up requires an assigned agent",
@@ -8556,6 +8557,18 @@ export function issueRoutes(
       req.body.assigneeAgentId as string | null | undefined,
       { actorType: req.actor.type },
     );
+    const watchdogMutationScope = req.actor.type === "agent"
+      ? await resolveTaskWatchdogMutationScope(db, req.actor)
+      : { kind: "none" as const };
+    const atomicWatchdogHumanRecoveryRequested =
+      watchdogMutationScope.kind === "watchdog" &&
+      existing.status === "blocked" &&
+      existing.assigneeAgentId === null &&
+      existing.assigneeUserId !== null &&
+      req.body.resume === true &&
+      typeof req.body.comment === "string" &&
+      req.body.comment.trim().length > 0 &&
+      typeof normalizedAssigneeAgentId === "string";
     const titleOrDescriptionChanged = req.body.title !== undefined || req.body.description !== undefined;
     const existingRelations =
       Array.isArray(req.body.blockedByIssueIds)
@@ -8587,7 +8600,12 @@ export function issueRoutes(
     }
     if (
       resumeRequested === true &&
-      !(await assertExplicitResumeIntentAllowed(req, res, existing, { resumeIntent: true }))
+      !(await assertExplicitResumeIntentAllowed(req, res, existing, {
+        resumeIntent: true,
+        watchdogNextAssigneeAgentId: atomicWatchdogHumanRecoveryRequested
+          ? normalizedAssigneeAgentId
+          : null,
+      }))
     ) return;
     const agentStatusTransitionRequiresResumeAuthority =
       req.actor.type === "agent" &&
@@ -8674,6 +8692,14 @@ export function issueRoutes(
     if (resumeRequested === true && isBlocked && hasUnresolvedFirstClassBlockers) {
       res.status(409).json({ error: "Issue follow-up blocked by unresolved blockers" });
       return;
+    }
+    if (atomicWatchdogHumanRecoveryRequested) {
+      const approvals = await issueApprovalsSvc.listApprovalsForIssue(existing.id);
+      if (approvals.some((approval) => ACTIVE_REVIEW_APPROVAL_STATUSES.has(String(approval.status)))) {
+        res.status(409).json({ error: "Issue follow-up blocked by unresolved approval" });
+        return;
+      }
+      updateFields.assigneeUserId = null;
     }
     let interruptedRunId: string | null = null;
     const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(existing);
@@ -8974,9 +9000,25 @@ export function issueRoutes(
         ? svc.update(id, issueUpdateData, db, postCommitActivityPublications)
         : svc.update(id, issueUpdateData);
     };
+    let atomicRecoveryComment: Awaited<ReturnType<typeof svc.addComment>> | null = null;
     let issue: Awaited<ReturnType<typeof svc.update>>;
     try {
-      if (transition.decision && decisionId) {
+      if (atomicWatchdogHumanRecoveryRequested) {
+        const recoveryCommentOptions = {
+          authorizationReason: issueMutationAuthorizationReason,
+          sourceTrust: await sourceTrustForActorWrite(existing, actor),
+        };
+        issue = await db.transaction(async (tx) => {
+          const updated = await updateIssue(tx);
+          if (!updated) return null;
+          atomicRecoveryComment = await svc.addComment(id, commentBody!, {
+            agentId: actor.agentId ?? undefined,
+            runId: actor.runId,
+            onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+          }, recoveryCommentOptions, tx);
+          return updated;
+        });
+      } else if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
           const updated = await updateIssue(tx);
@@ -9433,12 +9475,13 @@ export function issueRoutes(
       }
     }
 
-    let comment = null;
+    let comment = atomicRecoveryComment;
     let lostReviewPathRef: string | null = null;
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      comment = await svc.addComment(id, commentBody, {
+      if (!comment) {
+        comment = await svc.addComment(id, commentBody, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
@@ -9446,7 +9489,8 @@ export function issueRoutes(
       }, {
         authorizationReason: issueMutationAuthorizationReason,
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
-      });
+        });
+      }
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
       const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);

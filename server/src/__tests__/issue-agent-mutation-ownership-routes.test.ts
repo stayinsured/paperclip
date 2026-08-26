@@ -2185,6 +2185,95 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
+    it("atomically reassigns and resumes a blocked human-owned issue", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user" }),
+        ...patch,
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(ownerAgentId) });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Board wait resolved; resume the declared continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        issueId,
+        expect.objectContaining({
+          status: "todo",
+          assigneeAgentId: ownerAgentId,
+          assigneeUserId: null,
+        }),
+        expect.any(Object),
+      );
+      expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.addComment.mock.calls[0]?.[4]).toBe(mockIssueService.update.mock.calls[0]?.[2]);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        ownerAgentId,
+        expect.objectContaining({
+          reason: "issue_assigned",
+          payload: expect.objectContaining({ issueId, resumeIntent: true }),
+        }),
+      );
+    });
+
+    it("denies the equivalent ordinary-agent recovery of a human-owned issue", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(peerAgentId) });
+
+      const app = await createApp(ownerActor());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Attempted continuation.",
+        assigneeAgentId: peerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toBe("Issue follow-up requires an assigned agent");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("denies watchdog recovery while an approval remains unresolved", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(ownerAgentId) });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([{ status: "pending" }] as never);
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Attempted continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toBe("Issue follow-up blocked by unresolved approval");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
     it("lets a watchdog run reassign a watched issue to an active same-company agent", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
