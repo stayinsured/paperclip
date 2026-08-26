@@ -2349,6 +2349,30 @@ describe("agent issue mutation checkout ownership", () => {
       expectNoRecoveryMutation();
     });
 
+    it("denies an ineligible next assignee through combined watchdog recovery without any partial mutation", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({
+        ambiguous: false,
+        agent: makeAgent(ownerAgentId, { status: "paused" }),
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Attempted continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toContain("Cannot assign work to a paused agent");
+      expectNoRecoveryMutation();
+    });
+
     it("does not wake when the atomic recovery comment fails", async () => {
       denyBaseBoundary();
       const transactionToken = { transaction: "watchdog-recovery" };
@@ -2368,6 +2392,29 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     });
 
+
+    it("queues exactly one recovery wake before a fallible post-commit activity step", async () => {
+      denyBaseBoundary();
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user" }),
+        ...patch,
+      }));
+      mockLogActivity.mockRejectedValueOnce(new Error("injected post-commit activity failure"));
+
+      const res = await requestCombinedRecovery();
+
+      expect(res.status, JSON.stringify(res.body)).toBe(500);
+      expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        ownerAgentId,
+        expect.objectContaining({
+          reason: "issue_assigned",
+          payload: expect.objectContaining({ issueId, resumeIntent: true }),
+        }),
+      );
+    });
 
     it("lets a watchdog run reassign a watched issue to an active same-company agent", async () => {
       denyBaseBoundary();

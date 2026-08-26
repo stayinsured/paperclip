@@ -9080,6 +9080,43 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    const atomicRecoveryAssignmentAgentId = atomicWatchdogHumanRecoveryRequested
+      ? issue.assigneeAgentId
+      : null;
+    const atomicRecoveryAssignmentWakeQueued = atomicRecoveryAssignmentAgentId !== null;
+    if (atomicRecoveryAssignmentWakeQueued) {
+      void heartbeat.wakeup(atomicRecoveryAssignmentAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: {
+          issueId: issue.id,
+          ...(atomicRecoveryComment ? { commentId: atomicRecoveryComment.id } : {}),
+          mutation: "update",
+          resumeIntent: true,
+          followUpRequested: true,
+        },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: issue.id,
+          ...(atomicRecoveryComment
+            ? {
+                taskId: issue.id,
+                commentId: atomicRecoveryComment.id,
+                wakeCommentId: atomicRecoveryComment.id,
+              }
+            : {}),
+          source: "issue.update",
+          resumeIntent: true,
+          followUpRequested: true,
+        },
+      }).catch((err) =>
+        logger.warn(
+          { err, issueId: id, agentId: atomicRecoveryAssignmentAgentId },
+          "failed to wake assignee after atomic watchdog recovery",
+        ));
+    }
     for (const publication of postCommitActivityPublications) publishActivity(publication);
 
     if (enteringBlocked) {
@@ -9669,7 +9706,12 @@ export function issueRoutes(
 
       if (executionStageWakeup) {
         addWakeup(executionStageWakeup.agentId, executionStageWakeup.wakeup);
-      } else if (assigneeChanged && issue.assigneeAgentId && issue.status !== "backlog") {
+      } else if (
+        !atomicRecoveryAssignmentWakeQueued &&
+        assigneeChanged &&
+        issue.assigneeAgentId &&
+        issue.status !== "backlog"
+      ) {
         addWakeup(issue.assigneeAgentId, {
           source: "assignment",
           triggerDetail: "system",
