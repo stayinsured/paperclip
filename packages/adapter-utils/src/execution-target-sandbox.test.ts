@@ -1285,6 +1285,68 @@ describe("sandbox adapter execution targets", () => {
     }
   });
 
+  it("forwards host callbacks through the local listen endpoint instead of the advertised runtime URL", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-local-forward-"));
+    cleanupDirs.push(rootDir);
+    const remoteCwd = path.join(rootDir, "workspace");
+    const runtimeRootDir = path.join(remoteCwd, ".paperclip-runtime", "codex");
+    await mkdir(runtimeRootDir, { recursive: true });
+
+    const requests: string[] = [];
+    const apiServer = createServer((req, res) => {
+      requests.push(req.url ?? "/");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      apiServer.once("error", reject);
+      apiServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = apiServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Expected the local-forward bridge test API server to listen on a TCP port.");
+    }
+
+    vi.stubEnv("PAPERCLIP_LISTEN_HOST", "127.0.0.1");
+    vi.stubEnv("PAPERCLIP_LISTEN_PORT", String(address.port));
+    vi.stubEnv("PAPERCLIP_RUNTIME_API_URL", "http://127.0.0.1:9");
+    vi.stubEnv("PAPERCLIP_API_URL", "http://127.0.0.1:9");
+
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "e2b",
+      environmentId: "env-1",
+      leaseId: "lease-1",
+      remoteCwd,
+      runner: createLocalSandboxRunner(),
+      timeoutMs: 30_000,
+    };
+
+    const bridge = await startAdapterExecutionTargetPaperclipBridge({
+      runId: "run-bridge-local-forward",
+      target,
+      runtimeRootDir,
+      adapterKey: "codex",
+      hostApiToken: "real-run-jwt",
+    });
+    try {
+      const response = await fetch(`${bridge!.env.PAPERCLIP_API_URL}/api/agents/me`, {
+        headers: {
+          authorization: `Bearer ${bridge!.env.PAPERCLIP_API_KEY}`,
+          accept: "application/json",
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      expect(requests).toEqual(["/api/agents/me"]);
+    } finally {
+      await bridge?.stop();
+      await new Promise<void>((resolve) => apiServer.close(() => resolve()));
+    }
+  });
+
   it("creates a sandbox run log tail factory when bridge streaming is enabled", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-execution-target-bridge-stream-"));
     cleanupDirs.push(rootDir);
