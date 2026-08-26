@@ -2324,6 +2324,156 @@ describe("realizeExecutionWorkspace", () => {
     expect(actualHead).toBe(expectedHead);
   }, 15_000);
 
+  it("durably repairs a missing persisted worktree pointer before repeated reuse", async () => {
+    const repoRoot = await createTempRepo();
+    const initial = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-pointer-repair",
+        identifier: "STA-2671",
+        title: "Repair persisted pointer",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+
+    const reuse = () => ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary" as const,
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-pointer-repair",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: initial.cwd,
+        providerRef: initial.worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName: initial.branchName,
+      },
+      issue: {
+        id: "issue-pointer-repair",
+        identifier: "STA-2671",
+        title: "Repair persisted pointer",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+      recorder,
+    });
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await fs.rm(path.join(initial.cwd, ".git"), { force: true });
+      await expect(readGit(initial.cwd, ["rev-parse", "--show-toplevel"])).resolves.toBe(repoRoot);
+      await expect(readGit(repoRoot, ["worktree", "list", "--porcelain"]))
+        .resolves.toContain("prunable gitdir file points to non-existent location");
+
+      const restored = await reuse();
+
+      expect(restored?.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("Repaired missing git worktree pointer"),
+      ]));
+      await expect(readGit(initial.cwd, ["rev-parse", "--show-toplevel"])).resolves.toBe(initial.cwd);
+      await expect(readGit(initial.cwd, ["branch", "--show-current"])).resolves.toBe(initial.branchName);
+      await expect(readGit(repoRoot, ["worktree", "list", "--porcelain"]))
+        .resolves.not.toContain("prunable gitdir file points to non-existent location");
+    }
+
+    expect(operations.filter((operation) => operation.metadata?.worktreePointerRepair)).toEqual([
+      expect.objectContaining({
+        phase: "worktree_prepare",
+        command: `git worktree repair ${initial.cwd}`,
+        cwd: repoRoot,
+      }),
+      expect.objectContaining({
+        phase: "worktree_prepare",
+        command: `git worktree repair ${initial.cwd}`,
+        cwd: repoRoot,
+      }),
+    ]);
+  }, 15_000);
+
+  it("keeps a non-missing wrong worktree pointer fail-closed", async () => {
+    const repoRoot = await createTempRepo();
+    const branchName = "STA-2671-wrong-pointer";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", branchName);
+    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+    await runGit(repoRoot, ["worktree", "add", "-b", branchName, worktreePath, "HEAD"]);
+    const wrongGitDir = path.join(repoRoot, ".git", "worktrees", "not-this-worktree");
+    await fs.writeFile(path.join(worktreePath, ".git"), `gitdir: ${wrongGitDir}\n`, "utf8");
+
+    await expect(ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      workspace: {
+        id: "execution-workspace-wrong-pointer",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: null,
+        baseRef: "HEAD",
+        branchName,
+      },
+      issue: {
+        id: "issue-wrong-pointer",
+        identifier: "STA-2671",
+        title: "Reject wrong worktree root",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    })).rejects.toMatchObject({
+      code: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: {
+          reason: "git_worktree_not_reusable",
+          reasonCode: "wrong_repository_root",
+          worktreePath,
+          executionWorkspaceId: "execution-workspace-wrong-pointer",
+        },
+      },
+    });
+    await expect(fs.readFile(path.join(worktreePath, ".git"), "utf8"))
+      .resolves.toBe(`gitdir: ${wrongGitDir}\n`);
+  }, 15_000);
+
   it("repairs a clean persisted git worktree branch mismatch when both branches point at the same commit", async () => {
     const repoRoot = await createTempRepo();
     const expectedBranch = "PAP-454-repair-clean-branch-mismatch";
@@ -3396,6 +3546,65 @@ describe("realizeExecutionWorkspace", () => {
       stdout: "",
     });
   });
+
+  it("repairs a missing pointer before cleaning a registered git worktree", async () => {
+    const repoRoot = await createTempRepo();
+    const workspace = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: null,
+        repoRef: "HEAD",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+        },
+      },
+      issue: {
+        id: "issue-cleanup-pointer",
+        identifier: "STA-2671",
+        title: "Cleanup repaired pointer",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+    });
+    await fs.rm(path.join(workspace.cwd, ".git"), { force: true });
+
+    const cleanup = await cleanupExecutionWorkspaceArtifacts({
+      workspace: {
+        id: "execution-workspace-cleanup-pointer",
+        cwd: workspace.cwd,
+        providerType: "git_worktree",
+        providerRef: workspace.worktreePath,
+        branchName: workspace.branchName,
+        repoUrl: workspace.repoUrl,
+        baseRef: workspace.repoRef,
+        projectId: workspace.projectId,
+        projectWorkspaceId: workspace.workspaceId,
+        sourceIssueId: "issue-cleanup-pointer",
+        metadata: { createdByRuntime: true },
+      },
+      projectWorkspace: {
+        cwd: repoRoot,
+        cleanupCommand: null,
+      },
+    });
+
+    expect(cleanup.cleaned).toBe(true);
+    expect(cleanup.warnings).toEqual([
+      expect.stringContaining("Repaired missing git worktree pointer"),
+    ]);
+    await expect(fs.stat(workspace.cwd)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readGit(repoRoot, ["worktree", "list", "--porcelain"]))
+      .resolves.not.toContain(workspace.cwd);
+  }, 15_000);
 
   it("keeps an unmerged runtime-created branch and warns instead of force deleting it", async () => {
     const repoRoot = await createTempRepo();

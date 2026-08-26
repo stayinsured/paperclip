@@ -401,6 +401,65 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
     });
   }, 20_000);
 
+  it("repairs a registered worktree pointer removed during adapter execution before finalization", async () => {
+    const repoRoot = await createGitRepo();
+    tempRoots.push(repoRoot);
+    const { agentId, issueId } = await seedRunTarget(db, repoRoot);
+    let executionWorkspaceId: string | null = null;
+    let workspaceCwd: string | null = null;
+
+    adapterExecute.mockImplementationOnce(async (input) => {
+      const workspace = readAdapterWorkspace(input);
+      executionWorkspaceId = workspace.executionWorkspaceId;
+      workspaceCwd = workspace.cwd;
+      await rm(path.join(workspace.cwd, ".git"), { force: true });
+      await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, issueId));
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        summary: "Adapter completed after the worktree pointer disappeared.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await wakeIssue(heartbeat, agentId, issueId);
+    expect(run).not.toBeNull();
+
+    const finishedRun = await waitForRunToFinish(heartbeat, run!.id);
+    expect(finishedRun).toMatchObject({
+      status: "succeeded",
+      errorCode: null,
+      error: null,
+    });
+    await waitForRuntimeStateLastRun(db, agentId, run!.id);
+    await expect(execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: workspaceCwd! }))
+      .resolves.toMatchObject({ stdout: `${workspaceCwd}\n` });
+    await expect(execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot }))
+      .resolves.toMatchObject({ stdout: expect.not.stringContaining("prunable gitdir file points to non-existent location") });
+
+    const finalizeOps = await listFinalizeOperations(db, run!.id);
+    expect(finalizeOps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "succeeded",
+        executionWorkspaceId,
+        command: `git worktree repair ${workspaceCwd}`,
+        cwd: repoRoot,
+        metadata: expect.objectContaining({
+          worktreePointerRepair: true,
+          priorReasonCode: "wrong_repository_root",
+        }),
+      }),
+      expect.objectContaining({
+        status: "succeeded",
+        executionWorkspaceId,
+        command: null,
+      }),
+    ]));
+  }, 20_000);
+
   it("adopts unrecorded forward branch drift for finalization without persisting it", async () => {
     const repoRoot = await createGitRepo();
     tempRoots.push(repoRoot);
