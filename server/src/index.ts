@@ -781,13 +781,21 @@ export async function startServer(): Promise<StartedServer> {
   }
   
   const runtimeListenHost = config.host;
-  const runtimeApiUrl = choosePrimaryRuntimeApiUrl({
+  // PAPERCLIP_RUNTIME_API_URL is the server-local callback address inherited by
+  // local agent processes. Keep an explicitly configured value distinct from
+  // the public/advertised API URL: the latter may depend on DNS, a reverse
+  // proxy, or a private overlay network that a local process sandbox cannot
+  // resolve. Remote execution targets replace this value with their scoped
+  // callback bridge URL before launch.
+  const advertisedApiUrl = choosePrimaryRuntimeApiUrl({
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
     allowedHostnames: config.allowedHostnames,
     bindHost: runtimeListenHost,
     port: listenPort,
   });
-  const configuredApiUrl = process.env.PAPERCLIP_API_URL?.trim() || runtimeApiUrl;
+  const runtimeApiUrl =
+    process.env.PAPERCLIP_RUNTIME_API_URL?.trim() || advertisedApiUrl;
+  const configuredApiUrl = process.env.PAPERCLIP_API_URL?.trim() || advertisedApiUrl;
   const runtimeApiCandidates = buildRuntimeApiCandidateUrls({
     preferredApiUrl: configuredApiUrl,
     authPublicBaseUrl: config.authPublicBaseUrl ?? null,
