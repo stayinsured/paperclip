@@ -183,4 +183,57 @@ describe("remote managed runtime", () => {
       localDir: "relative/referenced",
     }));
   });
+
+  it("keeps reproducible dependency trees outside the SSH restore baseline", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-heavy-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(path.join(workspaceDir, "node_modules", "pkg"), { recursive: true });
+    await mkdir(path.join(workspaceDir, ".pnpm-store", "v10"), { recursive: true });
+    await writeFile(path.join(workspaceDir, "source.ts"), "export const source = true;\n", "utf8");
+    await writeFile(path.join(workspaceDir, "node_modules", "pkg", "cache.bin"), "cache\n", "utf8");
+    await writeFile(path.join(workspaceDir, ".pnpm-store", "v10", "index.bin"), "cache\n", "utf8");
+    prepareWorkspaceForSshExecution.mockResolvedValueOnce({ gitBacked: true });
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/app",
+        remoteCwd: "/app",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "KNOWN HOSTS",
+        strictHostKeyChecking: true,
+      },
+      runId: "run-heavy-excludes",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+    });
+
+    await prepared.restoreWorkspace();
+
+    expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baselineSnapshot: expect.objectContaining({
+          exclude: expect.arrayContaining([
+            "node_modules",
+            "*/node_modules/*",
+            ".pnpm-store",
+            "*/.pnpm-store/*",
+            ".paperclip-runtime",
+          ]),
+        }),
+        restoreGitHistory: true,
+      }),
+    );
+    expect(runSshCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      "rm -rf -- '/app/.paperclip-runtime/runs/run-heavy-excludes'",
+    );
+    restoreWorkspaceFromSshExecution.mockRejectedValueOnce(new Error("restore failed"));
+    await expect(prepared.restoreWorkspace()).rejects.toThrow("restore failed");
+    expect(runSshCommand).toHaveBeenCalledTimes(2);
+  });
 });

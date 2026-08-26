@@ -27,26 +27,9 @@ import {
   type RuntimeStatusSink,
 } from "./runtime-progress.js";
 import { isRelativePathOrDescendant, shouldExcludePath } from "./exclude-patterns.js";
+import { WORKSPACE_HEAVY_DIR_EXCLUDES } from "./workspace-heavy-excludes.js";
 
 const execFile = promisify(execFileCallback);
-const SANDBOX_WORKSPACE_HEAVY_DIR_NAMES = [
-  "node_modules",
-  "vendor",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-  ".next",
-  ".turbo",
-  ".cache",
-] as const;
-const SANDBOX_WORKSPACE_HEAVY_DIR_EXCLUDES = SANDBOX_WORKSPACE_HEAVY_DIR_NAMES.flatMap((entry) => [
-  entry,
-  `${entry}/*`,
-  `*/${entry}`,
-  `*/${entry}/*`,
-]);
-
 export interface SandboxRemoteExecutionSpec {
   transport: "sandbox";
   provider: string;
@@ -710,13 +693,13 @@ export async function prepareSandboxManagedRuntime(input: {
   const gitSnapshot = syncWorkspace ? await readGitWorkspaceSnapshot(input.workspaceLocalDir) : null;
   const gitIgnoredExcludes = gitSnapshot?.ignoredPaths;
   const workspaceArchiveExclude = mergeExcludes(
-    SANDBOX_WORKSPACE_HEAVY_DIR_EXCLUDES,
+    WORKSPACE_HEAVY_DIR_EXCLUDES,
     [...GIT_ARCHIVE_EXCLUDES],
     input.workspaceExclude,
     gitIgnoredExcludes,
   );
   const restoreExclude = mergeExcludes(
-    SANDBOX_WORKSPACE_HEAVY_DIR_EXCLUDES,
+    WORKSPACE_HEAVY_DIR_EXCLUDES,
     [...GIT_ARCHIVE_EXCLUDES],
     [".paperclip-runtime"],
     input.preserveAbsentOnRestore,
@@ -758,7 +741,7 @@ export async function prepareSandboxManagedRuntime(input: {
   // Additional projects stage as plain trees. Drop the heavy build/cache dirs a
   // reference tree does not need, and `.git` — additional sources never carry
   // git-history semantics (anchor-only).
-  const additionalSourceExclude = mergeExcludes(SANDBOX_WORKSPACE_HEAVY_DIR_EXCLUDES, [".git"]);
+  const additionalSourceExclude = mergeExcludes(WORKSPACE_HEAVY_DIR_EXCLUDES, [".git"]);
 
   // Every delegated post-upload command (extract/wipe/remove-deleted/asset merge)
   // must run under the run-specific timeout (`spec.timeoutMs`), not the provider

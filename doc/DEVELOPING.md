@@ -877,6 +877,14 @@ Default behavior:
 - `local_trusted`: enabled
 - `authenticated`: disabled
 
+## SSH Workspace Disk Safety
+
+Managed SSH and sandbox workspace transfers exclude reproducible dependency, package-store, cache, coverage, and ordinary build-output directories. Keep source, lock files, configuration, migrations, and deliberate deliverables in the workspace; rebuild dependency and cache trees inside the execution environment.
+
+SSH transfers also have a bidirectional archive-stream cap. PAPERCLIP_SSH_SYNC_MAX_BYTES defaults to 17179869184 bytes (16 GiB). Set a positive byte count to tighten or raise the limit. Setting it to 0 disables the cap and should require an explicit operator decision after checking available disk headroom.
+
+Completed managed SSH run directories are removed after workspace and asset restoration. Runtime TTL retention remains the fallback when immediate removal fails.
+
 ## CLI Client Operations
 
 Paperclip CLI now includes client-side control-plane commands in addition to setup commands.

@@ -540,6 +540,29 @@ export function createPluginWorkerHandle(
       : JSONRPC_ERROR_CODES.INTERNAL_ERROR;
   }
 
+  const safeSecretResolutionErrorCodes = new Set([
+    "binding_missing",
+    "binding_not_allowed",
+    "disabled",
+    "secret_deleted",
+    "secret_inactive",
+    "version_missing",
+    "version_inactive",
+  ]);
+
+  function errorDataForWorkerHostError(
+    method: WorkerToHostMethodName,
+    err: unknown,
+  ): { code: string } | undefined {
+    if (method !== "secrets.resolve" || !err || typeof err !== "object") return undefined;
+    const details = (err as { details?: unknown }).details;
+    if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+    const code = (details as { code?: unknown }).code;
+    return typeof code === "string" && safeSecretResolutionErrorCodes.has(code)
+      ? { code }
+      : undefined;
+  }
+
   // -----------------------------------------------------------------------
   // Incoming message handling
   // -----------------------------------------------------------------------
@@ -712,6 +735,15 @@ export function createPluginWorkerHandle(
       if (proactiveCompanyId && proactiveCompanyScopes.has(proactiveCompanyId)) {
         return { invocationScope: { companyId: proactiveCompanyId } };
       }
+      // `companies.list` is intentionally instance-scoped in the SDK gate: it
+      // does not inherit or require a company invocation scope. Scheduled jobs
+      // commonly use it to discover their configured companies. If two jobs
+      // overlap, another pending request may leave `activeInvocations` non-empty;
+      // treating this unscoped list call as a missing invocation then creates a
+      // false denial that depends only on timing. An echoed invocation id does
+      // not narrow `companies.list` either, so accepting the absent id here does
+      // not widen the capability granted by `companies.read`.
+      if (message.method === "companies.list") return {};
       const hasActiveInvocation = activeInvocations.size > 0 ||
         Array.from(pendingRequests.values()).some((pending) => pending.invocationId);
       return hasActiveInvocation ? { invalidInvocationScope: true } : {};
@@ -762,6 +794,7 @@ export function createPluginWorkerHandle(
             request.id,
             errorCodeForWorkerHostError(err),
             errorMessage,
+            errorDataForWorkerHostError(method, err),
           ),
         );
       } catch {

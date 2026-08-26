@@ -326,6 +326,51 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("returns only an allowlisted secret-resolution error code to the plugin worker", async () => {
+    const secretsResolve = vi.fn(async () => {
+      throw Object.assign(new Error("Secret is not bound to plugin:test.plugin at apiKeyRef"), {
+        details: { code: "binding_missing", configPath: "must-not-cross-the-rpc-boundary" },
+      });
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers: {
+        "secrets.resolve": secretsResolve,
+      },
+    });
+
+    try {
+      await handle.start();
+      const failure = await handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: {
+          mode: "echo",
+          hostMethod: "secrets.resolve",
+          requestedCompanyId: "company-1",
+          configPath: "apiKeyRef",
+        },
+      } as HostToWorkerMethods["getData"][0]).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(JsonRpcCallError);
+      expect(failure).toMatchObject({ data: { code: "binding_missing" } });
+      expect(JSON.stringify((failure as JsonRpcCallError).data)).not.toContain("must-not-cross");
+      expect(secretsResolve).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("rejects performAction nested host calls that omit the invocation id", async () => {
     const handlers = createHostClientHandlers({
       pluginId: "test.plugin",
@@ -464,6 +509,48 @@ describe("plugin-worker-manager stderr failure context", () => {
       }
 
       expect(companiesGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("allows an unscoped companies.list call while another company invocation is active", async () => {
+    const companiesList = vi.fn(async () => [{ id: "company-1" }]);
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: ["companies.read"],
+      services: {
+        companies: {
+          list: companiesList,
+        },
+      } as unknown as HostServices,
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers,
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: {
+          mode: "omit",
+          hostMethod: "companies.list",
+          requestedCompanyId: "company-1",
+        },
+      } as HostToWorkerMethods["getData"][0])).resolves.toEqual([{ id: "company-1" }]);
+
+      expect(companiesList).toHaveBeenCalledWith({ companyId: "company-1" });
     } finally {
       await handle.stop().catch(() => undefined);
     }
