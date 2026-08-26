@@ -1374,6 +1374,7 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+    expect(mockDbSelect).not.toHaveBeenCalled();
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -1418,6 +1419,10 @@ describe.sequential("issue thread interaction routes", () => {
       payload: expect.objectContaining({ issueId: targetId, interactionId: "interaction-targeted" }),
       idempotencyKey: "interaction:interaction-targeted:accepted",
     }));
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.updated" }),
+    );
   });
 
   it("does not emit a continuation wake when request confirmations are rejected", async () => {

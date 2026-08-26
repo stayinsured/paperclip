@@ -10400,9 +10400,8 @@ export function issueRoutes(
           };
         }
       }
-      const continuationWakeIssue = interaction.continuationIssueId
-        ? await resolveStoredInteractionContinuationIssue(db, issue, interaction)
-        : continuationIssue ?? issue;
+      const continuationWakeIssue = continuationIssue
+        ?? await resolveStoredInteractionContinuationIssue(db, issue, interaction);
 
       await logActivity(db, {
         companyId: issue.companyId,

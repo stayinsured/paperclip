@@ -315,6 +315,7 @@ function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
   actor: InteractionActor;
 }) {
   if (!isRequestConfirmationLikeKind(args.current.kind)) return false;
+  if (args.current.continuationIssueId && args.current.continuationIssueId !== args.issue.id) return false;
   if (!args.current.createdByAgentId) return false;
   if (!args.actor.userId) return false;
   if (!args.issue.assigneeUserId) return false;
