@@ -1382,6 +1382,110 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("persists an explicit executable continuation target while rejecting a blocked default host", async () => {
+    const { companyId, goalId, issueId: hostId } = await seedConfirmationIssue("Targeted continuation");
+    const agentId = randomUUID();
+    const targetId = randomUUID();
+    const blockerId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Executor", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: targetId, companyId, goalId, title: "Executable target", status: "todo", priority: "medium", assigneeAgentId: agentId },
+      { id: blockerId, companyId, goalId, title: "Host blocker", status: "in_progress", priority: "medium", assigneeAgentId: agentId },
+    ]);
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: agentId }).where(eq(issues.id, hostId));
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: hostId, type: "blocks" });
+
+    await expect(interactionsSvc.create({ id: hostId, companyId }, {
+      kind: "request_confirmation", continuationPolicy: "wake_assignee",
+      payload: { version: 1, prompt: "Resume where?" },
+    }, { userId: "local-board" })).rejects.toMatchObject({ status: 422 });
+
+    const created = await interactionsSvc.create({ id: hostId, companyId }, {
+      kind: "request_confirmation", continuationPolicy: "wake_assignee", continuationIssueId: targetId,
+      payload: { version: 1, prompt: "Resume target?" },
+    }, { userId: "local-board" });
+    expect(created.continuationIssueId).toBe(targetId);
+    const [stored] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, created.id));
+    expect(stored.continuationIssueId).toBe(targetId);
+  });
+
+  it.each(["wake_assignee", "wake_assignee_on_accept"] as const)(
+    "rejects invalid explicit continuation targets for %s",
+    async (continuationPolicy) => {
+      const { companyId, goalId, issueId: hostId } = await seedConfirmationIssue("Invalid targets");
+      const agentId = randomUUID();
+      await db.insert(agents).values({
+        id: agentId, companyId, name: "Executor", role: "engineer", status: "active",
+        adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+      });
+      const terminalId = randomUUID();
+      const unassignedId = randomUUID();
+      const blockedId = randomUUID();
+      const blockerId = randomUUID();
+      await db.insert(issues).values([
+        { id: terminalId, companyId, goalId, title: "Terminal", status: "done", priority: "medium", assigneeAgentId: agentId },
+        { id: unassignedId, companyId, goalId, title: "Unassigned", status: "todo", priority: "medium" },
+        { id: blockedId, companyId, goalId, title: "Blocked", status: "blocked", priority: "medium", assigneeAgentId: agentId },
+        { id: blockerId, companyId, goalId, title: "Blocker", status: "in_progress", priority: "medium", assigneeAgentId: agentId },
+      ]);
+      await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: blockedId, type: "blocks" });
+      const otherCompanyId = randomUUID();
+      const otherGoalId = randomUUID();
+      const crossCompanyId = randomUUID();
+      await db.insert(companies).values({
+        id: otherCompanyId, name: "Other company", issuePrefix: "OTH", requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(goals).values({ id: otherGoalId, companyId: otherCompanyId, title: "Other", level: "task", status: "active" });
+      await db.insert(issues).values({
+        id: crossCompanyId, companyId: otherCompanyId, goalId: otherGoalId, title: "Cross-company",
+        status: "todo", priority: "medium",
+      });
+
+      for (const continuationIssueId of [randomUUID(), crossCompanyId, terminalId, unassignedId, blockedId]) {
+        await expect(interactionsSvc.create({ id: hostId, companyId }, {
+          kind: "request_confirmation", continuationPolicy, continuationIssueId,
+          payload: { version: 1, prompt: "Resume target?" },
+        }, { userId: "local-board" })).rejects.toMatchObject({
+          status: 422,
+          message: "continuationIssueId must reference an executable agent-owned issue in the same company",
+        });
+      }
+    },
+  );
+
+  it("does not return or mutate the host creator path for an explicit target", async () => {
+    const { companyId, goalId, issueId: hostId } = await seedConfirmationIssue("Targeted creator return");
+    const creatorAgentId = randomUUID();
+    const targetId = randomUUID();
+    await db.insert(agents).values({
+      id: creatorAgentId, companyId, name: "Creator", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.update(issues).set({
+      status: "in_review", assigneeAgentId: null, assigneeUserId: "local-board",
+    }).where(eq(issues.id, hostId));
+    await db.insert(issues).values({
+      id: targetId, companyId, goalId, title: "Executable target", status: "todo",
+      priority: "medium", assigneeAgentId: creatorAgentId,
+    });
+    const created = await interactionsSvc.create({ id: hostId, companyId }, {
+      kind: "request_confirmation", continuationPolicy: "wake_assignee_on_accept",
+      continuationIssueId: targetId, payload: { version: 1, prompt: "Proceed?" },
+    }, { agentId: creatorAgentId });
+    const accepted = await interactionsSvc.acceptInteraction({ id: hostId, companyId }, created.id, {}, {
+      userId: "local-board",
+    });
+
+    expect(accepted.continuationIssue).toBeNull();
+    const [host] = await db.select().from(issues).where(eq(issues.id, hostId));
+    expect(host).toMatchObject({
+      status: "in_review", assigneeAgentId: null, assigneeUserId: "local-board",
+    });
+  });
+
   it("accepts request_confirmation interactions without creating child issues", async () => {
     const companyId = randomUUID();
     const goalId = randomUUID();

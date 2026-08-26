@@ -1374,6 +1374,7 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+    expect(mockDbSelect).not.toHaveBeenCalled();
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -1387,6 +1388,40 @@ describe.sequential("issue thread interaction routes", () => {
           }),
         }),
       }),
+    );
+  });
+
+  it("routes accepted confirmation to stored continuation target while host stays blocked", async () => {
+    const targetId = "44444444-4444-4444-8444-444444444444";
+    mockIssueService.getById.mockResolvedValueOnce(createIssue({ status: "blocked" }));
+    mockDbSelectWhere.mockReturnValueOnce({
+      then: (onFulfilled: (rows: unknown[]) => unknown) => Promise.resolve([{
+        id: targetId, companyId: "company-1", assigneeAgentId: CREATED_AGENT_ID, status: "todo",
+      }]).then(onFulfilled),
+    });
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-targeted", companyId: "company-1",
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", kind: "request_confirmation",
+        status: "accepted", continuationPolicy: "wake_assignee_on_accept", continuationIssueId: targetId,
+        payload: { version: 1, prompt: "Proceed?" }, result: { version: 1, outcome: "accepted" },
+      },
+      createdIssues: [], continuationIssue: null,
+    });
+
+    const res = await request(await createApp())
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-targeted/accept")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(CREATED_AGENT_ID, expect.objectContaining({
+      payload: expect.objectContaining({ issueId: targetId, interactionId: "interaction-targeted" }),
+      idempotencyKey: "interaction:interaction-targeted:accepted",
+    }));
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.updated" }),
     );
   });
 

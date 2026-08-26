@@ -20,6 +20,7 @@ export const issueThreadInteractions = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull().default("pending"),
     continuationPolicy: text("continuation_policy").notNull().default("wake_assignee"),
+    continuationIssueId: uuid("continuation_issue_id").references(() => issues.id),
     requestedResolverPolicy: text("requested_resolver_policy")
       .$type<IssueThreadInteractionResolverPolicy>()
       .notNull()
@@ -62,5 +63,6 @@ export const issueThreadInteractions = pgTable(
       .where(sql`${table.idempotencyKey} IS NOT NULL`),
     sourceCommentIdx: index("issue_thread_interactions_source_comment_idx").on(table.sourceCommentId),
     addresseeAgentIdx: index("issue_thread_interactions_addressee_agent_idx").on(table.addresseeAgentId),
+    continuationIssueIdx: index("issue_thread_interactions_continuation_issue_idx").on(table.continuationIssueId),
   }),
 );

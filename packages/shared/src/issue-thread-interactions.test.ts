@@ -41,6 +41,18 @@ describe("issue thread interaction schemas", () => {
     });
   });
 
+  it("accepts an explicit request_confirmation continuation issue target", () => {
+    const continuationIssueId = "11111111-1111-4111-8111-111111111111";
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      continuationPolicy: "wake_assignee_on_accept",
+      continuationIssueId,
+      payload: { version: 1, prompt: "Proceed?" },
+    });
+
+    expect(parsed).toMatchObject({ continuationIssueId, continuationPolicy: "wake_assignee_on_accept" });
+  });
+
   it("round-trips versioned tool action payload and lifecycle metadata", () => {
     const payload = requestConfirmationPayloadSchema.parse({
       version: 1,

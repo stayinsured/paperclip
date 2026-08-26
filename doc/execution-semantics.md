@@ -332,6 +332,8 @@ Document-scoped activity may still route work when it is converted into an expli
 - a response to an issue-thread interaction, such as `request_confirmation`, `ask_user_questions`, or `suggest_tasks`
 - intentional board routing that assigns or reassigns the issue, opens a first-class blocker, creates delegated follow-up work, or queues a typed wake
 
+A wake-capable `request_confirmation` may declare a top-level `continuationIssueId`. Paperclip resolves and persists that company-scoped issue when the interaction is created. The target must be non-terminal, agent-owned, and free of unresolved dependency blockers. If the field is omitted, the host issue is the default only when it meets the same executable-target rules; a dependency-blocked host therefore requires an explicit target. Acceptance, and rejection under `wake_assignee`, enqueue at most one continuation on the stored target using the interaction resolution idempotency key. The host is neither woken nor unblocked when a different target is declared. Stale, superseded, withdrawn, expired, and duplicate resolutions do not create another continuation. Delivery rejection remains subject to the normal heartbeat blocker gate and must surface the existing resume-failure or recovery-action path.
+
 Freeform document approval text is not auto-acceptance. Plan approval, implementation approval, or review acceptance must flow through the explicit interaction, approval, execution-policy, assignment, or blocker primitives that define who owns the next move.
 
 ### Comment interrupts and ownership handoffs
