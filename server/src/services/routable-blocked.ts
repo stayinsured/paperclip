@@ -22,6 +22,7 @@ export function isProspectiveBlockedTransition(issue: RoutableBlockedIssue): iss
 
 export async function deliverAgentUnblockNotification(input: {
   issue: RoutableBlockedIssue;
+  sourceAgentId?: string | null;
   wakeup: (agentId: string, options: {
     source: "automation";
     triggerDetail: "system";
@@ -29,6 +30,8 @@ export async function deliverAgentUnblockNotification(input: {
     idempotencyKey: string;
     payload: { issueId: string; action: string };
     contextSnapshot: { wakeReason: "issue_unblock_requested"; issueId: string; taskId: string };
+    normalModelHandback: boolean;
+    onDurablyEnqueued: () => void;
   }) => Promise<unknown>;
   markNotified: (notifiedAt: Date) => Promise<unknown>;
   now?: () => Date;
@@ -41,6 +44,7 @@ export async function deliverAgentUnblockNotification(input: {
   const owner = issue.unblockDescriptor.owner;
   if (owner === "board" || !("agentId" in owner)) return false;
 
+  let durablyEnqueued = false;
   await input.wakeup(owner.agentId, {
     source: "automation",
     triggerDetail: "system",
@@ -48,7 +52,12 @@ export async function deliverAgentUnblockNotification(input: {
     idempotencyKey: `issue-unblock:${issue.id}:${issue.blockedTransitionAt.toISOString()}`,
     payload: { issueId: issue.id, action: issue.unblockDescriptor.action },
     contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: issue.id, taskId: issue.id },
+    normalModelHandback: owner.agentId === input.sourceAgentId,
+    onDurablyEnqueued: () => {
+      durablyEnqueued = true;
+    },
   });
+  if (!durablyEnqueued) return false;
   await input.markNotified((input.now ?? (() => new Date()))());
   return true;
 }

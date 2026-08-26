@@ -2193,4 +2193,45 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
       await gateway.close();
     }
   }, 20_000);
+
+  it("persists a cheap self-handback for exactly one later normal-model run", async () => {
+    const gateway = await createControlledGatewayServer();
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = "T" + companyId.replace(/-/g, "").slice(0, 6).toUpperCase();
+    const heartbeat = heartbeatService(db);
+    try {
+      await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix, requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user" });
+      await db.insert(agents).values({ id: agentId, companyId, name: "Review owner", role: "engineer", status: "idle", adapterType: "openclaw_gateway", adapterConfig: { url: gateway.url, headers: { "x-openclaw-token": "gateway-token" }, payloadTemplate: { message: "wake now" }, waitTimeoutMs: 2_000 }, runtimeConfig: gatewayAdmissionRuntimeConfig(), permissions: {} });
+      await db.insert(issues).values({ id: issueId, companyId, title: "Cheap productivity review", status: "blocked", priority: "medium", responsibleUserId: "responsible-user", assigneeAgentId: agentId, assigneeAdapterOverrides: { modelProfile: "cheap" }, issueNumber: 1, identifier: issuePrefix + "-1" });
+      const firstRun = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", reason: "issue_assigned", payload: { issueId, modelProfile: "cheap" }, contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_assigned", modelProfile: "cheap", recoveryIntent: "status_only", allowDeliverableWork: false, allowDocumentUpdates: false, resumeRequiresNormalModel: true }, requestedByActorType: "system" });
+      expect(firstRun).not.toBeNull();
+      await waitFor(async () => (await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, firstRun!.id)).then((rows) => rows[0] ?? null))?.status === "running");
+      const idempotencyKey = "issue-unblock:" + issueId + ":transition-1";
+      let durableCallbacks = 0;
+      const handback = () => heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "issue_unblock_requested", idempotencyKey, payload: { issueId, action: "Create the required deliverable" }, contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_unblock_requested", modelProfile: "cheap", recoveryIntent: "status_only", allowDeliverableWork: false, allowDocumentUpdates: false, resumeRequiresNormalModel: true }, normalModelHandback: true, onDurablyEnqueued: () => { durableCallbacks += 1; } });
+      await handback();
+      await handback();
+      expect(durableCallbacks).toBe(2);
+      const deferred = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, idempotencyKey)));
+      expect(deferred).toHaveLength(1);
+      expect(deferred[0]).toMatchObject({ status: "deferred_issue_execution", runId: null, coalescedCount: 0 });
+      const deferredContext = (deferred[0]?.payload as Record<string, any>)._paperclipWakeContext;
+      expect(deferredContext).toMatchObject({ issueId, wakeReason: "issue_unblock_requested", paperclipNormalModelHandback: true });
+      for (const key of ["modelProfile", "paperclipModelProfile", "recoveryIntent", "allowDeliverableWork", "allowDocumentUpdates", "resumeRequiresNormalModel"]) expect(deferredContext).not.toHaveProperty(key);
+      await db.insert(issueComments).values({ companyId, issueId, authorAgentId: agentId, createdByRunId: firstRun!.id, body: "Self-handback recorded; normal-model follow-up required." });
+      gateway.releaseFirstWait();
+      await waitFor(() => gateway.getAgentPayloads().length >= 2, 90_000);
+      await waitFor(async () => { const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)).orderBy(asc(heartbeatRuns.createdAt)); return runs.length === 2 && runs[0]?.status === "succeeded" && runs[1]?.status === "succeeded"; }, 90_000);
+      const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)).orderBy(asc(heartbeatRuns.createdAt));
+      expect(runs).toHaveLength(2);
+      const promotedContext = runs[1]?.contextSnapshot as Record<string, unknown>;
+      expect(promotedContext).toMatchObject({ issueId, wakeReason: "issue_unblock_requested", paperclipNormalModelHandback: true });
+      for (const key of ["modelProfile", "paperclipModelProfile", "recoveryIntent", "allowDeliverableWork", "allowDocumentUpdates", "resumeRequiresNormalModel"]) expect(promotedContext).not.toHaveProperty(key);
+    } finally {
+      gateway.releaseFirstWait();
+      await gateway.close();
+    }
+  }, 120_000);
 });

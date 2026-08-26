@@ -232,6 +232,7 @@ import {
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import {
   recoveryAssigneeAdapterOverrides,
+  scrubRecoveryModelProfileHints,
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
 import { ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS as RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS, recoveryService } from "./recovery/service.js";
@@ -350,6 +351,7 @@ const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
   "environment.lease_released",
 ];
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
+const NORMAL_MODEL_HANDBACK_CONTEXT_KEY = "paperclipNormalModelHandback";
 const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
 const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
 const PAPERCLIP_AGENT_MESSAGE_KEY = "paperclipAgentMessage";
@@ -2459,6 +2461,8 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  normalModelHandback?: boolean;
+  onDurablyEnqueued?: () => void;
 }
 
 type UsageTotals = {
@@ -15112,7 +15116,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const modelProfileApplication = resolveModelProfileApplication({
       adapterModelProfiles,
       agentRuntimeConfig: agent.runtimeConfig,
-      issueModelProfile: issueAssigneeOverrides?.modelProfile ?? null,
+      issueModelProfile: context[NORMAL_MODEL_HANDBACK_CONTEXT_KEY] === true
+        ? null
+        : issueAssigneeOverrides?.modelProfile ?? null,
       contextSnapshot: context,
       profileResolutionFallbackReason,
     });
@@ -18390,6 +18396,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       triggerDetail,
       payload,
     });
+    if (opts.normalModelHandback) {
+      const normalContext = scrubRecoveryModelProfileHints(enrichedContextSnapshot);
+      for (const key of Object.keys(enrichedContextSnapshot)) delete enrichedContextSnapshot[key];
+      Object.assign(enrichedContextSnapshot, normalContext, {
+        [NORMAL_MODEL_HANDBACK_CONTEXT_KEY]: true,
+      });
+    }
     const pluginExecutionAttemptId = readNonEmptyString(
       parseObject(enrichedContextSnapshot.paperclipPluginExecution).attemptId,
     );
@@ -18711,6 +18724,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
+        }
+
+        if (opts.normalModelHandback && opts.idempotencyKey) {
+          const existingHandback = await tx
+            .select({ runId: agentWakeupRequests.runId })
+            .from(agentWakeupRequests)
+            .where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+              ne(agentWakeupRequests.status, "skipped"),
+            ))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (existingHandback) {
+            return { kind: "deduplicated" as const, runId: existingHandback.runId };
+          }
         }
 
         if (worktreeExecutionCutoff && issue.createdAt < worktreeExecutionCutoff) {
@@ -19146,11 +19176,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             forceFreshSession: enrichedContextSnapshot.forceFreshSession === true,
           });
           const shouldQueueFollowupForRunningWake =
-            shouldQueueFollowupForRunningIssueWake({
-              contextSnapshot: enrichedContextSnapshot,
-              wakeCommentId,
-              requestedByActorType: opts.requestedByActorType ?? null,
-            }) &&
+            (
+              opts.normalModelHandback ||
+              shouldQueueFollowupForRunningIssueWake({
+                contextSnapshot: enrichedContextSnapshot,
+                wakeCommentId,
+                requestedByActorType: opts.requestedByActorType ?? null,
+              })
+            ) &&
             activeExecutionRun.status === "running" &&
             isSameExecutionAgent;
           const availableActiveExecutionRun = isSameExecutionAgent
@@ -19460,13 +19493,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "queued" as const, run: newRun };
       });
 
-      if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
+      if (outcome.kind === "skipped") return null;
+      if (outcome.kind === "deferred" || outcome.kind === "deduplicated") {
+        opts.onDurablyEnqueued?.();
+        return null;
+      }
       if (outcome.kind === "coalesced") {
         await startNextQueuedRunForAgent(agent.id);
         return outcome.run;
       }
 
       const newRun = outcome.run;
+      opts.onDurablyEnqueued?.();
       publishLiveEvent({
         companyId: newRun.companyId,
         type: "heartbeat.run.queued",
