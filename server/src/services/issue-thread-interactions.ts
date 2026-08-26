@@ -2196,7 +2196,6 @@ export function issueThreadInteractionService(db: Db) {
         .from(issueThreadInteractions)
         .where(and(
           eq(issueThreadInteractions.companyId, issue.companyId),
-          eq(issueThreadInteractions.issueId, issue.id),
           inArray(issueThreadInteractions.kind, [...TARGET_BOUND_INTERACTION_KINDS]),
           eq(issueThreadInteractions.status, "pending"),
         ));
@@ -2205,7 +2204,7 @@ export function issueThreadInteractionService(db: Db) {
         const interaction = hydrateInteraction(row) as TargetBoundInteraction;
         const target = interaction.payload.target;
         if (!target || target.type !== "issue_document") return false;
-        const targetIssueId = target.issueId ?? issue.id;
+        const targetIssueId = target.issueId ?? row.issueId;
         if (targetIssueId !== issue.id) return false;
         if (document && target.documentId && target.documentId !== document.id) return false;
         if (document && target.key !== document.key) return false;
@@ -2239,6 +2238,7 @@ export function issueThreadInteractionService(db: Db) {
               : interaction.payload,
             result: buildStaleTargetResult(row, target),
             resolvedByAgentId: actor.agentId ?? null,
+            resolvedByRunId: actor.runId ?? null,
             resolvedByUserId: actor.userId ?? null,
             resolvedAt: now,
             updatedAt: now,
@@ -2252,7 +2252,8 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       if (expired.length > 0) {
-        await touchIssue(db, issue.id);
+        const sourceIssueIds = [...new Set(expired.map((interaction) => interaction.issueId))];
+        await Promise.all(sourceIssueIds.map((issueId) => touchIssue(db, issueId)));
         await emitResolvedInteractionsTelemetry(db, expired);
       }
       return expired;

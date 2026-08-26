@@ -291,8 +291,8 @@ describe("document annotation routes", () => {
       assigneeAgentId,
     });
     mockIssueThreadInteractionService.expireStaleRequestConfirmationsForIssueDocument.mockResolvedValueOnce([
-      { id: "interaction-b", kind: "request_confirmation", status: "expired" },
-      { id: "interaction-a", kind: "request_confirmation", status: "expired" },
+      { id: "interaction-b", issueId, kind: "request_confirmation", status: "expired" },
+      { id: "interaction-a", issueId, kind: "request_confirmation", status: "expired" },
     ]);
     mockIssueService.listReviewAttention.mockResolvedValueOnce(new Map([[issueId, {
       state: "stalled",
@@ -326,6 +326,45 @@ describe("document annotation routes", () => {
         source: "issue.document_updated",
         wakeReason: "issue_review_path_lost",
       }),
+    }));
+  });
+
+  it("attributes cross-issue expiry and recovery to the interaction source issue", async () => {
+    const sourceIssueId = "77777777-7777-4777-8777-777777777777";
+    const assigneeAgentId = "99999999-9999-4999-8999-999999999999";
+    const targetIssue = { id: issueId, companyId, title: "Document API", status: "in_progress", assigneeAgentId: null };
+    const sourceIssue = { id: sourceIssueId, companyId, title: "Source review", status: "in_review", assigneeAgentId };
+    mockIssueService.getById.mockImplementation(async (id: string) => id === sourceIssueId ? sourceIssue : targetIssue);
+    mockIssueThreadInteractionService.expireStaleRequestConfirmationsForIssueDocument.mockResolvedValueOnce([
+      { id: "cross-interaction", issueId: sourceIssueId, kind: "request_confirmation", status: "expired" },
+    ]);
+    mockIssueService.listReviewAttention.mockResolvedValueOnce(new Map([[sourceIssueId, {
+      state: "stalled",
+      paths: [],
+      reason: "Cross-issue document-bound review path expired",
+    }]]));
+    mockHeartbeatService.wakeup.mockResolvedValueOnce({ id: "cross-recovery-run" });
+
+    await request(await createApp())
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({
+        title: "Plan",
+        format: "markdown",
+        body: "Alpha updated selected text omega",
+        changeSummary: "Cross-issue board revision",
+        baseRevisionId: documentPayload.latestRevisionId,
+      })
+      .expect(200);
+
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "issue.thread_interaction_expired",
+      entityId: sourceIssueId,
+      details: expect.objectContaining({ interactionId: "cross-interaction" }),
+    }));
+    expect(mockIssueService.listReviewAttention).toHaveBeenCalledWith(companyId, [sourceIssue]);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(assigneeAgentId, expect.objectContaining({
+      idempotencyKey: expect.stringMatching(new RegExp(`^issue_review_path_lost:${sourceIssueId}:`)),
+      payload: expect.objectContaining({ issueId: sourceIssueId, reviewPathConsumedRef: "cross-interaction" }),
     }));
   });
 
