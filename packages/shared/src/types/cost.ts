@@ -271,7 +271,9 @@ export interface CompletedIssueAccounting {
   metered: CompletedIssueTokenDimensions;
   subscription: CompletedIssueTokenDimensions;
   other: CompletedIssueTokenDimensions;
+  unknown: CompletedIssueTokenDimensions;
   costEventCount: number;
+  unclassifiedCostEventCount: number;
   evidenceComplete: boolean;
 }
 

@@ -64,6 +64,7 @@ export interface CompletedIssueActivitySource {
 
 interface SessionEvidence {
   reused: boolean | null;
+  eligibleRepeat: boolean;
   resetReasons: string[];
   configFingerprint: string | null;
 }
@@ -115,12 +116,13 @@ function addDimensions(target: CompletedIssueTokenDimensions, source: CompletedI
   target.costCents += nonNegativeInteger(source.costCents);
 }
 
-function billingBucket(billingType: string): "metered" | "subscription" | "other" {
+function billingBucket(billingType: string): "metered" | "subscription" | "other" | "unknown" {
   if (billingType === "metered_api") return "metered";
   if (billingType === "subscription_included" || billingType === "subscription_overage") {
     return "subscription";
   }
-  return "other";
+  if (billingType === "credits" || billingType === "fixed") return "other";
+  return "unknown";
 }
 
 function issueIdFromContext(contextSnapshot: Record<string, unknown> | null): string | null {
@@ -131,6 +133,7 @@ function issueIdFromContext(contextSnapshot: Record<string, unknown> | null): st
 function sessionEvidence(run: CompletedIssueRunSource): SessionEvidence {
   const usage = asRecord(run.usageJson);
   const result = asRecord(run.resultJson);
+  const context = asRecord(run.contextSnapshot);
   const usageFreshness = asRecord(usage.configFreshness);
   const resultFreshness = asRecord(result.configFreshness);
   const freshness = Object.keys(usageFreshness).length > 0 ? usageFreshness : resultFreshness;
@@ -140,14 +143,30 @@ function sessionEvidence(run: CompletedIssueRunSource): SessionEvidence {
     : [];
   const rotationReason = nonEmptyString(usage.sessionRotationReason);
   if (rotationReason) resetReasons.push(rotationReason);
-  if (resetReasons.length === 0 && usage.freshSession === true) resetReasons.push("no_prior_session");
+  const forcedFresh = context.forceFreshSession === true;
+  if (forcedFresh) resetReasons.push("forced_fresh_requested");
+  const freshSession = usage.freshSession === true || result.freshSession === true;
+  if (freshSession && resetReasons.length === 0) resetReasons.push("no_prior_session");
+  const reset = session.reset === true;
+  if (reset && resetReasons.length === 0) resetReasons.push("unspecified_session_reset");
   const reused = typeof usage.taskSessionReused === "boolean"
     ? usage.taskSessionReused
     : typeof session.taskSessionReused === "boolean"
       ? session.taskSessionReused
       : null;
+  const taskSessionAvailable = typeof session.taskSessionAvailable === "boolean"
+    ? session.taskSessionAvailable
+    : false;
+  const repeatSessionAvailable = taskSessionAvailable || run.sessionIdBefore !== null || reused === true;
   return {
     reused,
+    eligibleRepeat: reused !== null
+      && repeatSessionAvailable
+      && !freshSession
+      && !forcedFresh
+      && !reset
+      && !rotationReason
+      && resetReasons.length === 0,
     resetReasons: [...new Set(resetReasons)],
     configFingerprint: nonEmptyString(session.nextFingerprint),
   };
@@ -300,9 +319,10 @@ export function buildCompletedIssueTelemetry(input: {
     const metered = emptyDimensions();
     const subscription = emptyDimensions();
     const other = emptyDimensions();
+    const unknown = emptyDimensions();
     for (const event of costs) {
       addDimensions(total, event);
-      addDimensions({ metered, subscription, other }[billingBucket(event.billingType)], event);
+      addDimensions({ metered, subscription, other, unknown }[billingBucket(event.billingType)], event);
     }
 
     const reopenCount = activities.filter((activity) => {
@@ -310,7 +330,7 @@ export function buildCompletedIssueTelemetry(input: {
       return activity.action === "issue.reopened" || details.reopened === true;
     }).length;
     const evidenceByRun = runs.map((run) => ({ run, evidence: sessionEvidence(run) }));
-    const eligible = evidenceByRun.filter(({ evidence }) => evidence.reused !== null);
+    const eligible = evidenceByRun.filter(({ evidence }) => evidence.eligibleRepeat);
     const reused = eligible.filter(({ evidence }) => evidence.reused === true);
     const resetReasons = evidenceByRun.flatMap(({ evidence }) => evidence.resetReasons);
     const configFingerprints = [...new Set(evidenceByRun
@@ -369,8 +389,11 @@ export function buildCompletedIssueTelemetry(input: {
         metered,
         subscription,
         other,
+        unknown,
         costEventCount: costs.length,
-        evidenceComplete: costs.length > 0,
+        unclassifiedCostEventCount: costs.filter((event) => billingBucket(event.billingType) === "unknown").length,
+        evidenceComplete: costs.length > 0
+          && costs.every((event) => billingBucket(event.billingType) !== "unknown"),
       },
       lifecycle: {
         firstPassAccepted: reopenCount === 0,
@@ -427,6 +450,24 @@ export function evaluateAuthoritativeSessionReuse(input: {
   config: EvaluateAuthoritativeSessionReuse;
   telemetry: CompletedIssueTelemetryReport;
 }): SessionReuseEvaluationReport {
+  const requestedIssueIds = new Set([
+    ...input.config.pilotIssueIds,
+    ...input.config.controlIssueIds,
+  ]);
+  const provenanceViolations = new Map<string, Set<string>>();
+  const addProvenanceViolation = (issueId: string, reason: string) => {
+    const reasons = provenanceViolations.get(issueId) ?? new Set<string>();
+    reasons.add(reason);
+    provenanceViolations.set(issueId, reasons);
+  };
+  if (input.telemetry.companyId !== input.companyId) {
+    addProvenanceViolation("telemetry_report", "telemetry_company_mismatch");
+  }
+  for (const row of input.telemetry.completedIssues) {
+    if (requestedIssueIds.has(row.issueId) && row.companyId !== input.companyId) {
+      addProvenanceViolation(row.issueId, "telemetry_row_company_mismatch");
+    }
+  }
   const byId = new Map(input.telemetry.completedIssues.map((row) => [row.issueId, row]));
   const requestedPilotIds = [...input.config.pilotIssueIds];
   const requestedControlIds = [...input.config.controlIssueIds];
@@ -465,12 +506,17 @@ export function evaluateAuthoritativeSessionReuse(input: {
   const minimumSampleMet = matchedPilot.length >= MATCHED_SAMPLE_MINIMUM
     && matchedControl.length >= MATCHED_SAMPLE_MINIMUM;
   const accountingComplete = [...matchedPilot, ...matchedControl].every((row) => row.accounting.evidenceComplete);
-  const boundaryViolations = [...matchedPilot, ...matchedControl]
-    .filter((row) => !row.boundary.evidenceComplete || row.boundary.violations.length > 0)
-    .map((row) => ({
-      issueId: row.issueId,
-      reasons: row.boundary.violations.length > 0 ? row.boundary.violations : ["boundary_evidence_incomplete"],
-    }));
+  for (const row of [...pilot, ...control]) {
+    if (!row.boundary.evidenceComplete || row.boundary.violations.length > 0) {
+      const reasons = row.boundary.violations.length > 0
+        ? row.boundary.violations
+        : ["boundary_evidence_incomplete"];
+      for (const reason of reasons) addProvenanceViolation(row.issueId, reason);
+    }
+  }
+  const boundaryViolations = [...provenanceViolations.entries()]
+    .map(([issueId, reasons]) => ({ issueId, reasons: [...reasons].sort() }))
+    .sort((left, right) => left.issueId.localeCompare(right.issueId));
   const sufficient = minimumSampleMet && exactMatch && accountingComplete && boundaryViolations.length === 0;
 
   const pilotProcessed = average(matchedPilot.map((row) => row.accounting.total.processedTokens));

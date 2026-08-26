@@ -49,7 +49,9 @@ function evaluationRow(input: {
       metered: { ...tokenDimensions },
       subscription: { ...tokenDimensions, uncachedInputTokens: 0, processedTokens: 0, costCents: 0 },
       other: { ...tokenDimensions, uncachedInputTokens: 0, processedTokens: 0, costCents: 0 },
+      unknown: { ...tokenDimensions, uncachedInputTokens: 0, processedTokens: 0, costCents: 0 },
       costEventCount: 1,
+      unclassifiedCostEventCount: 0,
       evidenceComplete: input.accountingComplete ?? true,
     },
     lifecycle: {
@@ -185,7 +187,9 @@ describe("completed issue telemetry", () => {
         },
         metered: { processedTokens: 35, costCents: 3 },
         subscription: { processedTokens: 80, costCents: 0 },
+        unknown: { processedTokens: 0, costCents: 0 },
         costEventCount: 2,
+        unclassifiedCostEventCount: 0,
         evidenceComplete: true,
       },
       lifecycle: {
@@ -197,10 +201,10 @@ describe("completed issue telemetry", () => {
       },
       wakes: { expectedActionableWakeCount: 3, observedActionableWakeCount: 1 },
       session: {
-        eligibleRepeatRunCount: 1,
-        reusedRunCount: 1,
-        reuseRatePercent: 100,
-        reused: true,
+        eligibleRepeatRunCount: 0,
+        reusedRunCount: 0,
+        reuseRatePercent: null,
+        reused: false,
         resetReasons: [{ value: "model_changed", count: 1 }],
       },
       boundary: {
@@ -258,6 +262,150 @@ describe("completed issue telemetry", () => {
     expect(report.completedIssues.every((row) =>
       row.boundary.violations.includes("session_reused_across_issues"))).toBe(true);
     expect(JSON.stringify(report)).not.toContain("same-private-session");
+  });
+
+  it("keeps unknown billing separate and marks accounting evidence incomplete", () => {
+    const issueId = randomUUID();
+    const report = buildCompletedIssueTelemetry({
+      companyId,
+      from,
+      toExclusive,
+      issues: [{
+        id: issueId,
+        companyId,
+        identifier: "TLM-unknown-billing",
+        projectId: null,
+        assigneeAgentId: null,
+        workMode: "standard",
+        priority: "high",
+        createdAt: new Date("2026-08-02T00:00:00.000Z"),
+        completedAt: new Date("2026-08-03T00:00:00.000Z"),
+      }],
+      runs: [],
+      costEvents: [
+        {
+          id: randomUUID(),
+          companyId,
+          issueId,
+          heartbeatRunId: null,
+          billingType: "unknown",
+          inputTokens: 10,
+          cachedInputTokens: 20,
+          outputTokens: 5,
+          costCents: 3,
+        },
+        {
+          id: randomUUID(),
+          companyId,
+          issueId,
+          heartbeatRunId: null,
+          billingType: "credits",
+          inputTokens: 2,
+          cachedInputTokens: 3,
+          outputTokens: 2,
+          costCents: 1,
+        },
+      ],
+      wakeRequests: [],
+      activities: [],
+    });
+
+    expect(report.completedIssues[0]?.accounting).toMatchObject({
+      total: { processedTokens: 42, costCents: 4 },
+      metered: { processedTokens: 0, costCents: 0 },
+      subscription: { processedTokens: 0, costCents: 0 },
+      other: { processedTokens: 7, costCents: 1 },
+      unknown: { processedTokens: 35, costCents: 3 },
+      costEventCount: 2,
+      unclassifiedCostEventCount: 1,
+      evidenceComplete: false,
+    });
+  });
+
+  it("excludes initial fresh and reset runs from the eligible repeat population", () => {
+    const issueId = randomUUID();
+    const run = (overrides: Partial<Parameters<typeof buildCompletedIssueTelemetry>[0]["runs"][number]>) => ({
+      id: randomUUID(),
+      companyId,
+      agentId: randomUUID(),
+      responsibleUserId: "user-1",
+      status: "succeeded",
+      sessionIdBefore: "available-session",
+      contextSnapshot: { issueId },
+      usageJson: {
+        taskSessionReused: false,
+        freshSession: false,
+        configFreshness: { session: { taskSessionAvailable: true, reset: false } },
+      },
+      resultJson: null,
+      ...overrides,
+    });
+    const report = buildCompletedIssueTelemetry({
+      companyId,
+      from,
+      toExclusive,
+      issues: [{
+        id: issueId,
+        companyId,
+        identifier: "TLM-repeat-population",
+        projectId: null,
+        assigneeAgentId: null,
+        workMode: "standard",
+        priority: "high",
+        createdAt: new Date("2026-08-02T00:00:00.000Z"),
+        completedAt: new Date("2026-08-03T00:00:00.000Z"),
+      }],
+      runs: [
+        run({
+          sessionIdBefore: null,
+          usageJson: { taskSessionReused: false, freshSession: true },
+        }),
+        run({
+          contextSnapshot: { issueId, forceFreshSession: true },
+        }),
+        run({
+          usageJson: {
+            taskSessionReused: false,
+            freshSession: true,
+            configFreshness: {
+              session: { taskSessionAvailable: true, reset: true, resetReasons: ["model_changed"] },
+            },
+          },
+        }),
+        run({
+          usageJson: {
+            taskSessionReused: false,
+            freshSession: true,
+            configFreshness: {
+              session: { taskSessionAvailable: true, reset: true, resetReasons: ["security_bindings_changed"] },
+            },
+          },
+        }),
+        run({
+          usageJson: {
+            taskSessionReused: true,
+            freshSession: false,
+            configFreshness: { session: { taskSessionAvailable: true, reset: false } },
+          },
+        }),
+        run({}),
+      ],
+      costEvents: [],
+      wakeRequests: [],
+      activities: [],
+    });
+
+    expect(report.completedIssues[0]?.session).toMatchObject({
+      eligibleRepeatRunCount: 2,
+      reusedRunCount: 1,
+      reuseRatePercent: 50,
+    });
+    expect(report.completedIssues[0]?.session.resetReasons).toEqual([
+      { value: "forced_fresh_requested", count: 1 },
+      { value: "model_changed", count: 1 },
+      { value: "no_prior_session", count: 1 },
+      { value: "security_bindings_changed", count: 1 },
+    ]);
   });
 });
 
@@ -340,6 +488,37 @@ describe("authoritative session reuse evaluation", () => {
     expect(result.boundaryViolations[0]).toEqual({
       issueId: fixture.pilot[0]!.issueId,
       reasons: ["session_reused_across_issues"],
+    });
+  });
+
+  it("fails closed when the telemetry report or any selected row belongs to another company", () => {
+    const foreignCompanyId = "44444444-4444-4444-8444-444444444444";
+    const fixture = evaluationFixture();
+    fixture.pilot[0]!.companyId = foreignCompanyId;
+    fixture.control[0]!.cohortKey = "unmatched-foreign-row";
+    const rowMismatch = evaluateFixture(fixture);
+    expect(rowMismatch.verdict).toBe("FAIL");
+    expect(rowMismatch.decision.action).toBe("keep_disabled");
+    expect(rowMismatch.boundaryViolations).toContainEqual({
+      issueId: fixture.pilot[0]!.issueId,
+      reasons: ["telemetry_row_company_mismatch"],
+    });
+
+    const reportMismatch = evaluateAuthoritativeSessionReuse({
+      companyId,
+      config: fixture.config,
+      telemetry: {
+        companyId: foreignCompanyId,
+        generatedAt: "2026-09-01T00:00:00.000Z",
+        window: { from: from.toISOString(), toExclusive: toExclusive.toISOString() },
+        completedIssues: [...fixture.pilot, ...fixture.control],
+      },
+    });
+    expect(reportMismatch.verdict).toBe("FAIL");
+    expect(reportMismatch.decision.action).toBe("keep_disabled");
+    expect(reportMismatch.boundaryViolations).toContainEqual({
+      issueId: "telemetry_report",
+      reasons: ["telemetry_company_mismatch"],
     });
   });
 });
