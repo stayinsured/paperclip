@@ -434,6 +434,13 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
+    recoverMissingWorker: recoverManagedBundledPluginWorker
+      ? async (pluginId) => {
+          const plugin = await pluginRegistry.getById(pluginId);
+          if (!plugin) return false;
+          return recoverManagedBundledPluginWorker(plugin);
+        }
+      : undefined,
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,

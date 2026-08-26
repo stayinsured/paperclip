@@ -75,6 +75,15 @@ export interface PluginJobSchedulerOptions {
   jobTimeoutMs?: number;
   /** Maximum number of concurrent job executions (default: 10). */
   maxConcurrentJobs?: number;
+  /**
+   * Best-effort recovery for a ready managed plugin whose worker is absent.
+   *
+   * Managed bundled plugins can be installed by a sibling process after this
+   * process's startup load pass. API routes already recover those workers on
+   * demand; scheduled jobs need the same recovery boundary or a due job is
+   * silently skipped forever until an API request happens to start the worker.
+   */
+  recoverMissingWorker?: (pluginId: string) => Promise<boolean>;
 }
 
 /**
@@ -210,6 +219,7 @@ export function createPluginJobScheduler(
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
+    recoverMissingWorker,
   } = options;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
@@ -298,13 +308,38 @@ export function createPluginJobScheduler(
           continue;
         }
 
-        // Check if the worker is available
+        // Check if the worker is available. Managed bundled plugins can become
+        // ready after this process's startup load pass, so give the host one
+        // bounded chance to recover the worker before skipping the due job.
         if (!workerManager.isRunning(job.pluginId)) {
-          log.debug(
-            { jobId: job.id, pluginId: job.pluginId },
-            "skipping job — worker not running",
+          let recovered = false;
+          if (recoverMissingWorker) {
+            try {
+              recovered = await recoverMissingWorker(job.pluginId);
+            } catch (err) {
+              log.warn(
+                {
+                  jobId: job.id,
+                  pluginId: job.pluginId,
+                  err: err instanceof Error ? err.message : String(err),
+                },
+                "failed to recover missing plugin worker for due job",
+              );
+            }
+          }
+
+          if (!recovered || !workerManager.isRunning(job.pluginId)) {
+            log.debug(
+              { jobId: job.id, pluginId: job.pluginId },
+              "skipping job — worker not running",
+            );
+            continue;
+          }
+
+          log.info(
+            { jobId: job.id, pluginId: job.pluginId, jobKey: job.jobKey },
+            "recovered missing plugin worker for due job",
           );
-          continue;
         }
 
         // Validate cron expression before dispatching
