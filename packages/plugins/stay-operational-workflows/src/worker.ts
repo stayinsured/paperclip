@@ -17,6 +17,8 @@ import { assertOutlineModuleActivationUsable, parseOutlineModuleActivation } fro
 import { PostgresOutlineAssessmentRepository } from "./modules/outline/assessment.js";
 import { createOutlineRuntime } from "./modules/outline/runtime.js";
 import {
+  assertLiveSentryAuthorization,
+  assertRuntimeAuthorization,
   parseSentryPilotConfig,
   PluginSentryControlPlane,
   PostgresSentryWorkflowRepository,
@@ -42,10 +44,16 @@ const plugin = definePlugin({
     const reconciler = new ShadowReconciler(repository, undefined, outlineRuntime);
     const sentryRepository = new PostgresSentryWorkflowRepository(ctx.db);
     const sentryControlPlane = new PluginSentryControlPlane(ctx);
+    const sentryClient = new SentryApiClient(ctx.http);
+    const resolveSentrySecret = async (config: SentryPilotConfig): Promise<string> => {
+      const secretRef = config.sentry.tokenRef;
+      if (!secretRef) throw new SentryWorkflowConfigError("sentry_secret_missing", "Sentry secret reference is missing");
+      return ctx.secrets.resolve(secretRef, { companyId: config.companyId, configPath: "sentry.sentry.tokenRef" });
+    };
     const sentryWorkflow = new SentryWorkflow(
       sentryRepository,
       sentryControlPlane,
-      new SentryApiClient(ctx.http),
+      sentryClient,
       new SlackApiClient(ctx.http),
       async (config, provider) => {
         const secretRef = provider === "sentry" ? config.sentry.tokenRef : config.slack.tokenRef;
@@ -195,6 +203,11 @@ const plugin = definePlugin({
           );
         }
         await sentryControlPlane.verifyExactConfigurationApproval(config);
+        if (config.pollingEnabled) {
+          assertRuntimeAuthorization(config, new Date());
+          const token = await resolveSentrySecret(config);
+          assertLiveSentryAuthorization(config, await sentryClient.readAuthorization(config, token));
+        }
         await sentryRepository.upsertConfig(config, audit);
         await ctx.activity.log({
           companyId: input.companyId,

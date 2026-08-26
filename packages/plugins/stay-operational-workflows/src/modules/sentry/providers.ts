@@ -2,6 +2,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import {
   sanitizeSentryIssue,
   SentryWorkflowConfigError,
+  type LiveSentryAuthorization,
   type SanitizedSentryIssue,
   type SentryIssuePage,
   type SentryPilotConfig,
@@ -22,6 +23,7 @@ export class ProviderRequestError extends Error {
 }
 
 export interface SentryReadPort {
+  readAuthorization(config: SentryPilotConfig, token: string): Promise<LiveSentryAuthorization>;
   listIssues(input: {
     config: SentryPilotConfig;
     token: string;
@@ -96,6 +98,33 @@ function sentryError(response: Response): ProviderRequestError {
 
 export class SentryApiClient implements SentryReadPort {
   constructor(private readonly http: PluginContext["http"]) {}
+
+  async readAuthorization(config: SentryPilotConfig, token: string): Promise<LiveSentryAuthorization> {
+    const paths = [
+      "/api/0/",
+      `/api/0/organizations/${encodeURIComponent(config.sentry.organizationSlug)}/`,
+      `/api/0/projects/${encodeURIComponent(config.sentry.organizationSlug)}/${encodeURIComponent(config.sentry.projectSlug)}/`,
+      `/api/0/projects/${encodeURIComponent(config.sentry.organizationSlug)}/${encodeURIComponent(config.sentry.projectSlug)}/environments/${encodeURIComponent(config.sentry.environment)}/`,
+    ];
+    const bodies: Record<string, unknown>[] = [];
+    let scopes: string[] = [];
+    for (const path of paths) {
+      const target = new URL(path, config.sentry.apiBaseUrl);
+      let response: Response;
+      try {
+        response = await this.http.fetch(target.toString(), { method: "GET", headers: { authorization: `Bearer ${token}`, accept: "application/json" } });
+      } catch {
+        throw new ProviderRequestError("sentry", "identity_network_failure", null, null, false);
+      }
+      if (!response.ok) throw sentryError(response);
+      const payload = await json(response, "sentry");
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new ProviderRequestError("sentry", "invalid_identity_response", response.status, null, false);
+      bodies.push(payload as Record<string, unknown>);
+      if (path === "/api/0/") scopes = [...new Set((response.headers.get("x-sentry-scopes") ?? "").split(",").map((scope) => scope.trim()).filter(Boolean))].sort();
+    }
+    const [principal, organization, project, environment] = bodies;
+    return { principalId: String(principal.id ?? ""), scopes, organizationId: String(organization.id ?? ""), organizationSlug: String(organization.slug ?? ""), projectId: String(project.id ?? ""), projectSlug: String(project.slug ?? ""), environment: String(environment.name ?? "") };
+  }
 
   async listIssues(input: {
     config: SentryPilotConfig;

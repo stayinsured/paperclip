@@ -4,9 +4,11 @@ import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { Issue, IssueDocument, IssueThreadInteraction } from "@paperclipai/shared";
 import manifest from "../src/manifest.js";
 import {
+  assertLiveSentryAuthorization,
   assertRuntimeAuthorization,
   buildSlackSummary,
   configurationFingerprint,
+  freezeSentrySnapshot,
   notificationIdentity,
   parseRemediationProposal,
   parseSentryPilotConfig,
@@ -56,6 +58,19 @@ function rawConfig(input: { polling?: boolean; slack?: boolean; sentryScopes?: s
         verifiedAt: "2026-08-07T00:00:00.000Z",
         expiresAt: "2026-08-08T00:00:00.000Z",
       } : null,
+      broadScopeException: polling ? {
+        authorizationRevisionId: REVISION_ID,
+        configurationFingerprint: `sha256:${"0".repeat(64)}`,
+        principalId: "sentry-pilot-reader",
+        secretBinding: { type: "secret_ref", secretId: "77777777-7777-4777-8777-777777777777" },
+        secretBindingPath: "sentry.sentry.tokenRef",
+        organizationId: "4511354603896832",
+        organizationSlug: "stay-ki",
+        projectId: "4511354624540752",
+        projectSlug: "bff",
+        environment: "test",
+        observedScopes: input.sentryScopes ?? ["org:read", "project:read", "event:read"],
+      } : null,
     },
     slack: {
       teamId: "T08JDG82W2V",
@@ -88,6 +103,7 @@ function activeConfig(slack = false): SentryPilotConfig {
   const first = parseSentryPilotConfig(rawConfig({ polling: true, slack }));
   const input = rawConfig({ polling: true, slack });
   (input.exactConfigurationApproval as Record<string, unknown>).configurationFingerprint = configurationFingerprint(first);
+  ((input.sentry as Record<string, unknown>).broadScopeException as Record<string, unknown>).configurationFingerprint = configurationFingerprint(first);
   return parseSentryPilotConfig(input);
 }
 
@@ -117,9 +133,8 @@ function proposal(source = sourceIssue(), revision = "proposal-r2"): Remediation
   return {
     proposal_revision: revision,
     source: {
-      sentry_issue_url: source.providerUrl,
-      issue_key: source.shortId,
-      project: source.projectSlug,
+      stable_issue_id: source.stableIssueId,
+      project_id: source.projectId,
       environment: source.environment,
     },
     data_handling: {
@@ -312,6 +327,15 @@ describe("Sentry workflow contracts", () => {
     });
     await expect(control.verifyExactConfigurationApproval(config)).resolves.toBeUndefined();
   });
+  it("binds the broad-scope exception and persists only the frozen revision-2 allowlist", () => {
+    const config = activeConfig();
+    expect(config.exactConfigurationApproval?.configurationFingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(() => assertLiveSentryAuthorization(config, { principalId: "wrong", scopes: ["event:read", "org:read", "project:read"], organizationId: "4511354603896832", organizationSlug: "stay-ki", projectId: "4511354624540752", projectSlug: "bff", environment: "test" })).toThrow(/live Sentry identity/i);
+    const snapshot = freezeSentrySnapshot(config, sourceIssue(), new Date("2026-08-07T09:06:00.000Z"));
+    expect(Object.keys(snapshot).sort()).toEqual(["aggregateEventCount", "correlationKey", "dedupeKey", "environment", "firstSeen", "lastSeen", "level", "organizationId", "policyVersion", "processedAt", "projectId", "providerOccurrenceTimestamp", "sanitizerVersion", "stableIssueId", "status"]);
+    expect(JSON.stringify(snapshot)).not.toMatch(/title|providerUrl|release|fingerprintSummary|raw/i);
+  });
+
 });
 
 describe("Sentry and Slack provider boundaries", () => {
@@ -357,6 +381,7 @@ describe("Sentry and Slack provider boundaries", () => {
     const slack = new SlackApiClient({ fetch } as unknown as PluginContext["http"]);
     await slack.verifyIdentity(config, "not-persisted");
     const text = buildSlackSummary({ source: sourceIssue(), proposal: proposal(), paperclipIssueUrl: "/STA/issues/STA-1" });
+
     await expect(slack.postSummary({ config, token: "not-persisted", text })).resolves.toEqual({
       channelId: config.slack.channelId,
       timestamp: "1.2",
@@ -366,7 +391,33 @@ describe("Sentry and Slack provider boundaries", () => {
     expect(body).not.toHaveProperty("blocks");
     expect(body).not.toHaveProperty("attachments");
   });
+  it("reads live principal, scopes, organization, project, and environment through exact GET-only metadata targets", async () => {
+    const config = activeConfig();
+    const payloads = [{ id: "sentry-pilot-reader" }, { id: "4511354603896832", slug: "stay-ki" }, { id: "4511354624540752", slug: "bff" }, { name: "test" }];
+    const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify(payloads.shift()), { status: 200, headers: { "content-type": "application/json", "x-sentry-scopes": "project:read,event:read,org:read" } }));
+    const client = new SentryApiClient({ fetch } as unknown as PluginContext["http"]);
+    await expect(client.readAuthorization(config, "not-persisted")).resolves.toEqual({ principalId: "sentry-pilot-reader", scopes: ["event:read", "org:read", "project:read"], organizationId: "4511354603896832", organizationSlug: "stay-ki", projectId: "4511354624540752", projectSlug: "bff", environment: "test" });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch.mock.calls.map((call) => (call[1] as RequestInit).method)).toEqual(["GET", "GET", "GET", "GET"]);
+    expect(fetch.mock.calls.map((call) => new URL(call[0] as string).pathname)).toEqual(["/api/0/", "/api/0/organizations/stay-ki/", "/api/0/projects/stay-ki/bff/", "/api/0/projects/stay-ki/bff/environments/test/"]);
+  });
+
 });
+  it("rechecks current policy and live Sentry authorization before every repeated poll page", async () => {
+    const config = activeConfig();
+    const run = { id: "poll-1", companyId: COMPANY_ID, projectId: PROJECT_ID, mode: "manual" as const, status: "running" as const, windowStart: "2026-08-07T08:55:00.000Z", windowEnd: "2026-08-07T09:05:00.000Z", nextCursor: null as string | null, pageCount: 0, observedCount: 0, leaseToken: "lease-1" };
+    const repository = { listConfigs: vi.fn().mockResolvedValue([config]), claimPollRun: vi.fn().mockResolvedValue(run), advancePollRun: vi.fn(async (_run, cursor) => { run.nextCursor = cursor; run.pageCount += 1; }), completePollRun: vi.fn(), listIssueStates: vi.fn().mockResolvedValue([]), createException: vi.fn(), failPollRun: vi.fn() } as unknown as SentryWorkflowRepository;
+    const controlPlane = { verifyExactConfigurationApproval: vi.fn(), resolveTriageAgent: vi.fn().mockResolvedValue(TRIAGE_AGENT_ID) } as unknown as SentryControlPlanePort;
+    const live = { principalId: "sentry-pilot-reader", scopes: ["event:read", "org:read", "project:read"], organizationId: "4511354603896832", organizationSlug: "stay-ki", projectId: "4511354624540752", projectSlug: "bff", environment: "test" };
+    const sentry = { readAuthorization: vi.fn().mockResolvedValue(live), listIssues: vi.fn().mockResolvedValueOnce({ issues: [], nextCursor: "next:1" }).mockResolvedValueOnce({ issues: [], nextCursor: null }), countRecentOccurrences: vi.fn() };
+    const workflow = new SentryWorkflow(repository, controlPlane, sentry, {} as never, async () => "not-persisted", () => new Date("2026-08-07T12:00:00.000Z"));
+    const result = await workflow.reconcileCompany({ companyId: COMPANY_ID, mode: "manual", audit: { actorType: "system", actorId: null, runId: null } });
+    expect(result).toMatchObject({ pages: 2, exceptions: 0, externalWrites: 0 });
+    expect(sentry.readAuthorization).toHaveBeenCalledTimes(3);
+    expect(controlPlane.verifyExactConfigurationApproval).toHaveBeenCalledTimes(3);
+    expect(sentry.listIssues).toHaveBeenCalledTimes(2);
+  });
+
 
   it("reconciles a due Slack retry for an unchanged proposal revision", async () => {
     const config = activeConfig(true);

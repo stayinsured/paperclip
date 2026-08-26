@@ -3,7 +3,9 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { AuditIdentity } from "../../contracts.js";
 import {
   configurationFingerprint,
+  freezeSentrySnapshot,
   stableSentryIdentity,
+  type FrozenSentrySnapshot,
   type SanitizedSentryIssue,
   type SentryPilotConfig,
   type SentryPollWindow,
@@ -14,7 +16,7 @@ export interface SentryIssueState {
   companyId: string;
   projectId: string;
   stableSentryIssueId: string;
-  snapshot: SanitizedSentryIssue;
+  snapshot: SanitizedSentryIssue | FrozenSentrySnapshot;
   triageIssueId: string | null;
   resolvedAt: string | null;
   resolvedCount: number | null;
@@ -355,7 +357,7 @@ export class PostgresSentryWorkflowRepository implements SentryWorkflowRepositor
       [
         randomUUID(), config.companyId, config.projectId, config.sentry.organizationId,
         config.sentry.projectId, issue.stableIssueId, stableSentryIdentity(config, issue.stableIssueId),
-        JSON.stringify(issue), now.toISOString(),
+        JSON.stringify(freezeSentrySnapshot(config, issue, now)), now.toISOString(),
       ],
     );
     const state = await this.findState(config.companyId, issue.stableIssueId);

@@ -46,6 +46,30 @@ export interface ProviderIdentityProof {
   expiresAt: string;
 }
 
+export interface SentryBroadScopeException {
+  authorizationRevisionId: string;
+  configurationFingerprint: string;
+  principalId: string;
+  secretBinding: EnvSecretRefBinding;
+  secretBindingPath: "sentry.sentry.tokenRef";
+  organizationId: string;
+  organizationSlug: string;
+  projectId: string;
+  projectSlug: string;
+  environment: "test";
+  observedScopes: string[];
+}
+
+export interface LiveSentryAuthorization {
+  principalId: string;
+  scopes: string[];
+  organizationId: string;
+  organizationSlug: string;
+  projectId: string;
+  projectSlug: string;
+  environment: string;
+}
+
 export interface SentryPilotConfig {
   companyId: string;
   projectId: string;
@@ -66,6 +90,7 @@ export interface SentryPilotConfig {
     environment: "test";
     tokenRef: EnvSecretRefBinding | null;
     identityProof: ProviderIdentityProof | null;
+    broadScopeException: SentryBroadScopeException | null;
   };
   slack: {
     apiBaseUrl: "https://slack.com";
@@ -101,6 +126,24 @@ export interface SanitizedSentryIssue {
   regressed: boolean;
 }
 
+export interface FrozenSentrySnapshot {
+  stableIssueId: string;
+  organizationId: string;
+  projectId: string;
+  environment: "test";
+  status: "unresolved" | "regressed" | "resolved" | "unknown";
+  level: "fatal" | "error" | "warning" | "info" | "debug" | "unknown";
+  firstSeen: string;
+  lastSeen: string;
+  aggregateEventCount: number;
+  providerOccurrenceTimestamp: string;
+  sanitizerVersion: "sentry-frozen-allowlist-v2";
+  policyVersion: string;
+  dedupeKey: string;
+  correlationKey: string;
+  processedAt: string;
+}
+
 export interface SentryIssuePage {
   issues: SanitizedSentryIssue[];
   nextCursor: string | null;
@@ -115,9 +158,8 @@ export interface SentryPollWindow {
 export interface RemediationProposal {
   proposal_revision: string;
   source: {
-    sentry_issue_url: string;
-    issue_key: string;
-    project: string;
+    stable_issue_id: string;
+    project_id: string;
     environment: string;
   };
   data_handling: {
@@ -245,6 +287,26 @@ function parseApproval(value: unknown): ExactConfigurationApproval | null {
   };
 }
 
+function parseSentryBroadScopeException(value: unknown): SentryBroadScopeException | null {
+  if (value == null) return null;
+  const input = record(value, "sentry.broadScopeException");
+  const secretBinding = parseSecretRef(input.secretBinding, "sentry.broadScopeException.secretBinding");
+  if (!secretBinding) throw new SentryWorkflowConfigError("broad_scope_exception_required", "Sentry broad-scope exception secret binding is required");
+  return {
+    authorizationRevisionId: requiredString(input.authorizationRevisionId, "sentry.broadScopeException.authorizationRevisionId", /^[0-9a-f-]{36}$/i),
+    configurationFingerprint: requiredString(input.configurationFingerprint, "sentry.broadScopeException.configurationFingerprint", /^sha256:[0-9a-f]{64}$/),
+    principalId: requiredString(input.principalId, "sentry.broadScopeException.principalId"),
+    secretBinding,
+    secretBindingPath: requiredString(input.secretBindingPath, "sentry.broadScopeException.secretBindingPath", /^sentry\.sentry\.tokenRef$/) as "sentry.sentry.tokenRef",
+    organizationId: requiredString(input.organizationId, "sentry.broadScopeException.organizationId", /^\d{1,30}$/),
+    organizationSlug: requiredString(input.organizationSlug, "sentry.broadScopeException.organizationSlug", SAFE_SLUG),
+    projectId: requiredString(input.projectId, "sentry.broadScopeException.projectId", /^\d{1,30}$/),
+    projectSlug: requiredString(input.projectSlug, "sentry.broadScopeException.projectSlug", SAFE_SLUG),
+    environment: requiredString(input.environment, "sentry.broadScopeException.environment") as "test",
+    observedScopes: parseScopes(input.observedScopes, "sentry.broadScopeException.observedScopes"),
+  };
+}
+
 function assertExactScopes(actual: string[], required: readonly string[], provider: string): void {
   if (actual.length !== required.length || required.some((scope) => !actual.includes(scope))) {
     throw new SentryWorkflowConfigError(
@@ -265,6 +327,7 @@ export function parseSentryPilotConfig(input: Record<string, unknown>): SentryPi
   const sentryProof = parseIdentityProof(sentryInput.identityProof, "sentry.identityProof");
   const slackProof = parseIdentityProof(slackInput.identityProof, "slack.identityProof");
   const approval = parseApproval(input.exactConfigurationApproval);
+  const broadScopeException = parseSentryBroadScopeException(sentryInput.broadScopeException);
   const config: SentryPilotConfig = {
     companyId: requiredString(input.companyId, "companyId", /^[0-9a-f-]{36}$/i),
     projectId: requiredString(input.projectId, "projectId", /^[0-9a-f-]{36}$/i),
@@ -285,6 +348,7 @@ export function parseSentryPilotConfig(input: Record<string, unknown>): SentryPi
       environment: requiredString(sentryInput.environment, "sentry.environment") as "test",
       tokenRef: parseSecretRef(sentryInput.tokenRef, "sentry.tokenRef"),
       identityProof: sentryProof,
+      broadScopeException,
     },
     slack: {
       apiBaseUrl: "https://slack.com",
@@ -303,10 +367,11 @@ export function parseSentryPilotConfig(input: Record<string, unknown>): SentryPi
     throw new SentryWorkflowConfigError("wrong_environment", "Only the approved Sentry test environment is allowed");
   }
   if (pollingEnabled) {
-    if (!config.sentry.tokenRef || !sentryProof || !approval?.authorizedCapabilities.includes("sentry.poll")) {
+    if (!config.sentry.tokenRef || !sentryProof || !broadScopeException || !approval?.authorizedCapabilities.includes("sentry.poll")) {
       throw new SentryWorkflowConfigError("sentry_activation_unproven", "Sentry polling requires a token ref, identity proof, and exact approval");
     }
     assertExactScopes(sentryProof.scopes, REQUIRED_SENTRY_SCOPES, "Sentry");
+    assertExactScopes(broadScopeException.observedScopes, REQUIRED_SENTRY_SCOPES, "Sentry broad-scope exception");
   }
   if (slackEnabled) {
     if (
@@ -342,6 +407,7 @@ export function configurationFingerprint(config: SentryPilotConfig): string {
       environment: config.sentry.environment,
       principalId: config.sentry.identityProof?.principalId ?? null,
       scopes: config.sentry.identityProof?.scopes ?? [],
+      tokenRef: config.sentry.tokenRef,
     },
     slack: {
       teamId: config.slack.teamId,
@@ -365,9 +431,64 @@ export function assertRuntimeAuthorization(config: SentryPilotConfig, now: Date)
   if (config.pollingEnabled && (!config.sentry.identityProof || Date.parse(config.sentry.identityProof.expiresAt) <= now.getTime())) {
     throw new SentryWorkflowConfigError("sentry_identity_expired", "The Sentry identity proof is missing or expired");
   }
+  if (config.pollingEnabled) {
+    const exception = config.sentry.broadScopeException;
+    const proof = config.sentry.identityProof;
+    if (!exception || !proof
+      || exception.authorizationRevisionId !== approval.revisionId
+      || exception.configurationFingerprint !== approval.configurationFingerprint
+      || exception.principalId !== proof.principalId
+      || JSON.stringify(exception.secretBinding) !== JSON.stringify(config.sentry.tokenRef)
+      || exception.organizationId !== config.sentry.organizationId
+      || exception.organizationSlug !== config.sentry.organizationSlug
+      || exception.projectId !== config.sentry.projectId
+      || exception.projectSlug !== config.sentry.projectSlug
+      || exception.environment !== config.sentry.environment
+      || exception.observedScopes.join("\u001f") !== proof.scopes.join("\u001f")) {
+      throw new SentryWorkflowConfigError("broad_scope_exception_mismatch", "The Sentry broad-scope exception does not exactly match the current authorization");
+    }
+  }
   if (config.slackEnabled && (!config.slack.identityProof || Date.parse(config.slack.identityProof.expiresAt) <= now.getTime())) {
     throw new SentryWorkflowConfigError("slack_identity_expired", "The Slack identity proof is missing or expired");
   }
+}
+
+export function assertLiveSentryAuthorization(config: SentryPilotConfig, live: LiveSentryAuthorization): void {
+  const exception = config.sentry.broadScopeException;
+  const scopes = [...new Set(live.scopes)].sort();
+  if (!exception
+    || live.principalId !== exception.principalId
+    || scopes.join("\u001f") !== exception.observedScopes.join("\u001f")
+    || live.organizationId !== exception.organizationId
+    || live.organizationSlug !== exception.organizationSlug
+    || live.projectId !== exception.projectId
+    || live.projectSlug !== exception.projectSlug
+    || live.environment !== exception.environment) {
+    throw new SentryWorkflowConfigError("live_sentry_authorization_mismatch", "Live Sentry identity, scopes, or exact target drifted from the authorized exception");
+  }
+}
+
+export function freezeSentrySnapshot(config: SentryPilotConfig, issue: SanitizedSentryIssue, processedAt: Date): FrozenSentrySnapshot {
+  const stableIdentity = [config.companyId, config.sentry.organizationId, config.sentry.projectId, issue.stableIssueId].join(":");
+  const correlationKey = createHash("sha256").update(stableIdentity).digest("hex");
+  const allowedLevels = ["fatal", "error", "warning", "info", "debug"] as const;
+  return {
+    stableIssueId: issue.stableIssueId,
+    organizationId: config.sentry.organizationId,
+    projectId: config.sentry.projectId,
+    environment: config.sentry.environment,
+    status: issue.regressed ? "regressed" : "unresolved",
+    level: (allowedLevels as readonly string[]).includes(issue.level) ? issue.level as FrozenSentrySnapshot["level"] : "unknown",
+    firstSeen: issue.firstSeen,
+    lastSeen: issue.lastSeen,
+    aggregateEventCount: issue.count,
+    providerOccurrenceTimestamp: issue.lastSeen,
+    sanitizerVersion: "sentry-frozen-allowlist-v2",
+    policyVersion: config.policyVersion,
+    dedupeKey: createHash("sha256").update([stableIdentity, issue.lastSeen, issue.count].join("\u001f")).digest("hex"),
+    correlationKey,
+    processedAt: processedAt.toISOString(),
+  };
 }
 
 export function stableSentryIdentity(config: SentryPilotConfig, stableIssueId: string): string {
@@ -508,7 +629,7 @@ function assertSafeTextTree(value: unknown, path = "proposal"): void {
   }
 }
 
-export function parseRemediationProposal(body: string, source: SanitizedSentryIssue): RemediationProposal {
+export function parseRemediationProposal(body: string, source: SanitizedSentryIssue | FrozenSentrySnapshot): RemediationProposal {
   if (body.length > 60_000) throw new SentryWorkflowConfigError("invalid_proposal", "Proposal document is too large");
   let parsed: unknown;
   try {
@@ -529,9 +650,8 @@ export function parseRemediationProposal(body: string, source: SanitizedSentryIs
   const gate = record(proposal.approval_gate, "proposal.approval_gate");
   const revision = requiredString(proposal.proposal_revision, "proposal_revision", /^[A-Za-z0-9._:-]{1,160}$/);
   if (
-    sourceBlock.sentry_issue_url !== source.providerUrl
-    || sourceBlock.issue_key !== source.shortId
-    || sourceBlock.project !== source.projectSlug
+    sourceBlock.stable_issue_id !== source.stableIssueId
+    || sourceBlock.project_id !== source.projectId
     || sourceBlock.environment !== source.environment
   ) {
     throw new SentryWorkflowConfigError("proposal_source_mismatch", "Proposal source does not match the configured Sentry issue");
@@ -555,23 +675,23 @@ export function parseRemediationProposal(body: string, source: SanitizedSentryIs
 }
 
 export function buildSlackSummary(input: {
-  source: SanitizedSentryIssue;
+  source: SanitizedSentryIssue | FrozenSentrySnapshot;
   proposal: RemediationProposal;
   paperclipIssueUrl: string;
 }): string {
   const impact = input.proposal.customer_impact.confirmed.length > 0
     ? input.proposal.customer_impact.confirmed.join("; ").slice(0, 500)
     : "Impact is not confirmed.";
+  const count = "aggregateEventCount" in input.source ? input.source.aggregateEventCount : input.source.count;
   const text = [
-    `Sentry: ${input.source.title}`,
-    `Severity: ${input.proposal.severity.level} (${input.proposal.severity.confidence} confidence)`,
-    `Project: ${input.source.projectSlug}`,
-    `First seen: ${input.source.firstSeen}`,
-    `Last seen: ${input.source.lastSeen}`,
-    `Count: ${input.source.count}`,
-    `Impact: ${impact}`,
-    `Paperclip triage: ${input.paperclipIssueUrl}`,
-    `Sentry: ${input.source.providerUrl}`,
+    "Sentry issue: " + input.source.stableIssueId,
+    `Severity:  ( confidence)`,
+    "Project ID: " + input.source.projectId,
+    "First seen: " + input.source.firstSeen,
+    "Last seen: " + input.source.lastSeen,
+    "Count: " + count,
+    "Impact: " + impact,
+    "Paperclip triage: " + input.paperclipIssueUrl,
     "Approval is in Paperclip.",
   ].join("\n");
   assertSafeTextTree(text, "Slack summary");
