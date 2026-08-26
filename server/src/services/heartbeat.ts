@@ -99,6 +99,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { resolveTelemetryModelLabel } from "./token-telemetry.js";
+import { classifyShadowPilot, decideShadowRouting, parsePilot, persistShadowRoutingDecision } from "./task-aware-routing.js";
 import { pluginExecutionAttemptService, PLUGIN_EXECUTION_RUNTIME_MS } from "./plugin-execution-attempts.js";
 import { evaluateExecutionAdmission, type ExecutionAdmissionResult } from "./execution-admission.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
@@ -14577,6 +14578,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await executeResponseOnlySkillTestRun({ run, agent, issueId: issueId!, snapshot: responseOnlySnapshot });
       return;
     }
+    const serverRoutingPilot = classifyShadowPilot({
+      issue: issueContext,
+      wakeReason: readNonEmptyString(context.wakeReason),
+      scheduledRetryAttempt: run.scheduledRetryAttempt,
+    });
+    // This field is server-owned. Never enroll a run from caller-supplied adapter context.
+    if (serverRoutingPilot) context.paperclipRoutingPilot = serverRoutingPilot;
+    else {
+      delete context.paperclipRoutingPilot;
+      delete context.paperclipRoutingDecision;
+    }
     const wakeCommentId = deriveCommentId(context, null);
     const wakeCommentContext =
       issueContext && wakeCommentId
@@ -15082,6 +15094,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
         "Failed to resolve adapter model profiles; falling back to primary adapter config",
       );
+    }
+    const routingPilot = parsePilot(context.paperclipRoutingPilot);
+    let shadowRoutingDecision: ReturnType<typeof decideShadowRouting> = null;
+    if (routingPilot) {
+      // Resolve cheap only for shadow eligibility; never apply it to adapter config or session state.
+      const cheap = resolveModelProfileApplication({
+        adapterModelProfiles,
+        agentRuntimeConfig: agent.runtimeConfig,
+        issueModelProfile: "cheap",
+        contextSnapshot: null,
+        profileResolutionFallbackReason,
+      });
+      shadowRoutingDecision = decideShadowRouting(routingPilot, cheap.fallbackReason);
+      context.paperclipRoutingDecision = shadowRoutingDecision;
     }
     const modelProfileApplication = resolveModelProfileApplication({
       adapterModelProfiles,
@@ -16926,10 +16952,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         mergeRunStopMetadataForAgent(agent, outcome, {
           resultJson: mergeModelProfileRunMetadata(
             mergeAdapterRecoveryMetadata({
-              resultJson: {
+              resultJson: persistShadowRoutingDecision({
                 ...parseObject(adapterResult.resultJson),
                 configFreshness: configFreshnessResultMetadata,
-              },
+              }, shadowRoutingDecision),
               errorFamily: adapterResult.errorFamily ?? null,
               retryNotBefore: adapterResult.retryNotBefore ?? null,
             }),

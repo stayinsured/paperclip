@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
@@ -9,6 +9,7 @@ import {
   buildTokenTelemetryBaselineReport,
   type TokenTelemetryFact,
 } from "./token-telemetry.js";
+import { buildShadowCohortReport, parseDecision } from "./task-aware-routing.js";
 
 export interface CostDateRange {
   from?: Date;
@@ -240,6 +241,35 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         dailyFacts,
         completedIssueFacts,
       });
+    },
+
+    shadowRoutingCohort: async (companyId: string, range: { from: Date; toExclusive: Date }) => {
+      const baseline = await costService(db).tokenTelemetryBaseline(companyId, range);
+      const issueIds = baseline.completedIssueRollups.map((row) => row.issueId);
+      const [runs, reopenRows] = await Promise.all([db.select({
+        issueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
+        decision: sql<unknown>`${heartbeatRuns.resultJson} -> 'paperclipRoutingDecision'`,
+      }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        isNotNull(heartbeatRuns.finishedAt),
+        gte(heartbeatRuns.finishedAt, range.from),
+        lt(heartbeatRuns.finishedAt, range.toExclusive),
+      )), issueIds.length === 0 ? Promise.resolve([]) : db.selectDistinct({ issueId: activityLog.entityId }).from(activityLog).where(and(
+        eq(activityLog.companyId, companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.action, "issue.updated"),
+        inArray(activityLog.entityId, issueIds),
+        sql`${activityLog.details} ->> 'reopened' = 'true'`,
+      ))]);
+      const members = runs.flatMap((run) => {
+        const decision = parseDecision(run.decision);
+        return run.issueId && decision ? [{ issueId: run.issueId, decision }] : [];
+      });
+      const reopenedIssueIds = new Set(reopenRows.map((row) => row.issueId));
+      return buildShadowCohortReport(baseline.completedIssueRollups.map((row) => {
+        const reopened = reopenedIssueIds.has(row.issueId);
+        return { ...row, outcome: { firstPassAccepted: !reopened, reopened } };
+      }), members);
     },
 
     issueTreeSummary: async (
