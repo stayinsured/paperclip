@@ -1930,8 +1930,16 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
     typeof input.maxBodyBytes === "number" && Number.isFinite(input.maxBodyBytes) && input.maxBodyBytes > 0
       ? Math.trunc(input.maxBodyBytes)
       : DEFAULT_SANDBOX_CALLBACK_BRIDGE_MAX_BODY_BYTES;
+  // The worker runs beside the Paperclip server, even when the agent itself
+  // runs in a remote sandbox. Once the server has published its listen port,
+  // forward through that local socket instead of hairpinning through the
+  // externally advertised runtime URL. The public URL can depend on DNS,
+  // Tailscale, or a reverse proxy and is not a reliable host-local callback
+  // path. Standalone adapter consumers that do not publish a listen port keep
+  // the existing runtime/public URL fallback.
   const hostApiUrl =
     input.hostApiUrl?.trim() ||
+    (process.env.PAPERCLIP_LISTEN_PORT?.trim() ? resolveDefaultPaperclipApiUrl() : "") ||
     process.env.PAPERCLIP_RUNTIME_API_URL?.trim() ||
     process.env.PAPERCLIP_API_URL?.trim() ||
     resolveDefaultPaperclipApiUrl();
