@@ -2367,6 +2367,117 @@ async function resolvePersistedWorktreeRegistry(input: {
   return input.worktreePath;
 }
 
+export async function repairMissingPersistedGitWorktreePointer(input: {
+  projectRepoRoot: string;
+  worktreePath: string;
+  recordedRepoUrl: string | null | undefined;
+  expectedBranchName: string | null;
+  executionWorkspaceId: string | null;
+  phase?: "worktree_prepare" | "workspace_finalize" | "worktree_cleanup";
+  recorder?: WorkspaceOperationRecorder | null;
+}): Promise<string[]> {
+  const pointerPath = path.join(input.worktreePath, ".git");
+  const pointerMissing = await fs.lstat(pointerPath)
+    .then(() => false)
+    .catch((error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  if (!pointerMissing) return [];
+
+  const recordedRepoPath = resolveLocalGitRepoPath(input.recordedRepoUrl, input.projectRepoRoot);
+  const registryCandidates = [...new Set(
+    [input.projectRepoRoot, recordedRepoPath]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => path.resolve(value)),
+  )];
+
+  for (const registryRoot of registryCandidates) {
+    const brokenInspection = await inspectManagedGitWorktreeBranch({
+      repoRoot: registryRoot,
+      worktreePath: input.worktreePath,
+      expectedBranchName: null,
+    });
+    // A missing pointer is repairable only when the trusted repository registry
+    // still names this exact worktree path. inspectManagedGitWorktreeBranch checks
+    // registry membership before returning wrong_repository_root, so no Git
+    // command is ever run in the broken path or an unrelated parent checkout.
+    if (brokenInspection.reasonCode !== "wrong_repository_root") continue;
+
+    const repairArgs = ["worktree", "repair", input.worktreePath];
+    const repairMetadata = {
+      executionWorkspaceId: input.executionWorkspaceId,
+      worktreePath: input.worktreePath,
+      expectedBranchName: input.expectedBranchName,
+      worktreePointerRepair: true,
+      priorReasonCode: brokenInspection.reasonCode,
+    };
+    let repairedInspection: ManagedGitWorktreeBranchInspection;
+    if (input.recorder) {
+      let inspected: ManagedGitWorktreeBranchInspection | null = null;
+      await input.recorder.recordOperation({
+        phase: input.phase ?? "worktree_prepare",
+        command: formatCommandForDisplay("git", repairArgs),
+        cwd: registryRoot,
+        metadata: repairMetadata,
+        run: async () => {
+          const result = await executeProcess({
+            command: "git",
+            args: repairArgs,
+            cwd: registryRoot,
+          });
+          inspected = await inspectManagedGitWorktreeBranch({
+            repoRoot: registryRoot,
+            worktreePath: input.worktreePath,
+            expectedBranchName: input.expectedBranchName,
+          });
+          const coherent = inspected.valid || inspected.reasonCode === "branch_mismatch";
+          return {
+            // `git worktree repair` may report the broken pointer on stderr and
+            // exit non-zero even after recreating it. The verified postcondition,
+            // not that advisory exit code, determines operation success.
+            status: coherent ? "succeeded" : "failed",
+            exitCode: result.code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            system: coherent ? `Repaired missing git worktree pointer at ${input.worktreePath}\n` : null,
+            metadata: result.code === 0 ? null : { gitExitCodeAfterSuccessfulRepair: result.code },
+          };
+        },
+      });
+      repairedInspection = inspected!;
+    } else {
+      await executeProcess({
+        command: "git",
+        args: repairArgs,
+        cwd: registryRoot,
+      });
+      repairedInspection = await inspectManagedGitWorktreeBranch({
+        repoRoot: registryRoot,
+        worktreePath: input.worktreePath,
+        expectedBranchName: input.expectedBranchName,
+      });
+    }
+    if (
+      !repairedInspection.valid
+      && repairedInspection.reasonCode !== "branch_mismatch"
+    ) {
+      throw new WorkspaceRuntimeValidationFailure(
+        `Persisted git worktree "${input.worktreePath}" pointer repair did not restore a coherent checkout (${repairedInspection.reason}).`,
+        {
+          workspaceValidation: {
+            reason: "git_worktree_pointer_repair_failed",
+            reasonCode: repairedInspection.reasonCode,
+            worktreePath: input.worktreePath,
+            executionWorkspaceId: input.executionWorkspaceId,
+          },
+        },
+      );
+    }
+
+    return [`Repaired missing git worktree pointer at "${input.worktreePath}" from its registered repository.`];
+  }
+
+  return [];
+}
+
 async function validatePersistedExactGitWorktree(input: {
   worktreePath: string;
   baseRef: string | null;
@@ -3117,6 +3228,14 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
     const reuseWorktreePath = realized.worktreePath ?? cwd;
     const executionWorkspaceId = input.workspace.id ?? null;
+    const pointerRepairWarnings = await repairMissingPersistedGitWorktreePointer({
+      projectRepoRoot: repoRoot,
+      worktreePath: reuseWorktreePath,
+      recordedRepoUrl: input.workspace.repoUrl ?? input.base.repoUrl,
+      expectedBranchName: realized.branchName,
+      executionWorkspaceId,
+      recorder: input.recorder ?? null,
+    });
     const registryRepoRoot = await resolvePersistedWorktreeRegistry({
       projectRepoRoot: repoRoot,
       worktreePath: reuseWorktreePath,
@@ -3130,7 +3249,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       metadata: input.workspace.metadata,
       executionWorkspaceId,
     });
-    const repairWarnings: string[] = [];
+    const repairWarnings: string[] = [...pointerRepairWarnings];
     if (await isGitCheckout(reuseWorktreePath)) {
       const coherence = await ensureGitWorktreeBranchCoherent({
         db: input.db ?? null,
@@ -3423,6 +3542,15 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
         warnings.push(`Could not resolve git repo root for "${workspacePath}".`);
       } else {
         try {
+          warnings.push(...await repairMissingPersistedGitWorktreePointer({
+            projectRepoRoot: repoRoot,
+            worktreePath: workspacePath,
+            recordedRepoUrl: input.workspace.repoUrl,
+            expectedBranchName: input.workspace.branchName,
+            executionWorkspaceId: input.workspace.id,
+            phase: "worktree_cleanup",
+            recorder: input.recorder ?? null,
+          }));
           await recordGitOperation(input.recorder, {
             phase: "worktree_cleanup",
             args: ["worktree", "remove", "--force", workspacePath],

@@ -144,6 +144,7 @@ import {
   formatManagedGitWorktreeBranchInspection,
   inspectManagedGitWorktreeBranch,
   persistAdapterManagedRuntimeServices,
+  repairMissingPersistedGitWorktreePointer,
   realizeExecutionWorkspace,
   releaseRuntimeServicesForRun,
   type ExecutionWorkspaceInput,
@@ -16374,6 +16375,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           worktreePath,
           expectedBranchName,
         });
+        if (!inspection.valid && inspection.reasonCode === "wrong_repository_root") {
+          const pointerRepairWarnings = await repairMissingPersistedGitWorktreePointer({
+            projectRepoRoot: resolvedWorkspace.cwd,
+            worktreePath,
+            recordedRepoUrl: workspaceRecord.repoUrl,
+            expectedBranchName,
+            executionWorkspaceId: workspaceRecord.id,
+            phase: "workspace_finalize",
+            recorder: workspaceOperationRecorder,
+          });
+          executionWorkspace.warnings.push(...pointerRepairWarnings);
+          if (pointerRepairWarnings.length > 0) {
+            return {
+              workspaceRecord,
+              inspection: await inspectManagedGitWorktreeBranch({
+                worktreePath,
+                expectedBranchName,
+              }),
+            };
+          }
+        }
         return { workspaceRecord, inspection };
       };
       const recordWorkspaceFinalize = async (
