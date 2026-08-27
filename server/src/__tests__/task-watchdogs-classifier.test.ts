@@ -112,6 +112,56 @@ describe("task watchdog subtree classifier", () => {
     expect(ticked.stoppedLeaves[0]?.updatedAt).not.toBe(initial.stoppedLeaves[0]?.updatedAt);
   });
 
+  it("keys recovery review state to acceptance revision progress", () => {
+    const initial = classify({
+      issues: [issue({
+        status: "done",
+        acceptanceRevision: "acceptance-v1",
+        terminalOperationStatus: "done",
+      })],
+    });
+    expect(initial.state).toBe("stopped");
+    if (initial.state !== "stopped") return;
+    expect(initial.stopSnapshot.acceptanceStates).toEqual([{
+      issueId: sourceId,
+      acceptanceRevision: "acceptance-v1",
+      terminalStatus: "done",
+    }]);
+
+    const unchanged = classify({
+      watchdog: {
+        companyId,
+        issueId: sourceId,
+        lastReviewedFingerprint: initial.stopFingerprint,
+        lastReviewedStopSnapshot: initial.stopSnapshot,
+      },
+      issues: [issue({
+        status: "done",
+        acceptanceRevision: "acceptance-v1",
+        terminalOperationStatus: "done",
+        updatedAt: "2026-06-19T20:00:00.000Z",
+      })],
+    });
+    expect(unchanged.state).toBe("already_reviewed");
+
+    const advanced = classify({
+      watchdog: {
+        companyId,
+        issueId: sourceId,
+        lastReviewedFingerprint: initial.stopFingerprint,
+        lastReviewedStopSnapshot: initial.stopSnapshot,
+      },
+      issues: [issue({
+        status: "done",
+        acceptanceRevision: "acceptance-v2",
+        terminalOperationStatus: "done",
+      })],
+    });
+    expect(advanced.state).toBe("stopped");
+    if (advanced.state !== "stopped") return;
+    expect(advanced.stopFingerprint).not.toBe(initial.stopFingerprint);
+  });
+
   it("suppresses a shrink-only stopped state after a sibling completes", () => {
     const siblingId = "child-2";
     const initial = classify({

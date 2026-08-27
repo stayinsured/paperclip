@@ -12,14 +12,14 @@ import {
   heartbeatRuns,
   instanceUserRoles,
 } from "@paperclipai/db";
-import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
+import { getLocalAgentJwtFailureReason, verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
-import { forbidden, unprocessable } from "../errors.js";
+import { forbidden, unauthorized, unprocessable } from "../errors.js";
 
 export { isCloudManagedInstance } from "../services/cloud-instance.js";
 
@@ -270,6 +270,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     if (!key) {
       const claims = verifyLocalAgentJwt(token);
       if (!claims) {
+        if (getLocalAgentJwtFailureReason(token) === "token_expired") {
+          next(unauthorized("Agent token expired", { code: "token_expired" }));
+          return;
+        }
+
         next();
         return;
       }
@@ -280,8 +285,15 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         .where(eq(agents.id, claims.sub))
         .then((rows) => rows[0] ?? null);
 
-      if (!agentRecord || agentRecord.companyId !== claims.company_id) {
+      if (!agentRecord) {
         next();
+        return;
+      }
+
+      if (agentRecord.companyId !== claims.company_id) {
+        next(forbidden("Agent token company does not match the agent company", {
+          code: "wrong_company",
+        }));
         return;
       }
 

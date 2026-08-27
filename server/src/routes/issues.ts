@@ -60,6 +60,7 @@ import {
   TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND,
   rejectIssueThreadInteractionSchema,
   restoreIssueDocumentRevisionSchema,
+  terminalIssueCompletionSchema,
   respondIssueThreadInteractionSchema,
   stalledReviewDecisionSchema,
   submitIssueThreadInteractionVerdictsSchema,
@@ -145,6 +146,7 @@ import {
   isReviewPathRecoveryIdempotencyConflict,
   REVIEW_PATH_RECOVERY_INSTRUCTION,
 } from "../services/recovery/review-path-recovery.js";
+import { issueTerminalCompletionService } from "../services/issue-terminal-completions.js";
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
@@ -2704,6 +2706,7 @@ export function issueRoutes(
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
+  const terminalCompletionsSvc = issueTerminalCompletionService(db);
   const enqueueStalledReviewDecisionWakeup = opts.stalledReviewDecisionEnqueueWakeup ?? heartbeat.wakeup;
   const enqueueRecoveryActionWakeup = opts.recoveryActionEnqueueWakeup ?? heartbeat.wakeup;
   const enqueueWorkProductHandoffWakeup = opts.workProductHandoffEnqueueWakeup ?? heartbeat.wakeup;
@@ -8502,6 +8505,189 @@ export function issueRoutes(
       });
     },
   );
+
+  router.post("/issues/:id/terminal", validate(terminalIssueCompletionSchema), async (req, res) => {
+    if (req.actor.type !== "agent") {
+      throw unauthorized("Agent authentication required", { code: "agent_auth_required" });
+    }
+    const runId = req.header("x-paperclip-run-id")?.trim() || null;
+    if (!runId) {
+      throw unprocessable("X-Paperclip-Run-Id is required for terminal completion", {
+        code: "missing_run_header",
+      });
+    }
+
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      throw notFound("Issue not found", { code: "task_not_found" });
+    }
+    if (existing.companyId !== req.actor.companyId) {
+      throw forbidden("Issue belongs to another company", { code: "wrong_company" });
+    }
+    const run = await db
+      .select({
+        id: heartbeatRuns.id,
+        companyId: heartbeatRuns.companyId,
+        agentId: heartbeatRuns.agentId,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run) {
+      throw unprocessable("Heartbeat run not found", { code: "run_not_found" });
+    }
+    if (run.companyId !== req.actor.companyId) {
+      throw forbidden("Heartbeat run belongs to another company", { code: "wrong_company" });
+    }
+    if (run.agentId !== req.actor.agentId) {
+      throw forbidden("Heartbeat run belongs to another agent", { code: "run_context_mismatch" });
+    }
+    if (isPendingExecutionStageParticipant(existing.executionState, req.actor.agentId)) {
+      throw unprocessable(
+        "Pending execution-policy stages must be advanced through the issue update route",
+        { code: "terminal_execution_stage_pending" },
+      );
+    }
+    if (existing.status === "in_review" && req.body.status === "done") {
+      throw forbidden("Agents cannot approve their own in-review work");
+    }
+
+    const issueMutationAccess = await assertAgentIssueMutationAllowed(req, res, existing, {
+      allowVisibleIssueWrite: true,
+    });
+    if (!issueMutationAccess) return;
+    const authorizationReason = issueWriteAuthorizationReason(
+      req,
+      await decideIssueAccess(req, existing, "issue:mutate"),
+    );
+    const actor = getActorInfo(req);
+    const completed = await terminalCompletionsSvc.complete({
+      companyId: existing.companyId,
+      issueId: existing.id,
+      runId,
+      agentId: req.actor.agentId,
+      operation: req.body,
+      authorizationReason,
+      sourceTrust: await sourceTrustForActorWrite(existing, actor),
+      onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+    });
+
+    if (!completed.replayed) {
+      await issueReferencesSvc.syncComment(completed.comment.id);
+      await externalObjectsSvc.syncCommentSafely(completed.comment.id);
+      await routinesSvc.syncRunStatusForIssue(completed.issue.id);
+      await heartbeat.reportRunActivity(runId).catch((err) =>
+        logger.warn({ err, runId }, "failed to clear detached run warning after terminal completion"));
+
+      await logActivity(db, {
+        companyId: completed.issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: completed.issue.id,
+        details: {
+          commentId: completed.comment.id,
+          bodySnippet: completed.comment.body.slice(0, 120),
+          identifier: completed.issue.identifier,
+          issueTitle: completed.issue.title,
+          authorizationReason,
+          source: "terminal_completion",
+          acceptanceRevision: completed.operation.acceptanceRevision,
+        },
+      });
+      await logActivity(db, {
+        companyId: completed.issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.terminal_completed",
+        entityType: "issue",
+        entityId: completed.issue.id,
+        details: {
+          status: completed.issue.status,
+          commentId: completed.comment.id,
+          terminalOperationId: completed.operation.id,
+          acceptanceRevision: completed.operation.acceptanceRevision,
+          idempotencyKey: completed.operation.idempotencyKey,
+        },
+      });
+
+      const expiredInteractions = await issueThreadInteractionService(db).expirePendingInteractionsForTerminalIssue(
+        completed.issue,
+        { agentId: actor.agentId, userId: null },
+      );
+      await logExpiredRequestConfirmations({
+        issue: completed.issue,
+        interactions: expiredInteractions,
+        actor,
+        source: "issue.terminal_completion",
+      });
+      await destroyReusableSandboxLeasesForTerminalIssue(completed.issue);
+      await queueTaskWatchdogEvaluation(completed.issue, runId);
+
+      if (completed.issue.status === "done") {
+        const dependents = await svc.listWakeableBlockedDependents(completed.issue.id);
+        for (const dependent of dependents) {
+          void heartbeat.wakeup(dependent.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+            idempotencyKey: buildIssueBlockersResolvedWakeIdempotencyKey({
+              dependentIssueId: dependent.id,
+              resolvedBlockerIssueId: completed.issue.id,
+            }),
+            payload: {
+              issueId: dependent.id,
+              resolvedBlockerIssueId: completed.issue.id,
+              blockerIssueIds: dependent.blockerIssueIds,
+              mutation: "terminal_completion",
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+          });
+        }
+      }
+      if (completed.issue.parentId) {
+        const parent = await svc.getWakeableParentAfterChildCompletion(completed.issue.parentId);
+        if (parent) {
+          void heartbeat.wakeup(parent.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_children_completed",
+            payload: {
+              issueId: parent.id,
+              completedChildIssueId: completed.issue.id,
+              childIssueIds: parent.childIssueIds,
+              childIssueSummaries: parent.childIssueSummaries,
+              childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+          });
+        }
+      }
+    }
+
+    res.status(completed.replayed ? 200 : 201).json({
+      issue: completed.issue,
+      comment: completed.comment,
+      terminalOperation: {
+        id: completed.operation.id,
+        acceptanceRevision: completed.operation.acceptanceRevision,
+        status: completed.operation.terminalStatus,
+        idempotencyKey: completed.operation.idempotencyKey,
+      },
+      replayed: completed.replayed,
+    });
+  });
 
   router.patch("/issues/:id", validate(updateIssueRouteSchema), async (req, res) => {
     const id = req.params.id as string;

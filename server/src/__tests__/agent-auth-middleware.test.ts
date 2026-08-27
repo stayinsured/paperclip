@@ -124,6 +124,7 @@ function craftAgentJwtWithoutResponsibleClaim(input: {
   companyId: string;
   adapterType: string;
   runId: string;
+  expiresAt?: number;
 }) {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "HS256", typ: "JWT" };
@@ -133,7 +134,7 @@ function craftAgentJwtWithoutResponsibleClaim(input: {
     adapter_type: input.adapterType,
     run_id: input.runId,
     iat: now,
-    exp: now + 3600,
+    exp: input.expiresAt ?? now + 3600,
     iss: "paperclip",
     aud: "paperclip-api",
   };
@@ -377,5 +378,57 @@ describe("agent auth middleware", () => {
       entityId: keyId,
       details: { method: "GET", url: `/companies/${companyId}/protected` },
     });
+  });
+
+  it("returns a typed token-expired failure for an otherwise valid signed JWT", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const { db } = createDbState({
+      agent: { id: agentId, companyId },
+      run: { id: runId, companyId, agentId },
+    });
+    const token = craftAgentJwtWithoutResponsibleClaim({
+      secret: process.env.PAPERCLIP_AGENT_JWT_SECRET!,
+      agentId,
+      companyId,
+      adapterType: "codex_local",
+      runId,
+      expiresAt: Math.floor(Date.now() / 1000) - 1,
+    });
+
+    const res = await request(createApp(db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId);
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("token_expired");
+  });
+
+  it("returns a typed wrong-company failure when the signed agent no longer belongs to the claim company", async () => {
+    const claimedCompanyId = randomUUID();
+    const actualCompanyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const { db } = createDbState({
+      agent: { id: agentId, companyId: actualCompanyId },
+      run: { id: runId, companyId: claimedCompanyId, agentId },
+    });
+    const token = createLocalAgentJwt(
+      agentId,
+      claimedCompanyId,
+      "codex_local",
+      runId,
+      "user-claim",
+    );
+
+    const res = await request(createApp(db))
+      .get("/actor")
+      .set("Authorization", `Bearer ${token}`)
+      .set("X-Paperclip-Run-Id", runId);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("wrong_company");
   });
 });

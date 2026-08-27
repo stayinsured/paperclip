@@ -69,6 +69,7 @@ export { issueLabels } from "./issue_labels.js";
 export { issueApprovals } from "./issue_approvals.js";
 export { issueComments } from "./issue_comments.js";
 export { issueCreateIdempotencyKeys } from "./issue_create_idempotency_keys.js";
+export { issueTerminalOperations } from "./issue_terminal_operations.js";
 export { issueThreadInteractions } from "./issue_thread_interactions.js";
 export {
   decisions,
