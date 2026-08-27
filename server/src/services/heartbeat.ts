@@ -4806,25 +4806,45 @@ async function resolveInstructionsConfigFingerprintMetadata(config: Record<strin
   return metadata;
 }
 
-const SESSION_WORKSPACE_CONFIG_LIFECYCLE_KEYS = new Set([
-  "desiredState",
-  "serviceStates",
-]);
+function omitPersistedRuntimeLifecycleState(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value instanceof Date) {
+    return value;
+  }
+  const normalized = { ...(value as Record<string, unknown>) };
+  delete normalized.desiredState;
+  delete normalized.serviceStates;
+  return normalized;
+}
 
 function normalizeSessionWorkspaceConfigForFingerprint(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeSessionWorkspaceConfigForFingerprint(entry));
+  if (!value || typeof value !== "object" || Array.isArray(value) || value instanceof Date) {
+    return value;
   }
-  if (!value || typeof value !== "object" || value instanceof Date) return value;
 
-  const normalized: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    // Revision timestamps and persisted runtime desired/current state are
-    // lifecycle metadata, not session compatibility boundaries. The effective
-    // policy, settings, runtime definitions, commands, environment, and repo
-    // identity remain in the category and continue to invalidate stale sessions.
-    if (/revisionAt$/i.test(key) || SESSION_WORKSPACE_CONFIG_LIFECYCLE_KEYS.has(key)) continue;
-    normalized[key] = normalizeSessionWorkspaceConfigForFingerprint(entry);
+  // Only these paths are lifecycle-mutated by issue/project writes and runtime
+  // control. Arbitrary nested policy/settings/runtime fields remain session
+  // boundaries even when their names resemble lifecycle metadata.
+  const normalized = { ...(value as Record<string, unknown>) };
+  delete normalized.issueConfigRevisionAt;
+  delete normalized.projectConfigRevisionAt;
+  normalized.reusableExecutionWorkspaceConfig = omitPersistedRuntimeLifecycleState(
+    normalized.reusableExecutionWorkspaceConfig,
+  );
+
+  const existingExecutionWorkspace = normalized.existingExecutionWorkspace;
+  if (
+    existingExecutionWorkspace
+    && typeof existingExecutionWorkspace === "object"
+    && !Array.isArray(existingExecutionWorkspace)
+    && !(existingExecutionWorkspace instanceof Date)
+  ) {
+    const normalizedExistingExecutionWorkspace = {
+      ...(existingExecutionWorkspace as Record<string, unknown>),
+    };
+    normalizedExistingExecutionWorkspace.config = omitPersistedRuntimeLifecycleState(
+      normalizedExistingExecutionWorkspace.config,
+    );
+    normalized.existingExecutionWorkspace = normalizedExistingExecutionWorkspace;
   }
   return normalized;
 }

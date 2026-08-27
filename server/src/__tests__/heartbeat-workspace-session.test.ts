@@ -2297,6 +2297,62 @@ describe("effective run session config freshness", () => {
     expect(decision.changedCategories).toEqual(["workspaceConfig"]);
   });
 
+  it("preserves nested runtime lifecycle-like fields as real session boundaries", async () => {
+    const workspaceConfig = {
+      requestedMode: "shared_workspace",
+      effectiveMode: "shared_workspace",
+      reusableExecutionWorkspaceConfig: {
+        desiredState: "running",
+        serviceStates: { "0": "running" },
+        workspaceRuntime: {
+          revisionAt: "runtime-contract-v1",
+          services: [{ name: "dev", command: "pnpm dev", desiredState: "provider-default" }],
+        },
+      },
+    };
+    const base = await buildSessionConfigMetadata({ workspaceConfig });
+    const nestedDesiredStateChange = await buildSessionConfigMetadata({
+      workspaceConfig: {
+        ...workspaceConfig,
+        reusableExecutionWorkspaceConfig: {
+          ...workspaceConfig.reusableExecutionWorkspaceConfig,
+          desiredState: "stopped",
+          serviceStates: { "0": "stopped" },
+          workspaceRuntime: {
+            ...workspaceConfig.reusableExecutionWorkspaceConfig.workspaceRuntime,
+            services: [{ name: "dev", command: "pnpm dev", desiredState: "provider-manual" }],
+          },
+        },
+      },
+    });
+    const nestedRevisionChange = await buildSessionConfigMetadata({
+      workspaceConfig: {
+        ...workspaceConfig,
+        reusableExecutionWorkspaceConfig: {
+          ...workspaceConfig.reusableExecutionWorkspaceConfig,
+          workspaceRuntime: {
+            ...workspaceConfig.reusableExecutionWorkspaceConfig.workspaceRuntime,
+            revisionAt: "runtime-contract-v2",
+          },
+        },
+      },
+    });
+
+    for (const next of [nestedDesiredStateChange, nestedRevisionChange]) {
+      const decision = resolveTaskSessionConfigFreshness({
+        hasTaskSession: true,
+        configuredModel: "gpt-5.4-mini",
+        taskSessionParams: sessionParamsWithConfigMetadata(base),
+        configMetadata: next,
+      });
+
+      expect(next.categoryFingerprints.workspaceConfig).not.toBe(
+        base.categoryFingerprints.workspaceConfig,
+      );
+      expect(decision).toMatchObject({ reset: true, changedCategories: ["workspaceConfig"] });
+    }
+  });
+
   it("resets when effective adapter config changes after model/profile/env resolution", async () => {
     const base = await buildSessionConfigMetadata();
     const next = await buildSessionConfigMetadata({
