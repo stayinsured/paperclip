@@ -2185,6 +2185,237 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
+    it("atomically reassigns and resumes a blocked human-owned issue", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user" }),
+        ...patch,
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(ownerAgentId) });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Board wait resolved; resume the declared continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        issueId,
+        expect.objectContaining({
+          status: "todo",
+          assigneeAgentId: ownerAgentId,
+          assigneeUserId: null,
+        }),
+        expect.any(Object),
+      );
+      expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.addComment.mock.calls[0]?.[4]).toBe(mockIssueService.update.mock.calls[0]?.[2]);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        ownerAgentId,
+        expect.objectContaining({
+          reason: "issue_assigned",
+          payload: expect.objectContaining({ issueId, resumeIntent: true }),
+        }),
+      );
+    });
+
+    it("denies the equivalent ordinary-agent recovery of a human-owned issue", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(peerAgentId) });
+
+      const app = await createApp(ownerActor());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Attempted continuation.",
+        assigneeAgentId: peerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toBe("Issue follow-up requires an assigned agent");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("denies watchdog recovery while an approval remains unresolved", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(ownerAgentId) });
+      mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([{ status: "pending" }] as never);
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Attempted continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toBe("Issue follow-up blocked by unresolved approval");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    async function requestCombinedRecovery(db = createWatchdogDb()) {
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(ownerAgentId) });
+      return request(await createApp(watchdogActor(), db)).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Board wait resolved; resume the declared continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+    }
+
+    function expectNoRecoveryMutation() {
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    }
+
+    it("denies stale watchdog recovery without any partial mutation", async () => {
+      denyBaseBoundary();
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: false,
+        reason: "Task-watchdog review is stale because the stop fingerprint changed.",
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:changed" },
+      });
+      const res = await requestCombinedRecovery();
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toContain("stop fingerprint changed");
+      expectNoRecoveryMutation();
+    });
+
+    it("denies out-of-scope watchdog recovery without any partial mutation", async () => {
+      denyBaseBoundary();
+      const outsideWatched = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeef";
+      const res = await requestCombinedRecovery(
+        createWatchdogDb({ watchedIssueId: outsideWatched, ancestryParentId: null }),
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toBe("Task-watchdog runs can only mutate the watched issue subtree.");
+      expectNoRecoveryMutation();
+    });
+
+    it("denies watchdog recovery while a blocker remains unresolved without any partial mutation", async () => {
+      denyBaseBoundary();
+      mockIssueService.getDependencyReadiness.mockResolvedValue({
+        blockerIssueIds: ["ffffffff-ffff-4fff-8fff-ffffffffffff"],
+        isDependencyReady: false,
+        unresolvedBlockerCount: 1,
+      });
+      const res = await requestCombinedRecovery();
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toBe("Issue follow-up blocked by unresolved blockers");
+      expectNoRecoveryMutation();
+    });
+
+    it("denies low-trust watchdog recovery without any partial mutation", async () => {
+      denyBaseBoundary();
+      mockAgentService.getById.mockImplementation(async (id: string) => {
+        if (id === ownerAgentId) return makeAgent(ownerAgentId);
+        if (id !== peerAgentId) return null;
+        return makeAgent(peerAgentId, {
+          permissions: {
+            trustPreset: "low_trust_review",
+            authorizationPolicy: {
+              trustBoundary: { mode: "low_trust_review", companyId, issueIds: [issueId] },
+            },
+          },
+        });
+      });
+      const res = await requestCombinedRecovery();
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toBe("Low-trust actors cannot use this control-plane surface");
+      expectNoRecoveryMutation();
+    });
+
+    it("denies an ineligible next assignee through combined watchdog recovery without any partial mutation", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        assigneeAgentId: null,
+        assigneeUserId: "board-user",
+      }));
+      mockAgentService.resolveByReference.mockResolvedValue({
+        ambiguous: false,
+        agent: makeAgent(ownerAgentId, { status: "paused" }),
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        resume: true,
+        comment: "Attempted continuation.",
+        assigneeAgentId: ownerAgentId,
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.error).toContain("Cannot assign work to a paused agent");
+      expectNoRecoveryMutation();
+    });
+
+    it("does not wake when the atomic recovery comment fails", async () => {
+      denyBaseBoundary();
+      const transactionToken = { transaction: "watchdog-recovery" };
+      const db = createWatchdogDb();
+      db.transaction = async (callback: (tx: Record<string, string>) => Promise<unknown>) => callback(transactionToken);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user" }),
+        ...patch,
+      }));
+      mockIssueService.addComment.mockRejectedValueOnce(new Error("injected recovery comment failure"));
+      const res = await requestCombinedRecovery(db);
+      expect(res.status, JSON.stringify(res.body)).toBe(500);
+      expect(mockIssueService.update.mock.calls[0]?.[2]).toBe(transactionToken);
+      expect(mockIssueService.addComment.mock.calls[0]?.[4]).toBe(transactionToken);
+      // Both writes share the database transaction, so rejection rolls the issue
+      // update back; the route must not schedule the post-commit wake.
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+
+    it("queues exactly one recovery wake before a fallible post-commit activity step", async () => {
+      denyBaseBoundary();
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ status: "blocked", assigneeAgentId: null, assigneeUserId: "board-user" }),
+        ...patch,
+      }));
+      mockLogActivity.mockRejectedValueOnce(new Error("injected post-commit activity failure"));
+
+      const res = await requestCombinedRecovery();
+
+      expect(res.status, JSON.stringify(res.body)).toBe(500);
+      expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+        ownerAgentId,
+        expect.objectContaining({
+          reason: "issue_assigned",
+          payload: expect.objectContaining({ issueId, resumeIntent: true }),
+        }),
+      );
+    });
+
     it("lets a watchdog run reassign a watched issue to an active same-company agent", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
