@@ -406,8 +406,19 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
   }
 
   const included: TaskWatchdogClassifierIssue[] = [];
+  const excludedWatchdogSubtreeIds = new Set<string>();
+  const excludeWatchdogSubtree = (issue: TaskWatchdogClassifierIssue) => {
+    if (excludedWatchdogSubtreeIds.has(issue.id)) return;
+    excludedWatchdogSubtreeIds.add(issue.id);
+    for (const child of childrenByParentId.get(issue.id) ?? []) {
+      excludeWatchdogSubtree(child);
+    }
+  };
   const visit = (issue: TaskWatchdogClassifierIssue) => {
-    if (issue.originKind === TASK_WATCHDOG_ORIGIN_KIND) return;
+    if (issue.originKind === TASK_WATCHDOG_ORIGIN_KIND) {
+      excludeWatchdogSubtree(issue);
+      return;
+    }
     included.push(issue);
     for (const child of childrenByParentId.get(issue.id) ?? []) {
       visit(child);
@@ -475,6 +486,10 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
   for (const relation of input.blockers ?? []) {
     if (relation.companyId !== input.watchdog.companyId) continue;
     if (!includedIdSet.has(relation.blockedIssueId)) continue;
+    // A reusable watchdog issue (or work nested beneath it) can temporarily
+    // block the source while review is open. That recovery path is outside the
+    // watched source subtree and must not contaminate its stop fingerprint.
+    if (excludedWatchdogSubtreeIds.has(relation.blockerIssueId)) continue;
     const list = blockersByIssueId.get(relation.blockedIssueId) ?? [];
     list.push(relation.blockerIssueId);
     blockersByIssueId.set(relation.blockedIssueId, list);
@@ -1626,20 +1641,21 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
   async function activeWatchdogsForIssueAndAncestors(companyId: string, issueId: string) {
     const ancestorRows = await db.execute(sql`
-      WITH RECURSIVE ancestors(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0
+      WITH RECURSIVE ancestors(id, parent_id, origin_kind, depth) AS (
+        SELECT id, parent_id, origin_kind, 0
         FROM issues
         WHERE company_id = ${companyId}
           AND id = ${issueId}
           AND hidden_at IS NULL
           AND harness_kind IS NULL
         UNION ALL
-        SELECT parent.id, parent.parent_id, ancestors.depth + 1
+        SELECT parent.id, parent.parent_id, parent.origin_kind, ancestors.depth + 1
         FROM issues parent
         JOIN ancestors ON parent.id = ancestors.parent_id
         WHERE parent.company_id = ${companyId}
           AND parent.hidden_at IS NULL
           AND parent.harness_kind IS NULL
+          AND ancestors.origin_kind IS DISTINCT FROM ${TASK_WATCHDOG_ORIGIN_KIND}
           AND ancestors.depth < ${TASK_WATCHDOG_SUBTREE_MAX_DEPTH - 1}
       )
       SELECT id FROM ancestors

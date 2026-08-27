@@ -444,6 +444,39 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(wakes.length).toBe(2);
   });
 
+  it("does not rearm from reusable watchdog terminalization but rearms for a source descendant change", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-TERMINAL", status: "done" });
+    const childId = await seedIssue(companyId, { parentId: sourceId, status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    await service.reconcileTaskWatchdogs({ companyId });
+    const [triggered] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const originalFingerprint = triggered!.lastObservedFingerprint!;
+    const watchdogIssueId = triggered!.watchdogIssueId!;
+
+    await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, watchdogIssueId));
+    const terminalMutation = await service.reconcileForIssueAndAncestors(companyId, watchdogIssueId);
+    expect(terminalMutation).toMatchObject({ checked: 0, triggered: 0 });
+    expect(wakes).toHaveLength(1);
+
+    const folded = await service.reconcileTaskWatchdogs({ companyId });
+    expect(folded).toMatchObject({ checked: 1, triggered: 0, alreadyReviewed: 1 });
+    const [reviewed] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(reviewed!.lastReviewedFingerprint).toBe(originalFingerprint);
+    expect(reviewed!.triggerCount).toBe(1);
+
+    await db.update(issues).set({ status: "blocked", updatedAt: new Date() }).where(eq(issues.id, childId));
+    const sourceMutation = await service.reconcileForIssueAndAncestors(companyId, childId);
+    expect(sourceMutation).toMatchObject({ checked: 1, triggered: 1 });
+    const [rearmed] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    expect(rearmed!.lastObservedFingerprint).not.toBe(originalFingerprint);
+    expect(rearmed!.triggerCount).toBe(2);
+    expect(wakes).toHaveLength(2);
+  });
+
   it("suppresses a shrink-only stop after review when the snapshot round-trips through jsonb", async () => {
     const companyId = await seedCompany();
     const sourceId = await seedIssue(companyId, { identifier: "WDOG-SHRINK", status: "in_review" });
