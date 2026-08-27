@@ -257,3 +257,144 @@ export interface TokenTelemetryBaselineReport {
   completedIssueRollups: TokenTelemetryCompletedIssueRollup[];
   cohortBaselines: TokenTelemetryCohortBaseline[];
 }
+
+export interface CompletedIssueTokenDimensions {
+  uncachedInputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  processedTokens: number;
+  costCents: number;
+}
+
+export interface CompletedIssueAccounting {
+  total: CompletedIssueTokenDimensions;
+  metered: CompletedIssueTokenDimensions;
+  subscription: CompletedIssueTokenDimensions;
+  other: CompletedIssueTokenDimensions;
+  unknown: CompletedIssueTokenDimensions;
+  costEventCount: number;
+  unclassifiedCostEventCount: number;
+  evidenceComplete: boolean;
+}
+
+export interface CompletedIssueTelemetryRow {
+  issueId: string;
+  issueIdentifier: string;
+  companyId: string;
+  projectId: string | null;
+  assigneeAgentId: string | null;
+  workMode: string;
+  priority: string;
+  cohortKey: string;
+  createdAt: string;
+  completedAt: string;
+  accounting: CompletedIssueAccounting;
+  lifecycle: {
+    firstPassAccepted: boolean;
+    reopened: boolean;
+    reopenCount: number;
+    reopenRatePercent: number;
+    createdToDoneMs: number;
+  };
+  wakes: {
+    expectedActionableWakeCount: number;
+    observedActionableWakeCount: number;
+  };
+  session: {
+    eligibleRepeatRunCount: number;
+    reusedRunCount: number;
+    reuseRatePercent: number | null;
+    reused: boolean;
+    resetReasons: TokenTelemetryDimensionCount[];
+  };
+  boundary: {
+    version: "session-reuse-boundary-v1";
+    fingerprint: string;
+    evidenceComplete: boolean;
+    sessionConfigFingerprints: string[];
+    principalCount: number;
+    violations: string[];
+  };
+}
+
+export interface CompletedIssueTelemetryReport {
+  companyId: string;
+  generatedAt: string;
+  window: { from: string; toExclusive: string };
+  completedIssues: CompletedIssueTelemetryRow[];
+}
+
+export type SessionReuseEvaluationVerdict = "PASS" | "FAIL" | "CONDITIONAL";
+export type SessionReuseCriterionStatus = "pass" | "fail" | "insufficient";
+
+export interface SessionReuseEvaluationReport {
+  evaluator: {
+    name: "authoritative_completed_issue_session_reuse_v1";
+    diagnosticOnly: false;
+    realizedProductionSavings: false;
+  };
+  evaluatedConfiguration: {
+    companyId: string;
+    window: { from: string; toExclusive: string };
+    pilotIssueIds: string[];
+    controlIssueIds: string[];
+    matchingDimensions: ["projectId", "assigneeAgentId", "workMode", "priority"];
+    minimumPilotCompletedIssues: 22;
+    minimumMatchedControlCompletedIssues: 22;
+    thresholds: {
+      processedTokenReductionPercent: 5;
+      eligibleRepeatReusePercent: 70;
+      firstPassAcceptanceDeltaPercentagePoints: -5;
+      reopenRateRegressionPercentagePoints: 5;
+      createdToDoneRegressionPercent: 5;
+      stretchProcessedTokenReductionPercent: 25;
+      maximumBoundaryLeakageCount: 0;
+    };
+  };
+  sample: {
+    requestedPilotCount: number;
+    requestedControlCount: number;
+    pilotCompletedCount: number;
+    controlCompletedCount: number;
+    matchedPairCount: number;
+    unmatchedPilotIssueIds: string[];
+    unmatchedControlIssueIds: string[];
+    missingPilotIssueIds: string[];
+    missingControlIssueIds: string[];
+  };
+  metrics: {
+    pilotProcessedTokensPerIssue: number | null;
+    controlProcessedTokensPerIssue: number | null;
+    processedTokenReductionPercent: number | null;
+    stretchProcessedTokenReductionMet: boolean;
+    eligibleRepeatRunCount: number;
+    reusedRepeatRunCount: number;
+    eligibleRepeatReusePercent: number | null;
+    pilotFirstPassAcceptancePercent: number | null;
+    controlFirstPassAcceptancePercent: number | null;
+    firstPassAcceptanceDeltaPercentagePoints: number | null;
+    pilotReopenRatePercent: number | null;
+    controlReopenRatePercent: number | null;
+    reopenRateDeltaPercentagePoints: number | null;
+    pilotCreatedToDoneMsPerIssue: number | null;
+    controlCreatedToDoneMsPerIssue: number | null;
+    createdToDoneRegressionPercent: number | null;
+    boundaryLeakageCount: number;
+  };
+  criteria: Record<string, {
+    status: SessionReuseCriterionStatus;
+    actual: number | null;
+    threshold: number;
+    comparison: string;
+  }>;
+  evidenceGaps: string[];
+  boundaryViolations: Array<{ issueId: string; reasons: string[] }>;
+  verdict: SessionReuseEvaluationVerdict;
+  decision: {
+    action: "keep_disabled" | "eligible_for_authorized_expansion_keep_disabled_now";
+    rollbackRequired: false;
+    reason: string;
+  };
+  pilotIssues: CompletedIssueTelemetryRow[];
+  matchedControlIssues: CompletedIssueTelemetryRow[];
+}

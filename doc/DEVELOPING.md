@@ -764,6 +764,20 @@ exclusive `to` ISO timestamps may select a window up to 90 days. The response
 contains coverage gates, dimensioned daily rollups, per-completed-issue rollups,
 and matched-cohort p50/p75/p95 baselines.
 
+The authoritative development-only session-reuse evaluation uses persisted
+completed issues, heartbeat runs, cost events, lifecycle activity, and wake
+requests. `GET /api/companies/<company-id>/costs/completed-issue-telemetry`
+returns the source rollups. `POST
+/api/companies/<company-id>/costs/session-reuse-evaluation` accepts only the
+window and pilot/control issue IDs; token, outcome, session, wake, and boundary
+evidence is always read from the company-scoped database. A `PASS` is an
+eligibility signal only: the response still directs operators to keep reuse
+disabled until a separately authorized expansion. The evaluator fails closed
+on report or row company mismatches. Unknown billing stays separate from
+metered, subscription, and legitimate other billing and makes accounting
+evidence incomplete. Eligible-repeat reuse excludes initial fresh sessions and
+forced, rotated, configuration, or security resets.
+
 ## Reset Local Dev Database
 
 To wipe local dev data and start fresh:

@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   createCostEventSchema,
   createFinanceEventSchema,
+  evaluateAuthoritativeSessionReuseSchema,
   normalizeIssueIdentifier,
   resolveBudgetIncidentSchema,
   updateBudgetSchema,
@@ -212,6 +213,33 @@ export function costRoutes(
     const report = await costs.tokenTelemetryBaseline(companyId, range);
     res.json(report);
   });
+
+  router.get("/companies/:companyId/costs/completed-issue-telemetry", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseTokenTelemetryBaselineRange(req.query);
+    const report = await costs.completedIssueTelemetry(companyId, range);
+    res.json(report);
+  });
+
+  router.post(
+    "/companies/:companyId/costs/session-reuse-evaluation",
+    validate(evaluateAuthoritativeSessionReuseSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+      const from = new Date(req.body.from);
+      const toExclusive = new Date(req.body.toExclusive);
+      if (from >= toExclusive) throw badRequest("'from' must be before exclusive 'toExclusive'");
+      if (toExclusive.getTime() - from.getTime() > 90 * 24 * 60 * 60 * 1000) {
+        throw badRequest("session reuse evaluation range cannot exceed 90 days");
+      }
+      const report = await costs.sessionReuseEvaluation(companyId, req.body);
+      res.json(report);
+    },
+  );
 
   router.get("/companies/:companyId/costs/shadow-routing-cohort", async (req, res) => {
     const companyId = req.params.companyId as string;

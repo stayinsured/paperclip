@@ -1018,6 +1018,8 @@ Allowed states are `joined` and `left`. Endpoints require a concrete board user 
 - `GET /companies/:companyId/costs/by-agent`
 - `GET /companies/:companyId/costs/by-project`
 - `GET /companies/:companyId/costs/token-telemetry-baseline`
+- `GET /companies/:companyId/costs/completed-issue-telemetry`
+- `POST /companies/:companyId/costs/session-reuse-evaluation` (read-only persisted-evidence evaluation)
 - `PATCH /companies/:companyId/budgets`
 - `PATCH /agents/:agentId/budgets`
 

@@ -1365,3 +1365,24 @@ export const evaluateSessionReusePilotSchema = z.object({
 }).strict();
 
 export type EvaluateSessionReusePilot = z.infer<typeof evaluateSessionReusePilotSchema>;
+
+export const evaluateAuthoritativeSessionReuseSchema = z.object({
+  from: z.string().datetime({ offset: true }),
+  toExclusive: z.string().datetime({ offset: true }),
+  pilotIssueIds: z.array(z.string().uuid()).min(1).max(500),
+  controlIssueIds: z.array(z.string().uuid()).min(1).max(500),
+}).strict().superRefine((value, ctx) => {
+  const pilotIds = new Set(value.pilotIssueIds);
+  const controlIds = new Set(value.controlIssueIds);
+  if (pilotIds.size !== value.pilotIssueIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["pilotIssueIds"], message: "pilot issue ids must be unique" });
+  }
+  if (controlIds.size !== value.controlIssueIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["controlIssueIds"], message: "control issue ids must be unique" });
+  }
+  if (value.pilotIssueIds.some((issueId) => controlIds.has(issueId))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pilot and control issue ids must not overlap" });
+  }
+});
+
+export type EvaluateAuthoritativeSessionReuse = z.infer<typeof evaluateAuthoritativeSessionReuseSchema>;

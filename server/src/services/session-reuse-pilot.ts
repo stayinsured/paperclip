@@ -37,6 +37,9 @@ export function evaluateSessionReusePilot(input: {
     functionalEquivalence: eligible.length > 0 && eligible.every((row) => row.functionalOutcomeMatched),
   };
   return {
+    diagnosticOnly: true,
+    terminalVerdict: null,
+    realizedProductionSavings: false,
     passed: Object.values(criteria).every(Boolean),
     targets: { reuseRatePercent: 70, medianProcessedTokenReductionPercent: 25 },
     sample: { observationCount: observations.length, eligibleRepeatCount: eligible.length, reusedRepeatCount: reused.length },
