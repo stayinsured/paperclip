@@ -4806,6 +4806,49 @@ async function resolveInstructionsConfigFingerprintMetadata(config: Record<strin
   return metadata;
 }
 
+function omitPersistedRuntimeLifecycleState(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value instanceof Date) {
+    return value;
+  }
+  const normalized = { ...(value as Record<string, unknown>) };
+  delete normalized.desiredState;
+  delete normalized.serviceStates;
+  return normalized;
+}
+
+function normalizeSessionWorkspaceConfigForFingerprint(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value instanceof Date) {
+    return value;
+  }
+
+  // Only these paths are lifecycle-mutated by issue/project writes and runtime
+  // control. Arbitrary nested policy/settings/runtime fields remain session
+  // boundaries even when their names resemble lifecycle metadata.
+  const normalized = { ...(value as Record<string, unknown>) };
+  delete normalized.issueConfigRevisionAt;
+  delete normalized.projectConfigRevisionAt;
+  normalized.reusableExecutionWorkspaceConfig = omitPersistedRuntimeLifecycleState(
+    normalized.reusableExecutionWorkspaceConfig,
+  );
+
+  const existingExecutionWorkspace = normalized.existingExecutionWorkspace;
+  if (
+    existingExecutionWorkspace
+    && typeof existingExecutionWorkspace === "object"
+    && !Array.isArray(existingExecutionWorkspace)
+    && !(existingExecutionWorkspace instanceof Date)
+  ) {
+    const normalizedExistingExecutionWorkspace = {
+      ...(existingExecutionWorkspace as Record<string, unknown>),
+    };
+    normalizedExistingExecutionWorkspace.config = omitPersistedRuntimeLifecycleState(
+      normalizedExistingExecutionWorkspace.config,
+    );
+    normalized.existingExecutionWorkspace = normalizedExistingExecutionWorkspace;
+  }
+  return normalized;
+}
+
 function buildSessionConfigCategoryValues(input: {
   adapterType: string;
   effectiveAdapterConfig: Record<string, unknown>;
@@ -4833,7 +4876,7 @@ function buildSessionConfigCategoryValues(input: {
     modelProfile: input.modelProfile,
     instructions: input.instructions,
     issueOverrides: input.issueOverrides,
-    workspaceConfig: input.workspaceConfig,
+    workspaceConfig: normalizeSessionWorkspaceConfigForFingerprint(input.workspaceConfig),
     environment: input.environment,
     envBindings: {
       environment: { env: input.environmentEnv },
