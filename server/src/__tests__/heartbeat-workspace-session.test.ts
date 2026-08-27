@@ -2177,6 +2177,126 @@ function sessionParamsWithConfigMetadata(
 }
 
 describe("effective run session config freshness", () => {
+  it("reuses the prior task session across unchanged shared-workspace repeat wakes", async () => {
+    const stableWorkspaceBoundary = {
+      requestedMode: "shared_workspace",
+      effectiveMode: "shared_workspace",
+      projectPolicy: {
+        workspaceStrategy: {
+          type: "shared",
+          provisionCommand: "pnpm install --frozen-lockfile",
+        },
+      },
+      issueSettings: { mode: "shared_workspace" },
+      reusableExecutionWorkspaceConfig: {
+        provisionCommand: "pnpm install --frozen-lockfile",
+        workspaceRuntime: {
+          services: [{ name: "dev", command: "pnpm dev" }],
+        },
+      },
+      existingExecutionWorkspace: {
+        id: "workspace-1",
+        mode: "shared_workspace",
+        strategyType: "shared",
+        projectWorkspaceId: "project-workspace-1",
+        repoUrl: "https://example.test/company/repo.git",
+        baseRef: "origin/dev",
+        branchName: "dev",
+      },
+    };
+    const firstWake = await buildSessionConfigMetadata({
+      workspaceConfig: {
+        ...stableWorkspaceBoundary,
+        issueConfigRevisionAt: "2026-08-27T10:00:00.000Z",
+        projectConfigRevisionAt: "2026-08-27T10:00:00.000Z",
+        reusableExecutionWorkspaceConfig: {
+          ...stableWorkspaceBoundary.reusableExecutionWorkspaceConfig,
+          desiredState: "running",
+          serviceStates: { "0": "running" },
+        },
+        existingExecutionWorkspace: {
+          ...stableWorkspaceBoundary.existingExecutionWorkspace,
+          config: {
+            ...stableWorkspaceBoundary.reusableExecutionWorkspaceConfig,
+            desiredState: "running",
+            serviceStates: { "0": "running" },
+          },
+        },
+      },
+    });
+    const repeatWake = await buildSessionConfigMetadata({
+      workspaceConfig: {
+        ...stableWorkspaceBoundary,
+        issueConfigRevisionAt: "2026-08-27T10:05:00.000Z",
+        projectConfigRevisionAt: "2026-08-27T10:03:00.000Z",
+        reusableExecutionWorkspaceConfig: {
+          ...stableWorkspaceBoundary.reusableExecutionWorkspaceConfig,
+          desiredState: "stopped",
+          serviceStates: { "0": "stopped" },
+        },
+        existingExecutionWorkspace: {
+          ...stableWorkspaceBoundary.existingExecutionWorkspace,
+          config: {
+            ...stableWorkspaceBoundary.reusableExecutionWorkspaceConfig,
+            desiredState: "stopped",
+            serviceStates: { "0": "stopped" },
+          },
+        },
+      },
+    });
+    const priorTaskSession = {
+      id: "task-session-1",
+      sessionParamsJson: sessionParamsWithConfigMetadata(firstWake),
+    };
+
+    const decision = resolveTaskSessionConfigFreshness({
+      hasTaskSession: true,
+      configuredModel: "gpt-5.4-mini",
+      taskSessionParams: priorTaskSession.sessionParamsJson,
+      configMetadata: repeatWake,
+    });
+    const taskSessionForRepeatWake = decision.reset ? null : priorTaskSession;
+
+    expect(repeatWake.fingerprint).toBe(firstWake.fingerprint);
+    expect(repeatWake.categoryFingerprints.workspaceConfig).toBe(
+      firstWake.categoryFingerprints.workspaceConfig,
+    );
+    expect(decision).toMatchObject({ reset: false, changedCategories: [], reasons: [] });
+    expect(taskSessionForRepeatWake).toBe(priorTaskSession);
+    expect(taskSessionForRepeatWake?.sessionParamsJson.sessionId).toBe("thread-1");
+  });
+
+  it("still resets the task session for a real shared-workspace boundary change", async () => {
+    const base = await buildSessionConfigMetadata({
+      workspaceConfig: {
+        requestedMode: "shared_workspace",
+        effectiveMode: "shared_workspace",
+        projectPolicy: {
+          workspaceStrategy: { type: "shared", provisionCommand: "pnpm install" },
+        },
+      },
+    });
+    const next = await buildSessionConfigMetadata({
+      workspaceConfig: {
+        requestedMode: "shared_workspace",
+        effectiveMode: "shared_workspace",
+        projectPolicy: {
+          workspaceStrategy: { type: "shared", provisionCommand: "pnpm install --frozen-lockfile" },
+        },
+      },
+    });
+
+    const decision = resolveTaskSessionConfigFreshness({
+      hasTaskSession: true,
+      configuredModel: "gpt-5.4-mini",
+      taskSessionParams: sessionParamsWithConfigMetadata(base),
+      configMetadata: next,
+    });
+
+    expect(decision.reset).toBe(true);
+    expect(decision.changedCategories).toEqual(["workspaceConfig"]);
+  });
+
   it("resets when effective adapter config changes after model/profile/env resolution", async () => {
     const base = await buildSessionConfigMetadata();
     const next = await buildSessionConfigMetadata({

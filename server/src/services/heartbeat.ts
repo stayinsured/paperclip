@@ -4806,6 +4806,29 @@ async function resolveInstructionsConfigFingerprintMetadata(config: Record<strin
   return metadata;
 }
 
+const SESSION_WORKSPACE_CONFIG_LIFECYCLE_KEYS = new Set([
+  "desiredState",
+  "serviceStates",
+]);
+
+function normalizeSessionWorkspaceConfigForFingerprint(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeSessionWorkspaceConfigForFingerprint(entry));
+  }
+  if (!value || typeof value !== "object" || value instanceof Date) return value;
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    // Revision timestamps and persisted runtime desired/current state are
+    // lifecycle metadata, not session compatibility boundaries. The effective
+    // policy, settings, runtime definitions, commands, environment, and repo
+    // identity remain in the category and continue to invalidate stale sessions.
+    if (/revisionAt$/i.test(key) || SESSION_WORKSPACE_CONFIG_LIFECYCLE_KEYS.has(key)) continue;
+    normalized[key] = normalizeSessionWorkspaceConfigForFingerprint(entry);
+  }
+  return normalized;
+}
+
 function buildSessionConfigCategoryValues(input: {
   adapterType: string;
   effectiveAdapterConfig: Record<string, unknown>;
@@ -4833,7 +4856,7 @@ function buildSessionConfigCategoryValues(input: {
     modelProfile: input.modelProfile,
     instructions: input.instructions,
     issueOverrides: input.issueOverrides,
-    workspaceConfig: input.workspaceConfig,
+    workspaceConfig: normalizeSessionWorkspaceConfigForFingerprint(input.workspaceConfig),
     environment: input.environment,
     envBindings: {
       environment: { env: input.environmentEnv },
