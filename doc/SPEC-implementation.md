@@ -502,7 +502,8 @@ the requested `done` or `cancelled` status, an acceptance revision, an idempoten
 `X-Paperclip-Run-Id`. The result comment, status transition, and terminal receipt commit in one
 transaction. An identical replay returns the stored result; conflicting key reuse returns `409`.
 Typed context failures distinguish missing tasks, expired tokens, wrong-company access, and a
-missing run header.
+missing run header. Pending execution-policy participants continue through the governed `PATCH`
+stage-transition path; the direct terminal operation rejects that state rather than bypassing it.
 
 V1 non-terminal liveness rule:
 

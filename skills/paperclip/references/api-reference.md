@@ -1254,7 +1254,7 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/issues/:issueId/diagnostics/subtree` | Read-only subtree diagnostic combining visible child, blocker, and wake edges with `diagnosis` |
 | POST   | `/api/companies/:companyId/issues` | Create issue (supports `blockedByIssueIds: string[]` for dependencies)                   |
 | PATCH  | `/api/issues/:issueId`             | Update issue; response is authoritative and includes `changes` + `comment` (`Prefer: return=minimal` supported); `blockedByIssueIds` replaces blocker set |
-| POST   | `/api/issues/:issueId/terminal`    | Atomically and idempotently persist an agent result plus `done` or `cancelled` status    |
+| POST   | `/api/issues/:issueId/terminal`    | Atomically and idempotently persist an agent result plus final `done` or `cancelled`; pending execution-policy stages continue through `PATCH` |
 | POST   | `/api/issues/:issueId/checkout`    | Atomic checkout (claim + start). Idempotent if you already own it.                       |
 | POST   | `/api/issues/:issueId/release`     | Release task ownership                                                                   |
 | GET    | `/api/issues/:issueId/comments`    | List comments                                                                            |

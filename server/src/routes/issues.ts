@@ -8542,6 +8542,12 @@ export function issueRoutes(
     if (run.agentId !== req.actor.agentId) {
       throw forbidden("Heartbeat run belongs to another agent", { code: "run_context_mismatch" });
     }
+    if (isPendingExecutionStageParticipant(existing.executionState, req.actor.agentId)) {
+      throw unprocessable(
+        "Pending execution-policy stages must be advanced through the issue update route",
+        { code: "terminal_execution_stage_pending" },
+      );
+    }
     if (existing.status === "in_review" && req.body.status === "done") {
       throw forbidden("Agents cannot approve their own in-review work");
     }

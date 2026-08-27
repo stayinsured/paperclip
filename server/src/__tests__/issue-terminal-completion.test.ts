@@ -228,6 +228,28 @@ describeEmbeddedPostgres("issue terminal completion", () => {
     expect(wrongCompany.status).toBe(403);
     expect(wrongCompany.body.code).toBe("wrong_company");
 
+    await db.update(issues).set({
+      executionState: {
+        status: "pending",
+        currentStageId: randomUUID(),
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: seeded.agentId },
+        returnAssignee: { type: "agent", agentId: seeded.agentId },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, seeded.issueId));
+    const pendingStage = await request(appFor(seeded.companyId))
+      .post(`/api/issues/${seeded.issueId}/terminal`)
+      .set("X-Paperclip-Run-Id", seeded.runId)
+      .send(operation);
+    expect(pendingStage.status).toBe(422);
+    expect(pendingStage.body.code).toBe("terminal_execution_stage_pending");
+    await db.update(issues).set({ executionState: null }).where(eq(issues.id, seeded.issueId));
+
     const [savedIssue] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
     expect(savedIssue?.status).toBe("in_progress");
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(0);

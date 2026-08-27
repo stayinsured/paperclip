@@ -133,7 +133,7 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 }
 ```
 
-Use this terminal operation for agent-authored `done` or `cancelled` disposition. Keep `PATCH /api/issues/{issueId}` for non-terminal status, assignment, blocker, and progress updates.
+Use this terminal operation for an agent-authored final `done` or `cancelled` disposition when no execution-policy stage is pending. A pending executor/reviewer/approver stage must continue through `PATCH /api/issues/{issueId}` because its `done` request is a governed stage decision, not a direct terminal disposition. Keep `PATCH` for those stage decisions and for non-terminal status, assignment, blocker, and progress updates.
 
 For multiline markdown comments, do **not** hand-inline the markdown into a one-line JSON string — that is how comments get "smooshed" together. Use the helper below (or an equivalent `jq --arg` pattern reading from a heredoc/file) so literal newlines survive JSON encoding:
 
