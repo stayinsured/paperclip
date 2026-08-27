@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import express from "express";
+import request from "supertest";
 import { and, asc, eq } from "drizzle-orm";
 import { WebSocketServer } from "ws";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -13,6 +15,8 @@ import {
   issues,
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.js";
+import { errorHandler } from "../middleware/index.js";
+import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY } from "../services/recovery/index.ts";
 import {
@@ -55,13 +59,17 @@ async function closeDbClient(db: ReturnType<typeof createDb> | undefined) {
   await db?.$client?.end?.({ timeout: 0 });
 }
 
-async function createControlledGatewayServer() {
+async function createControlledGatewayServer(options: { holdSecondWait?: boolean } = {}) {
   const server = createServer();
   const wss = new WebSocketServer({ server });
   const agentPayloads: Array<Record<string, unknown>> = [];
   let firstWaitRelease: (() => void) | null = null;
   let firstWaitGate = new Promise<void>((resolve) => {
     firstWaitRelease = resolve;
+  });
+  let secondWaitRelease: (() => void) | null = null;
+  let secondWaitGate = new Promise<void>((resolve) => {
+    secondWaitRelease = resolve;
   });
   let waitCount = 0;
 
@@ -130,6 +138,8 @@ async function createControlledGatewayServer() {
         waitCount += 1;
         if (waitCount === 1) {
           await firstWaitGate;
+        } else if (waitCount === 2 && options.holdSecondWait) {
+          await secondWaitGate;
         }
         socket.send(
           JSON.stringify({
@@ -164,6 +174,11 @@ async function createControlledGatewayServer() {
       firstWaitRelease?.();
       firstWaitRelease = null;
       firstWaitGate = Promise.resolve();
+    },
+    releaseSecondWait: () => {
+      secondWaitRelease?.();
+      secondWaitRelease = null;
+      secondWaitGate = Promise.resolve();
     },
     close: async () => {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
@@ -2195,7 +2210,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
   }, 20_000);
 
   it("persists a cheap self-handback for exactly one later normal-model run", async () => {
-    const gateway = await createControlledGatewayServer();
+    const gateway = await createControlledGatewayServer({ holdSecondWait: true });
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
@@ -2204,34 +2219,67 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
     try {
       await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix, requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user" });
       await db.insert(agents).values({ id: agentId, companyId, name: "Review owner", role: "engineer", status: "idle", adapterType: "openclaw_gateway", adapterConfig: { url: gateway.url, headers: { "x-openclaw-token": "gateway-token" }, payloadTemplate: { message: "wake now" }, waitTimeoutMs: 2_000 }, runtimeConfig: gatewayAdmissionRuntimeConfig(), permissions: {} });
-      await db.insert(issues).values({ id: issueId, companyId, title: "Cheap productivity review", status: "blocked", priority: "medium", responsibleUserId: "responsible-user", assigneeAgentId: agentId, assigneeAdapterOverrides: { modelProfile: "cheap" }, issueNumber: 1, identifier: issuePrefix + "-1" });
+      await db.insert(issues).values({ id: issueId, companyId, title: "Cheap productivity review", status: "in_progress", priority: "medium", responsibleUserId: "responsible-user", assigneeAgentId: agentId, assigneeAdapterOverrides: { modelProfile: "cheap" }, originKind: "issue_productivity_review", originId: randomUUID(), issueNumber: 1, identifier: issuePrefix + "-1" });
       const firstRun = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", reason: "issue_assigned", payload: { issueId, modelProfile: "cheap" }, contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_assigned", modelProfile: "cheap", recoveryIntent: "status_only", allowDeliverableWork: false, allowDocumentUpdates: false, resumeRequiresNormalModel: true }, requestedByActorType: "system" });
       expect(firstRun).not.toBeNull();
       await waitFor(async () => (await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, firstRun!.id)).then((rows) => rows[0] ?? null))?.status === "running");
-      const idempotencyKey = "issue-unblock:" + issueId + ":transition-1";
-      let durableCallbacks = 0;
-      const handback = () => heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "issue_unblock_requested", idempotencyKey, payload: { issueId, action: "Create the required deliverable" }, contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_unblock_requested", modelProfile: "cheap", recoveryIntent: "status_only", allowDeliverableWork: false, allowDocumentUpdates: false, resumeRequiresNormalModel: true }, normalModelHandback: true, onDurablyEnqueued: () => { durableCallbacks += 1; } });
-      await handback();
-      await handback();
-      expect(durableCallbacks).toBe(2);
+
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        req.actor = { type: "agent", agentId, companyId, runId: firstRun!.id, source: "agent_jwt" };
+        next();
+      });
+      app.use("/api", issueRoutes(db, {} as never));
+      app.use(errorHandler);
+      const blockPayload = { status: "blocked", unblockDescriptor: { owner: { agentId }, action: "Create the required deliverable" } };
+      const blocked = await request(app).patch(`/api/issues/${issueId}`).send(blockPayload);
+      expect(blocked.status, JSON.stringify(blocked.body)).toBe(200);
+      const replay = await request(app).patch(`/api/issues/${issueId}`).send(blockPayload);
+      expect(replay.status, JSON.stringify(replay.body)).toBe(200);
+
+      const [persistedIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(persistedIssue?.blockedOwnerNotifiedAt).not.toBeNull();
+      const idempotencyKey = `issue-unblock:${issueId}:${persistedIssue!.blockedTransitionAt!.toISOString()}`;
       const deferred = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, idempotencyKey)));
       expect(deferred).toHaveLength(1);
       expect(deferred[0]).toMatchObject({ status: "deferred_issue_execution", runId: null, coalescedCount: 0 });
       const deferredContext = (deferred[0]?.payload as Record<string, any>)._paperclipWakeContext;
       expect(deferredContext).toMatchObject({ issueId, wakeReason: "issue_unblock_requested", paperclipNormalModelHandback: true });
       for (const key of ["modelProfile", "paperclipModelProfile", "recoveryIntent", "allowDeliverableWork", "allowDocumentUpdates", "resumeRequiresNormalModel"]) expect(deferredContext).not.toHaveProperty(key);
+
       await db.insert(issueComments).values({ companyId, issueId, authorAgentId: agentId, createdByRunId: firstRun!.id, body: "Self-handback recorded; normal-model follow-up required." });
       gateway.releaseFirstWait();
-      await waitFor(() => gateway.getAgentPayloads().length >= 2, 90_000);
-      await waitFor(async () => { const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)).orderBy(asc(heartbeatRuns.createdAt)); return runs.length === 2 && runs[0]?.status === "succeeded" && runs[1]?.status === "succeeded"; }, 90_000);
+      await waitFor(() => gateway.getAgentPayloads().length === 2, 20_000);
       const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId)).orderBy(asc(heartbeatRuns.createdAt));
       expect(runs).toHaveLength(2);
+      expect(runs[0]?.status).toBe("succeeded");
+      expect(runs[1]?.status).toBe("running");
       const promotedContext = runs[1]?.contextSnapshot as Record<string, unknown>;
       expect(promotedContext).toMatchObject({ issueId, wakeReason: "issue_unblock_requested", paperclipNormalModelHandback: true });
       for (const key of ["modelProfile", "paperclipModelProfile", "recoveryIntent", "allowDeliverableWork", "allowDocumentUpdates", "resumeRequiresNormalModel"]) expect(promotedContext).not.toHaveProperty(key);
+
+      const promotedApp = express();
+      promotedApp.use(express.json());
+      promotedApp.use((req, _res, next) => {
+        req.actor = { type: "agent", agentId, companyId, runId: runs[1]!.id, source: "agent_jwt" };
+        next();
+      });
+      promotedApp.use("/api", issueRoutes(db, {} as never));
+      promotedApp.use(errorHandler);
+      const deliverable = await request(promotedApp).post(`/api/issues/${issueId}/work-products`).send({ type: "artifact", provider: "test", title: "Required deliverable" });
+      expect(deliverable.status, JSON.stringify(deliverable.body)).toBe(201);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      await db.insert(issueComments).values({ companyId, issueId, authorAgentId: agentId, createdByRunId: runs[1]!.id, body: "Required deliverable created." });
+      gateway.releaseSecondWait();
+      await waitFor(async () => (await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runs[1]!.id)).then((rows) => rows[0] ?? null))?.status === "succeeded", 20_000);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(2);
+      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, idempotencyKey)))).toHaveLength(1);
     } finally {
       gateway.releaseFirstWait();
+      gateway.releaseSecondWait();
       await gateway.close();
     }
-  }, 120_000);
+  }, 30_000);
 });
