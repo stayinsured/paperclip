@@ -1,4 +1,5 @@
 export { companyService } from "./companies.js";
+export { runDisposableProviderCredentialProbe, type DisposableProviderProbeAdapter, type ProviderCredentialProbeResult } from "./provider-credential-probe.js";
 export { companyArtifactsService } from "./company-artifacts.js";
 export { companySearchService } from "./company-search.js";
 export { companySearchExtractService } from "./company-search-extract.js";
