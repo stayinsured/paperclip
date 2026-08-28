@@ -52,8 +52,8 @@ function safePaperclipUrl(value: string): string {
   return url.toString();
 }
 
-export const CLICKUP_MANAGED_DESCRIPTION_START = "<!-- paperclip:clickup-mirror:start -->";
-export const CLICKUP_MANAGED_DESCRIPTION_END = "<!-- paperclip:clickup-mirror:end -->";
+export const CLICKUP_MANAGED_DESCRIPTION_START = "<!-- paperclip-sync:start -->";
+export const CLICKUP_MANAGED_DESCRIPTION_END = "<!-- paperclip-sync:end -->";
 
 const DESCRIPTION_FIELDS = {
   issue: "Paperclip issue",

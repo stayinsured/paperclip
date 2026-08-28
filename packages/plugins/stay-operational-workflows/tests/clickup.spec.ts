@@ -415,7 +415,9 @@ describe("ClickUp exact configuration and shadow projection", () => {
       dueDateMs: Date.parse("2026-09-11T00:00:00.000Z"),
       customFields: {},
     });
-    expect(result.description).toContain("<!-- paperclip:clickup-mirror:start -->");
+    expect(result.description).toMatch(/^<!-- paperclip-sync:start -->\n/);
+    expect(result.description).toMatch(/\n<!-- paperclip-sync:end -->$/);
+    expect(result.description).not.toContain("paperclip:clickup-mirror");
     expect(result.description).toContain("Paperclip status: in_review");
     expect(result.description).toContain("Forecast source: cto-refinement");
     expect(result.description).toContain("Forecast revision: revision-1");
@@ -466,7 +468,28 @@ describe("ClickUp exact configuration and shadow projection", () => {
     expect(merged).toMatch(/^Human preface/);
     expect(merged).toMatch(/Human footer$/);
     expect(merged).toContain("Paperclip status: done");
-    expect(merged.match(/paperclip:clickup-mirror:start/g)).toHaveLength(1);
+    expect(merged.match(/<!-- paperclip-sync:start -->/g)).toHaveLength(1);
+    expect(merged.match(/<!-- paperclip-sync:end -->/g)).toHaveLength(1);
+  });
+
+  it("rejects malformed managed description markers", () => {
+    const managed = projection().description;
+    expect(() => mergeClickUpManagedDescription(
+      "Human preface\n\n<!-- paperclip-sync:start -->\nstale managed text",
+      managed,
+    )).toThrowError(expect.objectContaining({ code: "clickup_managed_description_ambiguous" }));
+    expect(() => mergeClickUpManagedDescription(
+      "<!-- paperclip-sync:end -->\nstale managed text\n<!-- paperclip-sync:start -->",
+      managed,
+    )).toThrowError(expect.objectContaining({ code: "clickup_managed_description_ambiguous" }));
+  });
+
+  it("rejects duplicate managed description blocks", () => {
+    const managed = projection().description;
+    expect(() => mergeClickUpManagedDescription(
+      managed + "\n\nHuman text\n\n" + managed,
+      managed,
+    )).toThrowError(expect.objectContaining({ code: "clickup_managed_description_ambiguous" }));
   });
 });
 

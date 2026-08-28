@@ -30,7 +30,7 @@ const projection: ClickUpShadowProjection = {
   projectionVersion: "projection-1",
   title: "[DEMO-101] Implement ClickUp mirroring",
   description: [
-    "<!-- paperclip:clickup-mirror:start -->",
+    "<!-- paperclip-sync:start -->",
     "Paperclip mirror. Paperclip is authoritative.",
     "Owner label: Backend & Integrations Engineer",
     "Paperclip status: in_progress",
@@ -48,7 +48,7 @@ const projection: ClickUpShadowProjection = {
     "",
     "paperclip-correlation: pc:issue-a:stable",
     "paperclip-projection: projection-1",
-    "<!-- paperclip:clickup-mirror:end -->",
+    "<!-- paperclip-sync:end -->",
   ].join("\n"),
   statusId: config.statuses.inProgress.id,
   statusName: config.statuses.inProgress.name,
