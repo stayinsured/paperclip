@@ -1,8 +1,4 @@
-import {
-  APPROVED_CLICKUP_LIST_TIME_ZONE,
-  assertClickUpDestinationConfigured,
-  ClickUpConfigurationError,
-} from "./config.js";
+import { assertClickUpDestinationConfigured, ClickUpConfigurationError } from "./config.js";
 import { clickUpCorrelationValue, clickUpProjectionVersion } from "./identity.js";
 import type {
   ApprovedEstimateSource,
@@ -148,21 +144,9 @@ function dueDateMilliseconds(value: string | null): number | null {
   return milliseconds;
 }
 
-const approvedClickUpDateFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: APPROVED_CLICKUP_LIST_TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function normalizeClickUpDateOnlyMilliseconds(value: number | null): number | null {
-  if (value == null) return null;
-  const parts = Object.fromEntries(
-    approvedClickUpDateFormatter.formatToParts(new Date(value))
-      .filter((part) => part.type === "year" || part.type === "month" || part.type === "day")
-      .map((part) => [part.type, part.value]),
-  );
-  return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day));
+function remoteDueDateValue(value: number | null, includesTime: boolean): string | number | null {
+  if (value == null || includesTime) return value;
+  return new Date(value).toISOString().slice(0, 10);
 }
 
 function conservativeEstimateHours(source: ApprovedEstimateSource | null): number | null {
@@ -233,7 +217,7 @@ export function renderClickUpShadowProjection(input: {
     status: status.id,
     assigneeDisplay,
     nativeAssignee: config.ownerAssigneeId,
-    dueDate: dueDateMs,
+    dueDate: source.dueDate,
     blocker,
     acceptanceSummary,
     estimate: estimateHours,
@@ -308,6 +292,7 @@ export function ownedSnapshotFromRemote(
     assigneeIds: number[];
     timeEstimateMs: number | null;
     dueDateMs: number | null;
+    dueDateTime: boolean;
     customFields: Record<string, string | boolean | null | undefined>;
   },
   _config: ClickUpDestinationConfig,
@@ -324,7 +309,7 @@ export function ownedSnapshotFromRemote(
     acceptanceSummary: parsed.acceptanceSummary,
     estimate: estimateHours,
     nativeAssignee,
-    dueDate: normalizeClickUpDateOnlyMilliseconds(task.dueDateMs),
+    dueDate: remoteDueDateValue(task.dueDateMs, task.dueDateTime),
     sourceStatus: parsed.sourceStatus,
     forecastSource: parsed.forecastSource,
     forecastRevision: parsed.forecastRevision,

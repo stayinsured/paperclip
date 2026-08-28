@@ -169,6 +169,7 @@ export interface ClickUpRemoteTask {
   assigneeIds: number[];
   timeEstimateMs: number | null;
   dueDateMs: number | null;
+  dueDateTime: boolean;
   customFields: Record<string, string | boolean | null | undefined>;
   parentTaskId: string | null;
   dependencyTaskIds: string[];

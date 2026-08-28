@@ -9,7 +9,6 @@ import type {
 export const APPROVED_CLICKUP_API_BASE_URL = "https://api.clickup.com/api/v2";
 export const APPROVED_CLICKUP_WORKSPACE_ID = "90151122957";
 export const APPROVED_CLICKUP_LIST_ID = "901511200089";
-export const APPROVED_CLICKUP_LIST_TIME_ZONE = "Europe/Berlin";
 
 const REQUIRED_STATUS_NAMES = {
   toDo: "to do",

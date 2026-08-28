@@ -165,6 +165,7 @@ class MemoryClickUp implements ClickUpApiPort {
   ambiguousCreate = false;
   commitAmbiguousCreate = false;
   dueDateReadbackOffsetMs = 0;
+  dueDateTimeReadback = false;
 
   async findTasksByCorrelation(input: { listId: string; correlationValue: string }): Promise<ClickUpRemoteTask[]> {
     this.calls.push(`find:${input.correlationValue}`);
@@ -192,6 +193,7 @@ class MemoryClickUp implements ClickUpApiPort {
       assigneeIds: [input.nativeAssigneeId],
       timeEstimateMs: input.timeEstimateMs,
       dueDateMs: input.dueDateMs == null ? null : input.dueDateMs + this.dueDateReadbackOffsetMs,
+      dueDateTime: this.dueDateTimeReadback,
       customFields: { ...input.customFields },
       parentTaskId: input.parentTaskId,
       dependencyTaskIds: [],
@@ -521,7 +523,7 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     expect(api.calls.filter((call) => call === "get:task-1").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("normalizes the approved list's date-only due-date readback before create verification", async () => {
+  it("compares the observed date-only readback by its calendar date", async () => {
     const api = new MemoryClickUp();
     const repository = new MemoryLinks();
     api.dueDateReadbackOffsetMs = 2 * 60 * 60 * 1_000;
@@ -547,6 +549,22 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     expect(repository.links).toHaveLength(1);
     expect(api.calls.filter((call) => call.startsWith("create:"))).toHaveLength(1);
     expect(api.calls.filter((call) => call.startsWith("update:"))).toHaveLength(0);
+  });
+
+  it("preserves null and strict timed due-date values at the remote boundary", async () => {
+    const readback = await new MemoryClickUp().createTask(projection({ dueDate: "2026-09-04" }));
+
+    expect(ownedSnapshotFromRemote({ ...readback, dueDateMs: null }, config).dueDate).toBeNull();
+    expect(ownedSnapshotFromRemote({
+      ...readback,
+      dueDateMs: 1788487200000,
+      dueDateTime: true,
+    }, config).dueDate).toBe(1788487200000);
+    expect(ownedSnapshotFromRemote({
+      ...readback,
+      dueDateMs: 1788487200000,
+      dueDateTime: false,
+    }, config).dueDate).toBe("2026-09-04");
   });
 
   it("reconciles an ambiguous create by stable correlation before retry", async () => {

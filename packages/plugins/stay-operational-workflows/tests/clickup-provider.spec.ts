@@ -66,7 +66,7 @@ const projection: ClickUpShadowProjection = {
     acceptanceSummary: "Readback is exact.",
     estimate: 4,
     nativeAssignee: config.ownerAssigneeId,
-    dueDate: Date.parse("2026-09-11T00:00:00.000Z"),
+    dueDate: "2026-09-11",
     sourceStatus: "in_progress",
     forecastSource: "plan",
     forecastRevision: "revision-1",
@@ -101,6 +101,7 @@ function providerHarness() {
           description: body!.description,
           assignees: ((body!.assignees as number[]) ?? []).map((id) => ({ id })),
           due_date: body!.due_date,
+          due_date_time: body!.due_date_time,
           status: { id: projection.statusId, status: projection.statusName },
           list: { id: config.listId },
           url: "https://app.clickup.com/t/task-1",
@@ -161,7 +162,12 @@ describe("ClickUp list-scoped provider", () => {
     expect(harness.calls.filter((call) => call.url.includes("/field/"))).toHaveLength(0);
     const createBody = harness.calls.find((call) => call.method === "POST" && call.url.includes("/list/"))!.body as Record<string, unknown>;
     expect(createBody).not.toHaveProperty("custom_fields");
-    expect(createBody).toMatchObject({ assignees: [config.ownerAssigneeId], due_date: projection.dueDateMs });
+    expect(createBody).toMatchObject({
+      assignees: [config.ownerAssigneeId],
+      due_date: projection.dueDateMs,
+      due_date_time: false,
+    });
+    expect(created.dueDateTime).toBe(false);
     expect(harness.calls.filter((call) => call.url.includes("/dependency"))).toHaveLength(2);
     expect(harness.calls.every((call) => call.headers.authorization === "synthetic-token")).toBe(true);
   });

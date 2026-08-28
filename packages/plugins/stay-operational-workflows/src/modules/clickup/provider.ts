@@ -94,6 +94,7 @@ function parseTask(value: unknown): ClickUpRemoteTask {
     assigneeIds,
     timeEstimateMs: task.time_estimate == null ? null : Number(task.time_estimate),
     dueDateMs,
+    dueDateTime: task.due_date_time === true,
     customFields,
     parentTaskId: asString(parent.id) ?? asString(task.parent),
     dependencyTaskIds: [...new Set(dependencyTaskIds)].sort(),
