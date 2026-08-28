@@ -79,6 +79,7 @@ function statusKeyForSource(
     case "in_review":
       return "readyForQa";
     case "done":
+    case "cancelled":
       return "complete";
     case "blocked": { // Blocked retains the last projected lane and uses the protected blocker field.
       if (!source.blockerSummary?.trim()) throw new ClickUpConfigurationError("clickup_blocked_summary_missing");

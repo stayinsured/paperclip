@@ -27,6 +27,18 @@ export class ClickUpAmbiguousWriteError extends Error {
   }
 }
 
+export class ClickUpProviderError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number | null,
+    public readonly retryable: boolean,
+    public readonly retryAfterMs: number | null,
+  ) {
+    super(code);
+    this.name = "ClickUpProviderError";
+  }
+}
+
 export interface ClickUpProjectionReceipt {
   schemaVersion: 1;
   companyId: string;
@@ -201,16 +213,20 @@ export async function projectIssueToClickUp(input: {
     } else {
       try {
         const created = await input.api.createTask(input.projection);
+        const readback = await input.api.getTask(created.id);
+        if (!readback || !remoteMatchesProjection(readback, input.projection, input.config)) {
+          return reconcileAmbiguousCreate({ ...input, now });
+        }
         await storeHealthyLink({
           repository: input.repository,
           existing: null,
           projection: input.projection,
-          remote: created,
+          remote: readback,
           originSide: "paperclip",
           projectedAt: now,
         });
         return receipt(input.projection, {
-          taskId: created.id,
+          taskId: readback.id,
           action: "created",
           outcome: "succeeded",
           errorClass: null,
@@ -222,11 +238,12 @@ export async function projectIssueToClickUp(input: {
         if (error instanceof ClickUpAmbiguousWriteError) {
           return reconcileAmbiguousCreate({ ...input, now });
         }
+        const provider = error instanceof ClickUpProviderError ? error : null;
         return receipt(input.projection, {
           taskId: null,
           action: "failed",
-          outcome: "terminal_failure",
-          errorClass: "clickup_create_failed",
+          outcome: provider?.retryable ? "retryable_failure" : "terminal_failure",
+          errorClass: provider?.code ?? "clickup_create_failed",
           conflictCount: 0,
           reconciledBeforeRetry: false,
           occurredAt: now,
@@ -345,11 +362,12 @@ export async function projectIssueToClickUp(input: {
         occurredAt: now,
       });
     }
+    const provider = error instanceof ClickUpProviderError ? error : null;
     return receipt(input.projection, {
       taskId: link.taskId,
       action: "failed",
-      outcome: "terminal_failure",
-      errorClass: "clickup_update_failed",
+      outcome: provider?.retryable ? "retryable_failure" : "terminal_failure",
+      errorClass: provider?.code ?? "clickup_update_failed",
       conflictCount: 0,
       reconciledBeforeRetry: false,
       occurredAt: now,

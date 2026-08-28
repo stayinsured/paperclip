@@ -2,8 +2,13 @@ import { clickUpConfigurationFingerprint } from "./identity.js";
 import type {
   ClickUpAuthorization,
   ClickUpDestinationConfig,
+  ClickUpModuleActivation,
   ClickUpShadowProjection,
 } from "./types.js";
+
+export const APPROVED_CLICKUP_API_BASE_URL = "https://api.clickup.com/api/v2";
+export const APPROVED_CLICKUP_WORKSPACE_ID = "90151122957";
+export const APPROVED_CLICKUP_LIST_ID = "901511200089";
 
 const REQUIRED_STATUS_NAMES = {
   toDo: "to do",
@@ -143,5 +148,96 @@ export function assertClickUpIntakeAuthorized(input: {
   }
   if (!input.authorization.listAccessProof!.endpoints.tasksRead) {
     throw new ClickUpConfigurationError("clickup_list_read_scope_unproven");
+  }
+}
+
+
+function activationObject(value: unknown, code: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ClickUpConfigurationError(code);
+  }
+  return value as Record<string, unknown>;
+}
+
+export function parseClickUpModuleActivation(value: unknown): ClickUpModuleActivation {
+  const root = activationObject(value, "clickup_activation_invalid");
+  if (root.schemaVersion !== 1) throw new ClickUpConfigurationError("clickup_activation_version_invalid");
+  const tokenRef = activationObject(root.tokenRef, "clickup_secret_ref_missing");
+  const destination = activationObject(root.destination, "clickup_destination_missing") as unknown as ClickUpDestinationConfig;
+  const authorization = activationObject(root.authorization, "clickup_authorization_missing") as unknown as ClickUpAuthorization;
+  if (tokenRef.type !== "secret_ref" || typeof tokenRef.secretId !== "string" || !tokenRef.secretId.trim()) {
+    throw new ClickUpConfigurationError("clickup_secret_ref_invalid");
+  }
+  const tokenRefVersion = typeof tokenRef.version === "number" || tokenRef.version === "latest"
+    ? tokenRef.version
+    : undefined;
+  if (tokenRef.version != null && tokenRefVersion === undefined) {
+    throw new ClickUpConfigurationError("clickup_secret_ref_invalid");
+  }
+  if (tokenRef.secretId !== destination.tokenSecretId
+    || (tokenRefVersion ?? null) !== (destination.tokenSecretVersion ?? null)) {
+    throw new ClickUpConfigurationError("clickup_secret_ref_destination_mismatch");
+  }
+  let paperclipBaseUrl: URL;
+  try {
+    paperclipBaseUrl = new URL(String(root.paperclipBaseUrl ?? ""));
+  } catch {
+    throw new ClickUpConfigurationError("clickup_paperclip_base_url_invalid");
+  }
+  if (!['http:', 'https:'].includes(paperclipBaseUrl.protocol)
+    || paperclipBaseUrl.username || paperclipBaseUrl.password || paperclipBaseUrl.search || paperclipBaseUrl.hash) {
+    throw new ClickUpConfigurationError("clickup_paperclip_base_url_invalid");
+  }
+  const activation: ClickUpModuleActivation = {
+    schemaVersion: 1,
+    paperclipBaseUrl: paperclipBaseUrl.toString(),
+    tokenRef: {
+      type: "secret_ref",
+      secretId: tokenRef.secretId.trim(),
+      ...(tokenRefVersion === undefined ? {} : { version: tokenRefVersion }),
+    },
+    destination,
+    authorization,
+  };
+  assertClickUpModuleActivationUsable(activation);
+  return activation;
+}
+
+export function assertClickUpModuleActivationUsable(
+  activation: ClickUpModuleActivation,
+  now = new Date(),
+): void {
+  const { destination, authorization } = activation;
+  assertClickUpDestinationConfigured(destination);
+  const apiBase = new URL(destination.apiBaseUrl);
+  const normalizedApiBase = `${apiBase.origin}${apiBase.pathname.replace(/\/+$/, "")}`;
+  if (apiBase.search || apiBase.hash || normalizedApiBase !== APPROVED_CLICKUP_API_BASE_URL) {
+    throw new ClickUpConfigurationError("clickup_api_url_outside_approved_boundary");
+  }
+  if (activation.tokenRef.secretId !== destination.tokenSecretId
+    || (activation.tokenRef.version ?? null) !== (destination.tokenSecretVersion ?? null)) {
+    throw new ClickUpConfigurationError("clickup_secret_ref_destination_mismatch");
+  }
+  if (destination.workspaceId !== APPROVED_CLICKUP_WORKSPACE_ID
+    || destination.listId !== APPROVED_CLICKUP_LIST_ID) {
+    throw new ClickUpConfigurationError("clickup_destination_outside_approved_boundary");
+  }
+  if (authorization.intakeEnabled) {
+    throw new ClickUpConfigurationError("clickup_reverse_intake_not_approved");
+  }
+  assertApprovalAndProof({ config: destination, authorization, now });
+  if (authorization.readOnly || !authorization.externalWritesEnabled) {
+    throw new ClickUpConfigurationError("clickup_external_writes_disabled");
+  }
+  const proof = authorization.listAccessProof!;
+  if (proof.scope !== "list_read_write"
+    || !proof.endpoints.tasksRead
+    || !proof.endpoints.tasksCreate
+    || !proof.endpoints.tasksUpdate
+    || !proof.endpoints.customFieldsRead
+    || !proof.endpoints.dependenciesRead
+    || !proof.endpoints.dependenciesCreate
+    || !proof.endpoints.dependenciesDelete) {
+    throw new ClickUpConfigurationError("clickup_full_mirror_scope_unproven");
   }
 }

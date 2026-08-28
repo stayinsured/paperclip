@@ -4,6 +4,7 @@ import {
   classifyFailure,
   createRedactedReceipt,
   deterministicOperationKey,
+  isClickUpActiveConfig,
   isOutlineActiveConfig,
   sha256,
   type AttemptFailure,
@@ -72,6 +73,9 @@ export class ShadowReconciler {
     try {
       const configs = await this.repository.listConfigs(input.companyId, true);
       for (const config of configs) {
+        // Active ClickUp owns its own full-project readback pass below the same
+        // scheduled job. Do not also create a terminal shadow operation for it.
+        if (isClickUpActiveConfig(config)) continue;
         const outline = await this.outlineBinding(config, run);
         if (!outline && !isOutlineActiveConfig(config)) assertShadowOnly(config);
         let candidates: SourceCandidate[];

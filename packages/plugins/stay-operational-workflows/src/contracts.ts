@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { OutlineModuleActivation } from "./modules/outline/types.js";
+import { parseClickUpModuleActivation } from "./modules/clickup/config.js";
+import type { ClickUpModuleActivation } from "./modules/clickup/types.js";
 
 export const WORKFLOW_MODULES = ["outline", "clickup", "sentry_slack"] as const;
 export type WorkflowModule = (typeof WORKFLOW_MODULES)[number];
@@ -35,6 +37,7 @@ export interface ModuleConfig {
    * configuration boundary and again on every reconciliation.
    */
   outlineActivation: OutlineModuleActivation | null;
+  clickUpActivation: ClickUpModuleActivation | null;
   sourceVersion: string;
   policyVersion: string;
   maxAttempts: number;
@@ -141,6 +144,7 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
   }
 
   const outlineActivation = parseOutlineActivationField(input.outlineActivation, module);
+  const clickUpActivation = parseClickUpActivationField(input.clickUpActivation, module);
   const config: ModuleConfig = {
     companyId: requiredString(input.companyId, "companyId"),
     projectId: requiredString(input.projectId, "projectId"),
@@ -152,6 +156,7 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
       ? null
       : requiredString(input.destinationKey, "destinationKey", SAFE_DESTINATION),
     outlineActivation,
+    clickUpActivation,
     sourceVersion: requiredString(input.sourceVersion ?? "paperclip-v1", "sourceVersion", SAFE_VERSION),
     policyVersion: requiredString(input.policyVersion ?? "shadow-v1", "policyVersion", SAFE_VERSION),
     maxAttempts: boundedInteger(input.maxAttempts, 5, 1, 10, "maxAttempts"),
@@ -160,15 +165,20 @@ export function parseModuleConfig(input: Record<string, unknown>): ModuleConfig 
     overlapSeconds: boundedInteger(input.overlapSeconds, 300, 0, 3_600, "overlapSeconds"),
     batchSize: boundedInteger(input.batchSize, 200, 1, 1_000, "batchSize"),
   };
-  if (config.module !== "outline") {
+  if (config.module === "outline") {
+    if (config.outlineActivation == null) {
+      assertShadowOnly(config);
+    } else if (config.destinationKey !== config.outlineActivation.destination.connectionId) {
+      throw invalidWorkflowConfig("destinationKey must equal the approved Outline activation connectionId");
+    }
+  } else if (config.module === "clickup") {
+    if (config.clickUpActivation == null) {
+      assertShadowOnly(config);
+    } else if (config.destinationKey !== config.clickUpActivation.destination.listId) {
+      throw invalidWorkflowConfig("destinationKey must equal the approved ClickUp listId");
+    }
+  } else {
     assertShadowOnly(config);
-  } else if (config.outlineActivation == null) {
-    // No approved activation payload: the structural shadow-only limit stands.
-    assertShadowOnly(config);
-  } else if (config.destinationKey !== config.outlineActivation.destination.connectionId) {
-    throw invalidWorkflowConfig(
-      "destinationKey must equal the approved Outline activation connectionId",
-    );
   }
   if (config.maxDelayMs < config.baseDelayMs) {
     throw invalidWorkflowConfig("maxDelayMs must be at least baseDelayMs");
@@ -200,10 +210,23 @@ function parseOutlineActivationField(
   return payload as unknown as ModuleConfig["outlineActivation"];
 }
 
+function parseClickUpActivationField(
+  input: unknown,
+  module: WorkflowModule,
+): ModuleConfig["clickUpActivation"] {
+  if (input == null) return null;
+  if (module !== "clickup") throw invalidWorkflowConfig("Only the clickup module accepts clickUpActivation");
+  try {
+    return parseClickUpModuleActivation(input);
+  } catch {
+    throw invalidWorkflowConfig("clickUpActivation failed the approved destination and proof gates");
+  }
+}
+
 export function assertShadowOnly(config: Pick<ModuleConfig, "readOnly" | "destinationEnabled">): void {
   if (!config.readOnly || config.destinationEnabled) {
     throw invalidWorkflowConfig(
-      "This plugin release is shadow-only without an approved outline activation: readOnly must be true and destinationEnabled must be false",
+      "This plugin release is shadow-only without an approved module activation: readOnly must be true and destinationEnabled must be false",
     );
   }
 }
@@ -222,6 +245,17 @@ export function isOutlineActiveConfig(config: Pick<
     && !config.readOnly
     && config.destinationEnabled
     && config.outlineActivation != null;
+}
+
+export function isClickUpActiveConfig(config: Pick<
+  ModuleConfig,
+  "module" | "enabled" | "readOnly" | "destinationEnabled" | "clickUpActivation"
+>): boolean {
+  return config.module === "clickup"
+    && config.enabled
+    && !config.readOnly
+    && config.destinationEnabled
+    && config.clickUpActivation != null;
 }
 
 export function sha256(value: string): string {

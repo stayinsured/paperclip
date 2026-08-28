@@ -17,9 +17,9 @@ function sentryTriageSkillMarkdown(): string {
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.3.1",
+  version: "0.4.0",
   displayName: "Stay Operational Workflows",
-  description: "Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.",
+  description: "Company-scoped governed Outline, ClickUp, and Sentry/Slack workflows.",
   author: "Stay Digital Products",
   categories: ["automation"],
   capabilities: [
@@ -40,6 +40,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "agents.read",
     "agents.managed",
     "issues.read",
+    "issue.relations.read",
     "issues.create",
     "issues.update",
     "issues.wakeup",

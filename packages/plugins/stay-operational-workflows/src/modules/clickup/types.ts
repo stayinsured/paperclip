@@ -28,13 +28,27 @@ export interface ClickUpFieldIds {
 export interface ClickUpDestinationConfig {
   apiBaseUrl: string;
   tokenSecretId: string;
-  tokenSecretVersion?: number | null;
+  tokenSecretVersion?: number | "latest" | null;
   workspaceId: string;
   spaceId: string;
   listId: string;
   statuses: Record<ClickUpStatusKey, ClickUpConfiguredStatus>;
   fields: ClickUpFieldIds;
   intakeOptInValue: string | null;
+}
+
+export interface ClickUpSecretRef {
+  type: "secret_ref";
+  secretId: string;
+  version?: number | "latest";
+}
+
+export interface ClickUpModuleActivation {
+  schemaVersion: 1;
+  paperclipBaseUrl: string;
+  tokenRef: ClickUpSecretRef;
+  destination: ClickUpDestinationConfig;
+  authorization: ClickUpAuthorization;
 }
 
 export interface ClickUpAcceptedConfigurationApproval {
@@ -59,6 +73,9 @@ export interface ClickUpListAccessProof {
     tasksCreate: boolean;
     tasksUpdate: boolean;
     customFieldsRead: true;
+    dependenciesRead?: boolean;
+    dependenciesCreate?: boolean;
+    dependenciesDelete?: boolean;
   };
 }
 
@@ -137,6 +154,8 @@ export interface ClickUpRemoteTask {
   statusId: string;
   timeEstimateMs: number | null;
   customFields: Record<string, string | boolean | null | undefined>;
+  parentTaskId: string | null;
+  dependencyTaskIds: string[];
   updatedAt: string;
 }
 
@@ -204,6 +223,9 @@ export interface ClickUpApiPort {
   getTask(taskId: string): Promise<ClickUpRemoteTask | null>;
   createTask(input: ClickUpShadowProjection): Promise<ClickUpRemoteTask>;
   updateTask(taskId: string, input: ClickUpShadowProjection): Promise<ClickUpRemoteTask>;
+  updateParent(taskId: string, parentTaskId: string): Promise<void>;
+  addDependency(taskId: string, dependsOnTaskId: string): Promise<void>;
+  removeDependency(taskId: string, dependsOnTaskId: string): Promise<void>;
 }
 
 export interface ClickUpLinkRepository {

@@ -1,9 +1,14 @@
 # Stay Operational Workflows
 
-Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.
+Company-scoped governed Outline, ClickUp, and Sentry/Slack workflows.
 
-ClickUp remains strictly shadow-only. Outline adds an approved, fail-closed
-activation path: the guarded publisher is connected to runtime reconciliation
+ClickUp has a fail-closed Paperclip-authoritative activation path restricted to
+workspace `90151122957` and list `901511200089`, using only the official
+`https://api.clickup.com/api/v2` base. It creates, updates, and closes
+one correlated task per Paperclip issue, then reconciles native parent and blocker
+dependency relationships from authoritative readback. Credentials remain managed
+secret references resolved only at request time; a configuration never carries a
+token value. Outline also has an approved, fail-closed activation path: the guarded publisher is connected to runtime reconciliation
 behind the exact board-approved gates (accepted destination configuration
 fingerprint, current per-collection writer proofs, all external-write switches
 on, and a host-bound MCP runtime). A config without the approved activation
@@ -15,7 +20,11 @@ polling and zero Slack messages, so installation alone is inert.
 ## Runtime model
 
 - A five-minute scheduled job is the authoritative reconciliation path. Active
-  Outline publishing uses the host-managed `outline` profile, bound from
+  ClickUp configurations scan the complete project, project each issue through a
+  stable correlation field, verify create/update/relationship writes by readback,
+  and repair or surface remote drift without mutating Paperclip. Issue events are
+  latency hints and run the same idempotent reconciliation.
+- Active Outline publishing uses the host-managed `outline` profile, bound from
   company plugin config at `outline.connectionId`; the worker never receives
   the connection credential or a generic MCP invocation surface.
 - Issue-created and issue-updated events are latency hints. Event payloads are
@@ -62,9 +71,13 @@ Configuration mutation is board-only:
 
 Valid modules are outline, clickup, and sentry_slack. Each
 company/project/module row has independent enabled, readOnly,
-destinationEnabled, and destinationKey switches. ClickUp and Sentry/Slack rows
-reject readOnly false or destinationEnabled true. An outline row may activate
-only by also carrying the approved `outlineActivation` payload (exact
+destinationEnabled, and destinationKey switches. Sentry/Slack rows reject
+readOnly false or destinationEnabled true. A ClickUp row may activate only with
+`destinationKey` equal to list `901511200089` and a `clickUpActivation` payload
+whose exact destination fingerprint, unexpired list-scoped read/write proof,
+dependency endpoint proof, managed secret identity, and outer switches all match.
+Reverse ClickUp intake is rejected. An outline row may activate only by also
+carrying the approved `outlineActivation` payload (exact
 destination configuration plus its accepted authorization); the payload is
 validated at upsert time and re-validated on every reconciliation. Kill switch:
 upsert the row with `enabled: false` (or the shadow switch combination) — the
@@ -125,15 +138,24 @@ plugin also stops jobs; provider token revocation is the external hard stop.
 | Lost event | Scheduled scan finds the source row. |
 | Restart after ledger | Same key reads the terminal receipt; cursor catches up. |
 | Overlapping runs | One expiring lease wins; the other reports a duplicate. |
-| Ambiguous timeout | No blind retry; operation waits in reconciling. |
-| 429/5xx | Exponential retry is capped by maxAttempts and maxDelayMs. |
+| Ambiguous timeout | Correlation/Get Task readback runs before the next scheduled retry; no blind create/update replay. |
+| ClickUp drift | Owned field conflicts are surfaced; hierarchy/dependency drift is repaired and read back, with Paperclip unchanged. |
+| Missing ClickUp mapping | A stable exception is surfaced and the five-minute scan retries after prerequisite mirrors exist. |
+| 429/5xx | The result is classified retryable and the authoritative scheduled scan retries; legacy ledger retries remain capped by maxAttempts and maxDelayMs. |
 | 401/403 | Revoked-credential exception; no automatic retry. |
 | Invalid schema | Redacted exception; cursor does not advance. |
 | Wrong company | Route authorization and repository predicates fail closed. |
 
-Rollback is to set each module enabled false and stop/uninstall the plugin.
-Plugin-owned rows remain for audit/replay and can be retained or removed under a
-separately approved data-retention operation. No source issue state is changed.
+Rollback for ClickUp is a board-authorized config update setting `enabled` to
+false (or restoring `readOnly: true` and `destinationEnabled: false`). This stops
+new ClickUp calls while retaining identity links, redacted conflicts, and reports;
+it never changes Paperclip source issues and does not delete existing ClickUp
+mirrors. The external hard stop is revocation of the existing operator-held
+secret. Do not copy that credential into plugin configuration or agent context.
+
+For all modules, stop/uninstall is the broader kill switch. Plugin-owned rows
+remain for audit/replay and can be retained or removed under a separately approved
+data-retention operation.
 
 ## Development
 

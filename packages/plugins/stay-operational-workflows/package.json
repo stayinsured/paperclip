@@ -1,9 +1,9 @@
 {
   "name": "@staydigital/stay-operational-workflows",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "private": true,
-  "description": "Company-scoped shadow foundation for governed Outline, ClickUp, and Sentry/Slack workflows.",
+  "description": "Company-scoped governed Outline, ClickUp, and Sentry/Slack workflows.",
   "scripts": {
     "prebuild": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps",
     "build": "node ./esbuild.config.mjs",

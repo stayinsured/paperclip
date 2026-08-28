@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { clickUpConfigurationFingerprint, clickUpSha256 } from "../src/modules/clickup/identity.js";
-import { ClickUpConfigurationError } from "../src/modules/clickup/config.js";
+import {
+  APPROVED_CLICKUP_API_BASE_URL,
+  APPROVED_CLICKUP_LIST_ID,
+  APPROVED_CLICKUP_WORKSPACE_ID,
+  assertClickUpModuleActivationUsable,
+  ClickUpConfigurationError,
+  parseClickUpModuleActivation,
+} from "../src/modules/clickup/config.js";
 import { shouldSuppressClickUpEcho } from "../src/modules/clickup/conflicts.js";
 import { calculateClickUpProjectionHealth } from "../src/modules/clickup/health.js";
 import { renderClickUpShadowProjection } from "../src/modules/clickup/projection.js";
+import { reconcileClickUpRelationships } from "../src/modules/clickup/relationships.js";
 import {
   ClickUpAmbiguousWriteError,
   intakeClickUpTask,
@@ -17,6 +25,7 @@ import type {
   ClickUpDestinationConfig,
   ClickUpIntakeCandidate,
   ClickUpLinkRepository,
+  ClickUpModuleActivation,
   ClickUpProjectionSource,
   ClickUpRemoteTask,
   ClickUpShadowProjection,
@@ -78,7 +87,15 @@ function authorization(overrides: Partial<ClickUpAuthorization> = {}): ClickUpAu
       verifiedAt: "2026-08-07T09:30:00.000Z",
       expiresAt: "2026-08-08T09:30:00.000Z",
       scope: "list_read_write",
-      endpoints: { tasksRead: true, tasksCreate: true, tasksUpdate: true, customFieldsRead: true },
+      endpoints: {
+        tasksRead: true,
+        tasksCreate: true,
+        tasksUpdate: true,
+        customFieldsRead: true,
+        dependenciesRead: true,
+        dependenciesCreate: true,
+        dependenciesDelete: true,
+      },
     },
     ...overrides,
   };
@@ -183,6 +200,8 @@ class MemoryClickUp implements ClickUpApiPort {
       statusId: input.statusId,
       timeEstimateMs: input.timeEstimateMs,
       customFields: { ...input.customFields },
+      parentTaskId: null,
+      dependencyTaskIds: [],
       updatedAt: "2026-08-07T10:01:00.000Z",
     };
   }
@@ -197,11 +216,128 @@ class MemoryClickUp implements ClickUpApiPort {
 
   async updateTask(taskId: string, input: ClickUpShadowProjection): Promise<ClickUpRemoteTask> {
     this.calls.push(`update:${taskId}`);
-    const task = this.fromProjection(input, taskId);
+    const current = this.tasks.get(taskId);
+    const task = { ...this.fromProjection(input, taskId), parentTaskId: current?.parentTaskId ?? null, dependencyTaskIds: current?.dependencyTaskIds ?? [] };
     this.tasks.set(taskId, task);
     return task;
   }
+
+  async updateParent(taskId: string, parentTaskId: string): Promise<void> {
+    this.calls.push(`parent:${taskId}:${parentTaskId}`);
+    this.tasks.get(taskId)!.parentTaskId = parentTaskId;
+  }
+
+  async addDependency(taskId: string, dependsOnTaskId: string): Promise<void> {
+    this.calls.push(`dependency-add:${taskId}:${dependsOnTaskId}`);
+    const task = this.tasks.get(taskId)!;
+    task.dependencyTaskIds = [...new Set([...task.dependencyTaskIds, dependsOnTaskId])];
+  }
+
+  async removeDependency(taskId: string, dependsOnTaskId: string): Promise<void> {
+    this.calls.push(`dependency-remove:${taskId}:${dependsOnTaskId}`);
+    const task = this.tasks.get(taskId)!;
+    task.dependencyTaskIds = task.dependencyTaskIds.filter((id) => id !== dependsOnTaskId);
+  }
 }
+
+function approvedActivation(overrides: Partial<ClickUpModuleActivation> = {}): ClickUpModuleActivation {
+  const destination: ClickUpDestinationConfig = {
+    ...structuredClone(config),
+    apiBaseUrl: "https://api.clickup.com/api/v2/",
+    workspaceId: APPROVED_CLICKUP_WORKSPACE_ID,
+    listId: APPROVED_CLICKUP_LIST_ID,
+  };
+  const fingerprint = clickUpConfigurationFingerprint(destination);
+  return {
+    schemaVersion: 1,
+    paperclipBaseUrl: "https://paperclip.example/DEMO/",
+    tokenRef: {
+      type: "secret_ref",
+      secretId: destination.tokenSecretId,
+      version: destination.tokenSecretVersion ?? undefined,
+    },
+    destination,
+    authorization: {
+      enabled: true,
+      readOnly: false,
+      externalWritesEnabled: true,
+      intakeEnabled: false,
+      exactConfigurationApproval: {
+        status: "accepted",
+        configurationRevisionId: "revision-approved",
+        configurationFingerprint: fingerprint,
+        interactionId: "interaction-approved",
+        acceptedAt: "2026-08-28T09:00:00.000Z",
+      },
+      listAccessProof: {
+        workspaceId: destination.workspaceId,
+        spaceId: destination.spaceId,
+        listId: destination.listId,
+        principalId: "approved-clickup-operator",
+        configurationFingerprint: fingerprint,
+        verifiedAt: "2026-08-28T09:30:00.000Z",
+        expiresAt: "2099-08-29T09:30:00.000Z",
+        scope: "list_read_write",
+        endpoints: {
+          tasksRead: true,
+          tasksCreate: true,
+          tasksUpdate: true,
+          customFieldsRead: true,
+          dependenciesRead: true,
+          dependenciesCreate: true,
+          dependenciesDelete: true,
+        },
+      },
+    },
+    ...overrides,
+  };
+}
+
+describe("ClickUp activation boundary", () => {
+  it("accepts only the approved workspace/list with a managed secret reference and full proof", () => {
+    const activation = approvedActivation();
+    expect(parseClickUpModuleActivation(activation)).toMatchObject({
+      tokenRef: { type: "secret_ref", secretId: config.tokenSecretId, version: 2 },
+      destination: {
+        workspaceId: APPROVED_CLICKUP_WORKSPACE_ID,
+        listId: APPROVED_CLICKUP_LIST_ID,
+      },
+      authorization: { intakeEnabled: false },
+    });
+    expect(JSON.stringify(activation)).not.toContain("Bearer ");
+  });
+
+  it("fails closed outside the approved boundary or when reverse intake is enabled", () => {
+    const outside = approvedActivation();
+    outside.destination.workspaceId = "other-workspace";
+    const fingerprint = clickUpConfigurationFingerprint(outside.destination);
+    outside.authorization.exactConfigurationApproval!.configurationFingerprint = fingerprint;
+    outside.authorization.listAccessProof = {
+      ...outside.authorization.listAccessProof!,
+      workspaceId: outside.destination.workspaceId,
+      configurationFingerprint: fingerprint,
+    };
+    expect(() => assertClickUpModuleActivationUsable(outside, proofValidNow())).toThrowError(
+      expect.objectContaining({ code: "clickup_destination_outside_approved_boundary" }),
+    );
+    const wrongApi = approvedActivation();
+    wrongApi.destination.apiBaseUrl = "https://proxy.example/api/v2";
+    expect(() => assertClickUpModuleActivationUsable(wrongApi, proofValidNow())).toThrowError(
+      expect.objectContaining({ code: "clickup_api_url_outside_approved_boundary" }),
+    );
+    expect(APPROVED_CLICKUP_API_BASE_URL).toBe("https://api.clickup.com/api/v2");
+    const reboundSecret = approvedActivation();
+    reboundSecret.tokenRef.secretId = "other-managed-secret";
+    expect(() => assertClickUpModuleActivationUsable(reboundSecret, proofValidNow())).toThrowError(
+      expect.objectContaining({ code: "clickup_secret_ref_destination_mismatch" }),
+    );
+    const intake = approvedActivation();
+    intake.authorization.intakeEnabled = true;
+    expect(() => assertClickUpModuleActivationUsable(intake, proofValidNow())).toThrowError(
+      expect.objectContaining({ code: "clickup_reverse_intake_not_approved" }),
+    );
+  });
+});
 
 describe("ClickUp exact configuration and shadow projection", () => {
   it("projects only the allowlisted fields, exact ready-for-QA status, and conservative upper estimate", () => {
@@ -237,9 +373,10 @@ describe("ClickUp exact configuration and shadow projection", () => {
   });
 
   it("fails closed for unknown source state and a non-uniform ready-for-QA map", () => {
-    expect(() => projection({ status: "cancelled" })).toThrowError(
+    expect(() => projection({ status: "unknown" as ClickUpProjectionSource["status"] })).toThrowError(
       expect.objectContaining({ code: "clickup_paperclip_status_unmapped" }),
     );
+    expect(projection({ status: "cancelled" }).statusId).toBe(config.statuses.complete.id);
     const mismatched = structuredClone(config);
     mismatched.statuses.readyForQa.name = "review";
     expect(() => renderClickUpShadowProjection({
@@ -288,6 +425,7 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     expect(api.tasks).toHaveLength(1);
     expect(repository.links).toHaveLength(1);
     expect(api.calls.filter((call) => call.startsWith("create:"))).toHaveLength(1);
+    expect(api.calls.filter((call) => call === "get:task-1").length).toBeGreaterThanOrEqual(2);
   });
 
   it("reconciles an ambiguous create by stable correlation before retry", async () => {
@@ -350,6 +488,45 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     expect(repository.conflicts.map((conflict) => conflict.field)).toContain("title");
     expect(api.calls.filter((call) => call.startsWith("update:"))).toHaveLength(0);
     expect(task.title).toBe("Human changed remote title");
+  });
+});
+
+describe("ClickUp hierarchy and native dependencies", () => {
+  it("repairs relationship drift once and proves idempotency by readback", async () => {
+    const api = new MemoryClickUp();
+    const repository = new MemoryLinks();
+    const parentProjection = projection({ issueId: "parent-issue", issueIdentifier: "DEMO-1" });
+    const childProjection = projection({ issueId: "child-issue", issueIdentifier: "DEMO-2" });
+    const blockerProjection = projection({ issueId: "blocker-issue", issueIdentifier: "DEMO-3" });
+    for (const item of [parentProjection, childProjection, blockerProjection]) {
+      await projectIssueToClickUp({
+        projection: item,
+        config,
+        authorization: authorization(),
+        api,
+        repository,
+        now: proofValidNow(),
+      });
+    }
+    const parent = repository.links.find((link) => link.issueId === "parent-issue")!;
+    const child = repository.links.find((link) => link.issueId === "child-issue")!;
+    const blocker = repository.links.find((link) => link.issueId === "blocker-issue")!;
+    const input = {
+      api,
+      config,
+      taskId: child.taskId,
+      correlationValue: childProjection.correlationValue,
+      desiredParentTaskId: parent.taskId,
+      desiredDependencyTaskIds: [blocker.taskId],
+    };
+    const repaired = await reconcileClickUpRelationships(input);
+    const replay = await reconcileClickUpRelationships(input);
+    expect(repaired).toEqual({ action: "updated", writes: 2 });
+    expect(replay).toEqual({ action: "already_current", writes: 0 });
+    expect(api.tasks.get(child.taskId)).toMatchObject({
+      parentTaskId: parent.taskId,
+      dependencyTaskIds: [blocker.taskId],
+    });
   });
 });
 
