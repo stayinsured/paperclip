@@ -1,8 +1,9 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import type { Agent, Issue } from "@paperclipai/shared";
+import type { Agent, Issue, IssueDocument, IssueThreadInteraction } from "@paperclipai/shared";
 import { isClickUpActiveConfig, sha256, type AuditIdentity, type ModuleConfig } from "../../contracts.js";
 import type { WorkflowRepository } from "../../repository.js";
 import { assertClickUpModuleActivationUsable, ClickUpConfigurationError } from "./config.js";
+import { acceptedClickUpDeliveryMetadata } from "./metadata.js";
 import { ClickUpApiClient } from "./provider.js";
 import { clickUpCorrelationValue } from "./identity.js";
 import { renderClickUpShadowProjection } from "./projection.js";
@@ -124,12 +125,36 @@ export class ClickUpReconciliationService {
       });
       const api = this.clientFactory(activation, token);
       const issues = sortParentsFirst(await this.listProjectIssues(config));
+      const issueIds = new Set(issues.map((issue) => issue.id));
       const relations = new Map<string, Awaited<ReturnType<PluginContext["issues"]["relations"]["get"]>>>();
       const agents = new Map<string, Agent | null>();
       const links = new Map<string, ClickUpTaskLink>();
+      const planContexts = new Map<string, { planDocument: IssueDocument | null; interactions: IssueThreadInteraction[] }>();
 
       for (const issue of issues) {
         result.scanned += 1;
+        let planDocument: IssueDocument | null = null;
+        let interactions: IssueThreadInteraction[] = [];
+        if (issue.parentId) {
+          let context = planContexts.get(issue.parentId);
+          if (!context) {
+            const [parentPlan, parentInteractions] = await Promise.all([
+              this.ctx.issues.documents.get(issue.parentId, "plan", config.companyId),
+              this.ctx.issues.listInteractions(issue.parentId, config.companyId),
+            ]);
+            context = { planDocument: parentPlan, interactions: parentInteractions };
+            planContexts.set(issue.parentId, context);
+          }
+          planDocument = context.planDocument;
+          interactions = context.interactions;
+        }
+        const deliveryMetadata = acceptedClickUpDeliveryMetadata({ issue, planDocument, interactions });
+        if (!deliveryMetadata.approvedEstimate || !deliveryMetadata.dueDate) {
+          await this.recordException(config, audit, issue.id, "clickup_planning_metadata_invalid", "Approved estimate, due date, or forecast revision metadata is absent or malformed; this mirror stayed fail-closed.");
+          result.terminalFailures += 1;
+          continue;
+        }
+
         const relation = await this.ctx.issues.relations.get(issue.id, config.companyId);
         relations.set(issue.id, relation);
         let assignee: Agent | null = null;
@@ -139,7 +164,13 @@ export class ClickUpReconciliationService {
           }
           assignee = agents.get(issue.assigneeAgentId) ?? null;
         }
-        const existing = await this.links.getByIssue(config.companyId, issue.id);
+        const desiredParentTaskId = issue.parentId ? links.get(issue.parentId)?.taskId ?? null : null;
+        if (issue.parentId && issueIds.has(issue.parentId) && !desiredParentTaskId) {
+          await this.recordException(config, audit, issue.id, "clickup_parent_mapping_pending", "Parent mirror is not yet available; child create stayed fail-closed.");
+          result.retryableFailures += 1;
+          continue;
+        }
+
         const source: ClickUpProjectionSource = {
           companyId: config.companyId,
           projectId: config.projectId,
@@ -149,17 +180,18 @@ export class ClickUpReconciliationService {
           title: issue.title,
           planningSummary: compactText(issue.description, issue.title),
           status: issue.status,
-          assigneeDisplayRef: assignee ? (assignee.title ?? assignee.name) : issue.assigneeUserId ? "Board owner" : null,
+          assigneeDisplayRef: deliveryMetadata.plannedOwner ?? (assignee ? (assignee.title ?? assignee.name) : issue.assigneeUserId ? "Board owner" : null),
           blockerSummary: blockerSummary(issue, relation.blockedBy),
           acceptanceSummary: acceptanceSummary(issue),
-          approvedEstimate: null,
+          approvedEstimate: deliveryMetadata.approvedEstimate,
+          dueDate: deliveryMetadata.dueDate,
           updatedAt: issue.updatedAt.toISOString(),
         };
         const projection = renderClickUpShadowProjection({
           source,
           config: activation.destination,
           policyVersion: config.policyVersion,
-          previousProjectedStatusId: String(existing?.baseSnapshot.status ?? activation.destination.statuses.toDo.id),
+          parentTaskId: desiredParentTaskId,
         });
         const receipt = await projectIssueToClickUp({
           projection,
@@ -208,6 +240,7 @@ export class ClickUpReconciliationService {
             correlationValue: clickUpCorrelationValue(issue.id, issueUrl(activation.paperclipBaseUrl, issue)),
             desiredParentTaskId,
             desiredDependencyTaskIds,
+            managedDependencyTaskIds: [...links.values()].map((candidate) => candidate.taskId),
           });
           if (relationship.action === "updated") {
             result.relationshipsUpdated += 1;

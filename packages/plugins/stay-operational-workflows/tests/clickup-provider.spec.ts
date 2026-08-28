@@ -12,20 +12,9 @@ const config: ClickUpDestinationConfig = {
   statuses: {
     toDo: { id: "status-todo", name: "to do" },
     inProgress: { id: "status-progress", name: "in progress" },
-    readyForQa: { id: "status-qa", name: "ready for qa" },
-    complete: { id: "status-complete", name: "complete" },
+    done: { id: "status-done", name: "done" },
   },
-  fields: {
-    paperclipIssueId: "field-identity",
-    planningSummary: "field-planning",
-    assigneeDisplay: "field-owner",
-    blocker: "field-blocker",
-    acceptanceSummary: "field-acceptance",
-    estimateNeeded: "field-estimate",
-    projectionVersion: "field-version",
-    intakeOptIn: null,
-  },
-  intakeOptInValue: null,
+  ownerAssigneeId: 94656177,
 };
 
 const projection: ClickUpShadowProjection = {
@@ -39,23 +28,48 @@ const projection: ClickUpShadowProjection = {
   listId: config.listId,
   correlationValue: "pc:issue-a:stable",
   projectionVersion: "projection-1",
-  title: "Implement ClickUp mirroring",
+  title: "[DEMO-101] Implement ClickUp mirroring",
+  description: [
+    "<!-- paperclip:clickup-mirror:start -->",
+    "Paperclip mirror. Paperclip is authoritative.",
+    "Owner label: Backend & Integrations Engineer",
+    "Paperclip status: in_progress",
+    "Forecast source: plan",
+    "Forecast revision: revision-1",
+    "",
+    "Planning summary:",
+    "Implement the mirror.",
+    "",
+    "Acceptance criteria:",
+    "Readback is exact.",
+    "",
+    "Blockers:",
+    "None",
+    "",
+    "paperclip-correlation: pc:issue-a:stable",
+    "paperclip-projection: projection-1",
+    "<!-- paperclip:clickup-mirror:end -->",
+  ].join("\n"),
   statusId: config.statuses.inProgress.id,
   statusName: config.statuses.inProgress.name,
-  timeEstimateMs: null,
-  customFields: {
-    [config.fields.paperclipIssueId]: "pc:issue-a:stable",
-    [config.fields.projectionVersion]: "projection-1",
-    [config.fields.blocker]: null,
-  },
+  nativeAssigneeId: config.ownerAssigneeId,
+  timeEstimateMs: 4 * 60 * 60 * 1_000,
+  dueDateMs: Date.parse("2026-09-11T00:00:00.000Z"),
+  parentTaskId: null,
+  customFields: {},
   ownedSnapshot: {
-    title: "Implement ClickUp mirroring",
-    planningSummary: null,
+    title: "[DEMO-101] Implement ClickUp mirroring",
+    planningSummary: "Implement the mirror.",
     status: config.statuses.inProgress.id,
-    assigneeDisplay: null,
+    assigneeDisplay: "Backend & Integrations Engineer",
     blocker: null,
-    acceptanceSummary: null,
-    estimate: null,
+    acceptanceSummary: "Readback is exact.",
+    estimate: 4,
+    nativeAssignee: config.ownerAssigneeId,
+    dueDate: Date.parse("2026-09-11T00:00:00.000Z"),
+    sourceStatus: "in_progress",
+    forecastSource: "plan",
+    forecastRevision: "revision-1",
   },
   sourceUpdatedAt: "2026-08-28T10:00:00.000Z",
   generatedAt: "2026-08-28T10:01:00.000Z",
@@ -84,12 +98,15 @@ function providerHarness() {
         task = {
           id: "task-1",
           name: body!.name,
+          description: body!.description,
+          assignees: ((body!.assignees as number[]) ?? []).map((id) => ({ id })),
+          due_date: body!.due_date,
           status: { id: projection.statusId, status: projection.statusName },
           list: { id: config.listId },
           url: "https://app.clickup.com/t/task-1",
           date_updated: String(Date.parse("2026-08-28T10:01:00.000Z") + revision),
           time_estimate: body!.time_estimate,
-          custom_fields: (body!.custom_fields as Array<{ id: string; value: unknown }>),
+          custom_fields: (body!.custom_fields as Array<{ id: string; value: unknown }> | undefined) ?? [],
           parent: null,
           dependencies: [],
         };
@@ -123,7 +140,7 @@ function providerHarness() {
 }
 
 describe("ClickUp list-scoped provider", () => {
-  it("uses only the approved API base/list and implements field, parent, dependency, and readback calls", async () => {
+  it("uses only the approved API base/list and implements native fields, parent, dependency, and readback calls", async () => {
     const harness = providerHarness();
     const client = new ClickUpApiClient(harness.http, config, "synthetic-token");
     const created = await client.createTask(projection);
@@ -141,7 +158,10 @@ describe("ClickUp list-scoped provider", () => {
     expect(harness.calls.every((call) => call.url.startsWith("https://api.clickup.com/api/v2/"))).toBe(true);
     expect(harness.calls.find((call) => call.method === "POST" && call.url.includes("/list/"))?.url)
       .toBe(`https://api.clickup.com/api/v2/list/${config.listId}/task`);
-    expect(harness.calls.filter((call) => call.url.includes("/field/"))).toHaveLength(3);
+    expect(harness.calls.filter((call) => call.url.includes("/field/"))).toHaveLength(0);
+    const createBody = harness.calls.find((call) => call.method === "POST" && call.url.includes("/list/"))!.body as Record<string, unknown>;
+    expect(createBody).not.toHaveProperty("custom_fields");
+    expect(createBody).toMatchObject({ assignees: [config.ownerAssigneeId], due_date: projection.dueDateMs });
     expect(harness.calls.filter((call) => call.url.includes("/dependency"))).toHaveLength(2);
     expect(harness.calls.every((call) => call.headers.authorization === "synthetic-token")).toBe(true);
   });

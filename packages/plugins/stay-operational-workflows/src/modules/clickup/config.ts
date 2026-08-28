@@ -13,8 +13,7 @@ export const APPROVED_CLICKUP_LIST_ID = "901511200089";
 const REQUIRED_STATUS_NAMES = {
   toDo: "to do",
   inProgress: "in progress",
-  readyForQa: "ready for qa",
-  complete: "complete",
+  done: "done",
 } as const;
 
 export class ClickUpConfigurationError extends Error {
@@ -59,24 +58,15 @@ export function assertClickUpDestinationConfigured(config: ClickUpDestinationCon
     seenStatusIds.add(id);
   }
 
-  const requiredFields = [
-    "paperclipIssueId",
-    "planningSummary",
-    "assigneeDisplay",
-    "blocker",
-    "acceptanceSummary",
-    "estimateNeeded",
-    "projectionVersion",
-  ] as const;
-  const seenFieldIds = new Set<string>();
-  for (const key of requiredFields) {
-    const id = requiredExactId(config.fields[key], `clickup_${key}_field_id_missing`);
-    if (seenFieldIds.has(id)) throw new ClickUpConfigurationError("clickup_field_ids_not_unique");
-    seenFieldIds.add(id);
+  if (!Number.isSafeInteger(config.ownerAssigneeId) || config.ownerAssigneeId <= 0) {
+    throw new ClickUpConfigurationError("clickup_owner_assignee_id_missing");
   }
-  if (config.fields.intakeOptIn != null) {
-    const id = requiredExactId(config.fields.intakeOptIn, "clickup_intake_field_id_missing");
-    if (seenFieldIds.has(id)) throw new ClickUpConfigurationError("clickup_field_ids_not_unique");
+
+  if (config.fields) {
+    const configuredFields = Object.values(config.fields).filter((value): value is string => value != null);
+    if (configuredFields.length > 0) {
+      throw new ClickUpConfigurationError("clickup_custom_fields_not_approved");
+    }
   }
 }
 
@@ -109,6 +99,9 @@ function assertApprovalAndProof(input: {
     throw new ClickUpConfigurationError("clickup_access_proof_destination_mismatch");
   }
   requiredExactId(proof.principalId, "clickup_principal_unprovisioned");
+  if (proof.principalId !== String(config.ownerAssigneeId)) {
+    throw new ClickUpConfigurationError("clickup_owner_assignee_proof_mismatch");
+  }
   const nowMs = (input.now ?? new Date()).getTime();
   const verifiedAtMs = Date.parse(proof.verifiedAt);
   const expiresAtMs = Date.parse(proof.expiresAt);
@@ -143,7 +136,15 @@ export function assertClickUpIntakeAuthorized(input: {
 }): void {
   assertApprovalAndProof(input);
   if (!input.authorization.intakeEnabled) throw new ClickUpConfigurationError("clickup_intake_disabled");
-  if (!input.config.fields.intakeOptIn || !input.config.intakeOptInValue) {
+  const fields = input.config.fields;
+  if (
+    !fields?.intakeOptIn
+    || !fields.planningSummary
+    || !fields.assigneeDisplay
+    || !fields.blocker
+    || !fields.acceptanceSummary
+    || !input.config.intakeOptInValue
+  ) {
     throw new ClickUpConfigurationError("clickup_intake_marker_unconfigured");
   }
   if (!input.authorization.listAccessProof!.endpoints.tasksRead) {
@@ -234,7 +235,6 @@ export function assertClickUpModuleActivationUsable(
     || !proof.endpoints.tasksRead
     || !proof.endpoints.tasksCreate
     || !proof.endpoints.tasksUpdate
-    || !proof.endpoints.customFieldsRead
     || !proof.endpoints.dependenciesRead
     || !proof.endpoints.dependenciesCreate
     || !proof.endpoints.dependenciesDelete) {

@@ -11,11 +11,11 @@ import {
 } from "../src/modules/clickup/config.js";
 import { shouldSuppressClickUpEcho } from "../src/modules/clickup/conflicts.js";
 import { calculateClickUpProjectionHealth } from "../src/modules/clickup/health.js";
-import { renderClickUpShadowProjection } from "../src/modules/clickup/projection.js";
+import { mergeClickUpManagedDescription, ownedSnapshotFromRemote, renderClickUpShadowProjection } from "../src/modules/clickup/projection.js";
+import { acceptedClickUpDeliveryMetadata } from "../src/modules/clickup/metadata.js";
 import { reconcileClickUpRelationships } from "../src/modules/clickup/relationships.js";
 import {
   ClickUpAmbiguousWriteError,
-  intakeClickUpTask,
   projectIssueToClickUp,
 } from "../src/modules/clickup/sync.js";
 import type {
@@ -23,14 +23,12 @@ import type {
   ClickUpAuthorization,
   ClickUpConflict,
   ClickUpDestinationConfig,
-  ClickUpIntakeCandidate,
   ClickUpLinkRepository,
   ClickUpModuleActivation,
   ClickUpProjectionSource,
   ClickUpRemoteTask,
   ClickUpShadowProjection,
   ClickUpTaskLink,
-  PaperclipIssueIntakePort,
 } from "../src/modules/clickup/types.js";
 
 const companyId = "00000000-0000-4000-8000-000000000001";
@@ -48,20 +46,9 @@ const config: ClickUpDestinationConfig = {
   statuses: {
     toDo: { id: "status-todo", name: "to do" },
     inProgress: { id: "status-progress", name: "in progress" },
-    readyForQa: { id: "status-qa", name: "ready for qa" },
-    complete: { id: "status-complete", name: "complete" },
+    done: { id: "status-done", name: "done" },
   },
-  fields: {
-    paperclipIssueId: "field-identity",
-    planningSummary: "field-summary",
-    assigneeDisplay: "field-assignee",
-    blocker: "field-blocker",
-    acceptanceSummary: "field-acceptance",
-    estimateNeeded: "field-estimate-needed",
-    projectionVersion: "field-projection-version",
-    intakeOptIn: "field-intake",
-  },
-  intakeOptInValue: "import-to-paperclip",
+  ownerAssigneeId: 94656177,
 };
 
 function authorization(overrides: Partial<ClickUpAuthorization> = {}): ClickUpAuthorization {
@@ -70,7 +57,7 @@ function authorization(overrides: Partial<ClickUpAuthorization> = {}): ClickUpAu
     enabled: true,
     readOnly: false,
     externalWritesEnabled: true,
-    intakeEnabled: true,
+    intakeEnabled: false,
     exactConfigurationApproval: {
       status: "accepted",
       configurationRevisionId: "revision-approved",
@@ -82,7 +69,7 @@ function authorization(overrides: Partial<ClickUpAuthorization> = {}): ClickUpAu
       workspaceId: config.workspaceId,
       spaceId: config.spaceId,
       listId: config.listId,
-      principalId: "clickup-principal-1",
+      principalId: String(config.ownerAssigneeId),
       configurationFingerprint: fingerprint,
       verifiedAt: "2026-08-07T09:30:00.000Z",
       expiresAt: "2026-08-08T09:30:00.000Z",
@@ -91,7 +78,6 @@ function authorization(overrides: Partial<ClickUpAuthorization> = {}): ClickUpAu
         tasksRead: true,
         tasksCreate: true,
         tasksUpdate: true,
-        customFieldsRead: true,
         dependenciesRead: true,
         dependenciesCreate: true,
         dependenciesDelete: true,
@@ -122,6 +108,7 @@ function source(overrides: Partial<ClickUpProjectionSource> = {}): ClickUpProjec
       upperBound: 2.1,
       unit: "person_days",
     },
+    dueDate: "2026-09-11",
     updatedAt: "2026-08-07T10:00:00.000Z",
     ...overrides,
   };
@@ -178,10 +165,10 @@ class MemoryClickUp implements ClickUpApiPort {
   ambiguousCreate = false;
   commitAmbiguousCreate = false;
 
-  async findTasksByCorrelation(input: { listId: string; correlationFieldId: string; correlationValue: string }): Promise<ClickUpRemoteTask[]> {
+  async findTasksByCorrelation(input: { listId: string; correlationValue: string }): Promise<ClickUpRemoteTask[]> {
     this.calls.push(`find:${input.correlationValue}`);
     return [...this.tasks.values()].filter((task) => (
-      task.listId === input.listId && task.customFields[input.correlationFieldId] === input.correlationValue
+      task.listId === input.listId && task.correlationValue === input.correlationValue
     ));
   }
 
@@ -197,10 +184,15 @@ class MemoryClickUp implements ClickUpApiPort {
       url: `https://app.clickup.example/t/${id}`,
       revision: `revision-${this.calls.length}`,
       title: input.title,
+      description: input.description,
+      correlationValue: input.correlationValue,
+      projectionVersion: input.projectionVersion,
       statusId: input.statusId,
+      assigneeIds: [input.nativeAssigneeId],
       timeEstimateMs: input.timeEstimateMs,
+      dueDateMs: input.dueDateMs,
       customFields: { ...input.customFields },
-      parentTaskId: null,
+      parentTaskId: input.parentTaskId,
       dependencyTaskIds: [],
       updatedAt: "2026-08-07T10:01:00.000Z",
     };
@@ -273,7 +265,7 @@ function approvedActivation(overrides: Partial<ClickUpModuleActivation> = {}): C
         workspaceId: destination.workspaceId,
         spaceId: destination.spaceId,
         listId: destination.listId,
-        principalId: "approved-clickup-operator",
+        principalId: String(destination.ownerAssigneeId),
         configurationFingerprint: fingerprint,
         verifiedAt: "2026-08-28T09:30:00.000Z",
         expiresAt: "2099-08-29T09:30:00.000Z",
@@ -282,7 +274,6 @@ function approvedActivation(overrides: Partial<ClickUpModuleActivation> = {}): C
           tasksRead: true,
           tasksCreate: true,
           tasksUpdate: true,
-          customFieldsRead: true,
           dependenciesRead: true,
           dependenciesCreate: true,
           dependenciesDelete: true,
@@ -339,65 +330,143 @@ describe("ClickUp activation boundary", () => {
   });
 });
 
+describe("ClickUp planning metadata", () => {
+  it("accepts the explicit bootstrap QA metadata and fails closed when it is malformed", () => {
+    const issueType = {
+      description: [
+        "Validate the synthetic DAG.",
+        "",
+        "## Planning metadata",
+        "",
+        "- Upper-bound effort: 4 hours. QA/review P90 active time is 0.92h.",
+        "- Forecast: 2026-09-01. Calibration revision: 2026-08-27. External work remains fail-closed.",
+      ].join("\n"),
+      parentId: "parent-issue",
+    } as Parameters<typeof acceptedClickUpDeliveryMetadata>[0]["issue"];
+    expect(acceptedClickUpDeliveryMetadata({ issue: issueType, planDocument: null, interactions: [] })).toMatchObject({
+      dueDate: "2026-09-01",
+      approvedEstimate: {
+        documentKey: "cto-refinement",
+        revisionId: "2026-08-27",
+        upperBound: 4,
+        unit: "hours",
+      },
+    });
+
+    const malformed = { ...issueType, description: "## Planning metadata\n\n- Upper-bound effort: four hours." };
+    expect(acceptedClickUpDeliveryMetadata({ issue: malformed, planDocument: null, interactions: [] })).toMatchObject({
+      approvedEstimate: null,
+      dueDate: null,
+    });
+  });
+
+  it("accepts only provisioned estimates bound to the latest accepted parent plan revision", () => {
+    const parentId = "parent-issue";
+    const issueType = {
+      parentId,
+      description: [
+        "Provisioned from STA-2762 approved plan revision 1 (Gate 1 accepted 2026-08-28).",
+        "Planned owner: Backend and Integrations Engineer.",
+        "Estimate: 3 person-days; due 2026-09-11.",
+      ].join("\n"),
+    } as Parameters<typeof acceptedClickUpDeliveryMetadata>[0]["issue"];
+    const planDocument = {
+      latestRevisionNumber: 1,
+      latestRevisionId: "accepted-plan-revision",
+    } as NonNullable<Parameters<typeof acceptedClickUpDeliveryMetadata>[0]["planDocument"]>;
+    const interaction = {
+      kind: "request_confirmation",
+      status: "accepted",
+      payload: {
+        target: {
+          type: "issue_document",
+          issueId: parentId,
+          key: "plan",
+          revisionId: "accepted-plan-revision",
+          revisionNumber: 1,
+        },
+      },
+    } as Parameters<typeof acceptedClickUpDeliveryMetadata>[0]["interactions"][number];
+
+    expect(acceptedClickUpDeliveryMetadata({ issue: issueType, planDocument, interactions: [interaction] })).toMatchObject({
+      plannedOwner: "Backend and Integrations Engineer",
+      dueDate: "2026-09-11",
+      approvedEstimate: {
+        documentKey: "plan",
+        revisionId: "accepted-plan-revision",
+        upperBound: 3,
+        unit: "person_days",
+      },
+    });
+  });
+});
+
 describe("ClickUp exact configuration and shadow projection", () => {
-  it("projects only the allowlisted fields, exact ready-for-QA status, and conservative upper estimate", () => {
+  it("projects only native fields and the managed description block", async () => {
     const result = projection();
-    expect(result.mode).toBe("shadow");
-    expect(result.wouldWrite).toBe(false);
-    expect(result.statusId).toBe("status-qa");
-    expect(result.statusName).toBe("ready for qa");
-    expect(result.timeEstimateMs).toBe(20 * 60 * 60 * 1_000);
-    expect(result.customFields[config.fields.estimateNeeded]).toBe(false);
-    expect(result.customFields[config.fields.planningSummary]).toContain("[redacted-email]");
-    expect(result.customFields[config.fields.acceptanceSummary]).toContain("api_key=[redacted]");
+    expect(result).toMatchObject({
+      mode: "shadow",
+      wouldWrite: false,
+      title: "[STA-1843] Constrained ClickUp projection",
+      statusId: config.statuses.inProgress.id,
+      statusName: "in progress",
+      nativeAssigneeId: 94656177,
+      timeEstimateMs: 20 * 60 * 60 * 1_000,
+      dueDateMs: Date.parse("2026-09-11T00:00:00.000Z"),
+      customFields: {},
+    });
+    expect(result.description).toContain("<!-- paperclip:clickup-mirror:start -->");
+    expect(result.description).toContain("Paperclip status: in_review");
+    expect(result.description).toContain("Forecast source: cto-refinement");
+    expect(result.description).toContain("Forecast revision: revision-1");
+    expect(result.description).toContain("[redacted-email]");
+    expect(result.description).toContain("api_key=[redacted]");
     expect(result.correlationValue).not.toContain("token=remove-me");
-    expect(Object.keys(result.customFields).sort()).toEqual([
-      config.fields.acceptanceSummary,
-      config.fields.assigneeDisplay,
-      config.fields.blocker,
-      config.fields.estimateNeeded,
-      config.fields.paperclipIssueId,
-      config.fields.planningSummary,
-      config.fields.projectionVersion,
-    ].sort());
-    expect(result).not.toHaveProperty("comments");
-    expect(result).not.toHaveProperty("attachments");
-    expect(result).not.toHaveProperty("watchers");
-    expect(result).not.toHaveProperty("delete");
+    const readback = await new MemoryClickUp().createTask(result);
+    expect(ownedSnapshotFromRemote(readback, config)).toEqual(result.ownedSnapshot);
   });
 
-  it("leaves estimate unset when no accepted structured estimate exists", () => {
-    const result = projection({ approvedEstimate: null });
-    expect(result.timeEstimateMs).toBeNull();
-    expect(result.customFields[config.fields.estimateNeeded]).toBe(true);
+  it("fails closed when accepted forecast metadata is absent", () => {
+    expect(() => projection({ approvedEstimate: null })).toThrowError(
+      expect.objectContaining({ code: "clickup_planning_metadata_invalid" }),
+    );
+    expect(() => projection({ dueDate: null })).toThrowError(
+      expect.objectContaining({ code: "clickup_planning_metadata_invalid" }),
+    );
   });
 
-  it("fails closed for unknown source state and a non-uniform ready-for-QA map", () => {
+  it("uses exactly three projection targets and never retains the prior lane for blocked", () => {
+    const mappings: Array<[ClickUpProjectionSource["status"], string]> = [
+      ["backlog", config.statuses.toDo.id],
+      ["todo", config.statuses.toDo.id],
+      ["blocked", config.statuses.toDo.id],
+      ["in_progress", config.statuses.inProgress.id],
+      ["in_review", config.statuses.inProgress.id],
+      ["done", config.statuses.done.id],
+      ["cancelled", config.statuses.done.id],
+    ];
+    for (const [status, expectedStatusId] of mappings) {
+      expect(projection({ status, blockerSummary: status === "blocked" ? "Waiting on STA-2802" : null }).statusId).toBe(expectedStatusId);
+    }
     expect(() => projection({ status: "unknown" as ClickUpProjectionSource["status"] })).toThrowError(
       expect.objectContaining({ code: "clickup_paperclip_status_unmapped" }),
     );
-    expect(projection({ status: "cancelled" }).statusId).toBe(config.statuses.complete.id);
     const mismatched = structuredClone(config);
-    mismatched.statuses.readyForQa.name = "review";
+    mismatched.statuses.done.name = "complete";
     expect(() => renderClickUpShadowProjection({
       source: source(), config: mismatched, policyVersion: "pilot-rc3",
-    })).toThrowError(expect.objectContaining({ code: "clickup_readyForQa_status_name_mismatch" }));
+    })).toThrowError(expect.objectContaining({ code: "clickup_done_status_name_mismatch" }));
   });
 
-  it("retains the previous projected lane for blocked work and requires a blocker summary", () => {
-    const blocked = renderClickUpShadowProjection({
-      source: source({ status: "blocked", blockerSummary: "Waiting for exact list proof" }),
-      config,
-      policyVersion: "pilot-rc3",
-      previousProjectedStatusId: config.statuses.inProgress.id,
-    });
-    expect(blocked.statusId).toBe(config.statuses.inProgress.id);
-    expect(() => renderClickUpShadowProjection({
-      source: source({ status: "blocked", blockerSummary: null }),
-      config,
-      policyVersion: "pilot-rc3",
-      previousProjectedStatusId: config.statuses.inProgress.id,
-    })).toThrowError(expect.objectContaining({ code: "clickup_blocked_summary_missing" }));
+  it("preserves all text outside the managed description block", () => {
+    const current = projection({ status: "in_progress" });
+    const existing = `Human preface\n\n${current.description}\n\nHuman footer`;
+    const updated = projection({ status: "done" });
+    const merged = mergeClickUpManagedDescription(existing, updated.description);
+    expect(merged).toMatch(/^Human preface/);
+    expect(merged).toMatch(/Human footer$/);
+    expect(merged).toContain("Paperclip status: done");
+    expect(merged.match(/paperclip:clickup-mirror:start/g)).toHaveLength(1);
   });
 });
 
@@ -420,7 +489,7 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     };
     const first = await projectIssueToClickUp(input);
     const replay = await projectIssueToClickUp(input);
-    expect(first.action).toBe("created");
+    expect(first).toMatchObject({ action: "created", outcome: "succeeded", errorClass: null });
     expect(replay.action).toBe("already_current");
     expect(api.tasks).toHaveLength(1);
     expect(repository.links).toHaveLength(1);
@@ -511,6 +580,7 @@ describe("ClickUp hierarchy and native dependencies", () => {
     const parent = repository.links.find((link) => link.issueId === "parent-issue")!;
     const child = repository.links.find((link) => link.issueId === "child-issue")!;
     const blocker = repository.links.find((link) => link.issueId === "blocker-issue")!;
+    api.tasks.get(child.taskId)!.dependencyTaskIds = [parent.taskId, "external-dependency"];
     const input = {
       api,
       config,
@@ -518,103 +588,20 @@ describe("ClickUp hierarchy and native dependencies", () => {
       correlationValue: childProjection.correlationValue,
       desiredParentTaskId: parent.taskId,
       desiredDependencyTaskIds: [blocker.taskId],
+      managedDependencyTaskIds: [parent.taskId, child.taskId, blocker.taskId],
     };
     const repaired = await reconcileClickUpRelationships(input);
     const replay = await reconcileClickUpRelationships(input);
-    expect(repaired).toEqual({ action: "updated", writes: 2 });
+    expect(repaired).toEqual({ action: "updated", writes: 3 });
     expect(replay).toEqual({ action: "already_current", writes: 0 });
     expect(api.tasks.get(child.taskId)).toMatchObject({
       parentTaskId: parent.taskId,
-      dependencyTaskIds: [blocker.taskId],
+      dependencyTaskIds: ["external-dependency", blocker.taskId],
     });
   });
 });
 
-describe("ClickUp opt-in intake and health", () => {
-  function candidate(overrides: Partial<ClickUpIntakeCandidate> = {}): ClickUpIntakeCandidate {
-    return {
-      workspaceId: config.workspaceId,
-      spaceId: config.spaceId,
-      listId: config.listId,
-      taskId: "external-task-1",
-      taskUrl: "https://app.clickup.example/t/external-task-1",
-      title: "Explicitly opted-in work",
-      planningSummary: "Synthetic planning input",
-      statusId: config.statuses.toDo.id,
-      revision: "external-revision-1",
-      customFields: { [config.fields.intakeOptIn!]: config.intakeOptInValue },
-      ...overrides,
-    };
-  }
-
-  class MemoryIssues implements PaperclipIssueIntakePort {
-    byKey = new Map<string, { issueId: string; issueIdentifier: string; issueUrl: string }>();
-
-    async createIssue(input: Parameters<PaperclipIssueIntakePort["createIssue"]>[0]) {
-      const existing = this.byKey.get(input.idempotencyKey);
-      if (existing) return existing;
-      const created = {
-        issueId: `issue-${this.byKey.size + 1}`,
-        issueIdentifier: `STA-${2000 + this.byKey.size}`,
-        issueUrl: `https://paperclip.example/STA/issues/STA-${2000 + this.byKey.size}`,
-      };
-      this.byKey.set(input.idempotencyKey, created);
-      return created;
-    }
-  }
-
-  it("keeps intake disabled without the separate activation switch", async () => {
-    await expect(intakeClickUpTask({
-      companyId, projectId, candidate: candidate(), config,
-      authorization: authorization({ intakeEnabled: false }),
-      issues: new MemoryIssues(), repository: new MemoryLinks(),
-      now: proofValidNow(),
-    })).rejects.toEqual(expect.objectContaining({ code: "clickup_intake_disabled" }));
-  });
-
-  it("skips outside-list and missing-opt-in tasks without creating Paperclip work", async () => {
-    const issues = new MemoryIssues();
-    const repository = new MemoryLinks();
-    const outside = await intakeClickUpTask({
-      companyId, projectId, candidate: candidate({ listId: "other-list" }), config,
-      authorization: authorization(), issues, repository,
-      now: proofValidNow(),
-    });
-    const unmarked = await intakeClickUpTask({
-      companyId, projectId, candidate: candidate({ customFields: {} }), config,
-      authorization: authorization(), issues, repository,
-      now: proofValidNow(),
-    });
-    expect(outside).toMatchObject({ action: "skipped", reason: "outside_approved_clickup_boundary" });
-    expect(unmarked).toMatchObject({ action: "skipped", reason: "intake_opt_in_missing" });
-    expect(issues.byKey).toHaveLength(0);
-    expect(repository.links).toHaveLength(0);
-  });
-
-  it("creates one Paperclip issue and mapping across repeated opted-in intake", async () => {
-    const issues = new MemoryIssues();
-    const repository = new MemoryLinks();
-    const input = {
-      companyId, projectId, candidate: candidate(), config, authorization: authorization(), issues, repository,
-      now: proofValidNow(),
-    };
-    const first = await intakeClickUpTask(input);
-    const replay = await intakeClickUpTask(input);
-    expect(first.action).toBe("created");
-    expect(replay.action).toBe("already_linked");
-    expect(issues.byKey).toHaveLength(1);
-    expect(repository.links).toHaveLength(1);
-    expect(repository.links[0]!.originSide).toBe("clickup");
-  });
-
-  it("fails closed on unknown intake status", async () => {
-    await expect(intakeClickUpTask({
-      companyId, projectId, candidate: candidate({ statusId: "unknown" }), config,
-      authorization: authorization(), issues: new MemoryIssues(), repository: new MemoryLinks(),
-      now: proofValidNow(),
-    })).rejects.toEqual(expect.objectContaining({ code: "clickup_intake_status_unmapped" }));
-  });
-
+describe("ClickUp health", () => {
   it("calculates p95 freshness and emits one stable visible lag exception above 15 minutes", () => {
     const healthy = calculateClickUpProjectionHealth({
       companyId,

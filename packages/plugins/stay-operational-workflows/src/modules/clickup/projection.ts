@@ -52,8 +52,100 @@ function safePaperclipUrl(value: string): string {
   return url.toString();
 }
 
+export const CLICKUP_MANAGED_DESCRIPTION_START = "<!-- paperclip:clickup-mirror:start -->";
+export const CLICKUP_MANAGED_DESCRIPTION_END = "<!-- paperclip:clickup-mirror:end -->";
+
+const DESCRIPTION_FIELDS = {
+  issue: "Paperclip issue",
+  url: "Paperclip URL",
+  owner: "Owner label",
+  dueDate: "Due date",
+  estimate: "Estimate",
+  planning: "Planning summary",
+  acceptance: "Acceptance criteria",
+  blockers: "Blockers",
+  correlation: "paperclip-correlation",
+  projection: "paperclip-projection",
+  sourceStatus: "Paperclip status",
+  forecastSource: "Forecast source",
+  forecastRevision: "Forecast revision",
+} as const;
+
+function descriptionLine(value: string, key: string): string | null {
+  const match = value.match(new RegExp(`^${key}: (.*)$`, "m"));
+  return match?.[1]?.trim() || null;
+}
+
+function descriptionSection(value: string, key: string, nextKey: string): string | null {
+  const match = value.match(new RegExp(`${key}:\\n([\\s\\S]*?)\\n\\n${nextKey}:`));
+  const normalized = match?.[1]?.trim() ?? "";
+  return normalized && normalized !== "None" ? normalized : null;
+}
+
+function managedDescriptionBlock(value: string): string | null {
+  const start = value.indexOf(CLICKUP_MANAGED_DESCRIPTION_START);
+  const end = value.indexOf(CLICKUP_MANAGED_DESCRIPTION_END);
+  if (start === -1 && end === -1) return null;
+  if (
+    start === -1
+    || end < start
+    || value.indexOf(CLICKUP_MANAGED_DESCRIPTION_START, start + 1) !== -1
+    || value.indexOf(CLICKUP_MANAGED_DESCRIPTION_END, end + 1) !== -1
+  ) {
+    throw new ClickUpConfigurationError("clickup_managed_description_ambiguous");
+  }
+  return value.slice(start, end + CLICKUP_MANAGED_DESCRIPTION_END.length);
+}
+
+export function mergeClickUpManagedDescription(existing: string, managed: string): string {
+  const managedBlock = managedDescriptionBlock(managed);
+  if (managedBlock !== managed) {
+    throw new ClickUpConfigurationError("clickup_managed_description_invalid");
+  }
+  const current = managedDescriptionBlock(existing);
+  if (!current) return existing ? `${existing}\n\n${managed}` : managed;
+  const start = existing.indexOf(CLICKUP_MANAGED_DESCRIPTION_START);
+  const end = existing.indexOf(CLICKUP_MANAGED_DESCRIPTION_END) + CLICKUP_MANAGED_DESCRIPTION_END.length;
+  return `${existing.slice(0, start)}${managed}${existing.slice(end)}`;
+}
+
+export function parseClickUpMirrorDescription(value: string): {
+  correlationValue: string | null;
+  projectionVersion: string | null;
+  planningSummary: string | null;
+  assigneeDisplay: string | null;
+  blocker: string | null;
+  acceptanceSummary: string | null;
+  sourceStatus: string | null;
+  forecastSource: string | null;
+  forecastRevision: string | null;
+} {
+  const managed = managedDescriptionBlock(value) ?? "";
+  return {
+    correlationValue: descriptionLine(managed, DESCRIPTION_FIELDS.correlation),
+    projectionVersion: descriptionLine(managed, DESCRIPTION_FIELDS.projection),
+    planningSummary: descriptionSection(managed, DESCRIPTION_FIELDS.planning, DESCRIPTION_FIELDS.acceptance),
+    acceptanceSummary: descriptionSection(managed, DESCRIPTION_FIELDS.acceptance, DESCRIPTION_FIELDS.blockers),
+    blocker: descriptionSection(managed, DESCRIPTION_FIELDS.blockers, DESCRIPTION_FIELDS.correlation),
+    assigneeDisplay: descriptionLine(managed, DESCRIPTION_FIELDS.owner),
+    sourceStatus: descriptionLine(managed, DESCRIPTION_FIELDS.sourceStatus),
+    forecastSource: descriptionLine(managed, DESCRIPTION_FIELDS.forecastSource),
+    forecastRevision: descriptionLine(managed, DESCRIPTION_FIELDS.forecastRevision),
+  };
+}
+
+function dueDateMilliseconds(value: string | null): number | null {
+  if (value == null) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new ClickUpConfigurationError("clickup_due_date_invalid");
+  }
+  const milliseconds = Date.parse(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(milliseconds)) throw new ClickUpConfigurationError("clickup_due_date_invalid");
+  return milliseconds;
+}
+
 function conservativeEstimateHours(source: ApprovedEstimateSource | null): number | null {
-  if (!source) return null;
+  if (!source) throw new ClickUpConfigurationError("clickup_planning_metadata_invalid");
   if (source.accepted !== true || source.isLatestAccepted !== true || (source.documentKey !== "plan" && source.documentKey !== "cto-refinement")) {
     throw new ClickUpConfigurationError("clickup_estimate_source_not_approved");
   }
@@ -67,26 +159,18 @@ function conservativeEstimateHours(source: ApprovedEstimateSource | null): numbe
 
 function statusKeyForSource(
   source: ClickUpProjectionSource,
-  config: ClickUpDestinationConfig,
-  previousProjectedStatusId?: string | null,
 ): ClickUpStatusKey {
   switch (source.status) {
     case "backlog":
     case "todo":
+    case "blocked":
       return "toDo";
     case "in_progress":
-      return "inProgress";
     case "in_review":
-      return "readyForQa";
+      return "inProgress";
     case "done":
     case "cancelled":
-      return "complete";
-    case "blocked": { // Blocked retains the last projected lane and uses the protected blocker field.
-      if (!source.blockerSummary?.trim()) throw new ClickUpConfigurationError("clickup_blocked_summary_missing");
-      const match = Object.entries(config.statuses).find(([, status]) => status.id === previousProjectedStatusId);
-      if (!match) throw new ClickUpConfigurationError("clickup_blocked_previous_status_missing");
-      return match[0] as ClickUpStatusKey;
-    }
+      return "done";
     default:
       throw new ClickUpConfigurationError("clickup_paperclip_status_unmapped");
   }
@@ -96,7 +180,7 @@ export function renderClickUpShadowProjection(input: {
   source: ClickUpProjectionSource;
   config: ClickUpDestinationConfig;
   policyVersion: string;
-  previousProjectedStatusId?: string | null;
+  parentTaskId?: string | null;
   generatedAt?: Date;
 }): ClickUpShadowProjection {
   assertClickUpDestinationConfigured(input.config);
@@ -106,15 +190,20 @@ export function renderClickUpShadowProjection(input: {
   }
   if (!input.policyVersion.trim()) throw new ClickUpConfigurationError("clickup_policy_version_missing");
 
-  const statusKey = statusKeyForSource(source, config, input.previousProjectedStatusId);
+  const statusKey = statusKeyForSource(source);
   const status = config.statuses[statusKey];
   const estimateHours = conservativeEstimateHours(source.approvedEstimate);
-  const title = redactClickUpText(source.title);
+  if (!source.dueDate) throw new ClickUpConfigurationError("clickup_planning_metadata_invalid");
+  const dueDateMs = dueDateMilliseconds(source.dueDate);
+  const forecastSource = source.approvedEstimate!.documentKey;
+  const forecastRevision = source.approvedEstimate!.revisionId;
+  const rawTitle = redactClickUpText(source.title);
+  const title = `[${redactClickUpText(source.issueIdentifier)}] ${rawTitle}`;
   const planningSummary = redactClickUpText(source.planningSummary);
   const assigneeDisplay = source.assigneeDisplayRef ? redactClickUpText(source.assigneeDisplayRef) : null;
   const blocker = source.blockerSummary ? redactClickUpText(source.blockerSummary) : null;
   const acceptanceSummary = redactClickUpText(source.acceptanceSummary);
-  if (!title) throw new ClickUpConfigurationError("clickup_projection_title_empty");
+  if (!rawTitle) throw new ClickUpConfigurationError("clickup_projection_title_empty");
   if (!planningSummary) throw new ClickUpConfigurationError("clickup_projection_summary_empty");
 
   const ownedSnapshot: ClickUpOwnedSnapshot = {
@@ -122,9 +211,14 @@ export function renderClickUpShadowProjection(input: {
     planningSummary,
     status: status.id,
     assigneeDisplay,
+    nativeAssignee: config.ownerAssigneeId,
+    dueDate: dueDateMs,
     blocker,
     acceptanceSummary,
     estimate: estimateHours,
+    sourceStatus: source.status,
+    forecastSource,
+    forecastRevision,
   };
   const safeUrl = safePaperclipUrl(source.issueUrl);
   const correlationValue = clickUpCorrelationValue(source.issueId, safeUrl);
@@ -134,7 +228,31 @@ export function renderClickUpShadowProjection(input: {
     policyVersion: input.policyVersion,
     snapshot: ownedSnapshot,
   });
-
+  const description = [
+    CLICKUP_MANAGED_DESCRIPTION_START,
+    "Paperclip mirror. Paperclip is authoritative.",
+    `${DESCRIPTION_FIELDS.issue}: ${redactClickUpText(source.issueIdentifier)}`,
+    `${DESCRIPTION_FIELDS.url}: ${safeUrl}`,
+    `${DESCRIPTION_FIELDS.owner}: ${assigneeDisplay ?? "Unassigned"}`,
+    `${DESCRIPTION_FIELDS.dueDate}: ${source.dueDate ?? "Not set"}`,
+    `${DESCRIPTION_FIELDS.estimate}: ${estimateHours == null ? "Not set" : `${estimateHours} hours`}`,
+    `${DESCRIPTION_FIELDS.sourceStatus}: ${source.status}`,
+    `${DESCRIPTION_FIELDS.forecastSource}: ${forecastSource}`,
+    `${DESCRIPTION_FIELDS.forecastRevision}: ${forecastRevision}`,
+    "",
+    `${DESCRIPTION_FIELDS.planning}:`,
+    planningSummary,
+    "",
+    `${DESCRIPTION_FIELDS.acceptance}:`,
+    acceptanceSummary,
+    "",
+    `${DESCRIPTION_FIELDS.blockers}:`,
+    blocker ?? "None",
+    "",
+    `${DESCRIPTION_FIELDS.correlation}: ${correlationValue}`,
+    `${DESCRIPTION_FIELDS.projection}: ${projectionVersion}`,
+    CLICKUP_MANAGED_DESCRIPTION_END,
+  ].join("\n");
   return {
     schemaVersion: 1,
     mode: "shadow",
@@ -147,18 +265,14 @@ export function renderClickUpShadowProjection(input: {
     correlationValue,
     projectionVersion,
     title,
+    description,
     statusId: status.id,
     statusName: status.name,
+    nativeAssigneeId: config.ownerAssigneeId,
     timeEstimateMs: estimateHours == null ? null : estimateHours * 60 * 60 * 1_000,
-    customFields: {
-      [config.fields.paperclipIssueId]: correlationValue,
-      [config.fields.planningSummary]: planningSummary,
-      [config.fields.assigneeDisplay]: assigneeDisplay,
-      [config.fields.blocker]: blocker,
-      [config.fields.acceptanceSummary]: acceptanceSummary,
-      [config.fields.estimateNeeded]: estimateHours == null,
-      [config.fields.projectionVersion]: projectionVersion,
-    },
+    dueDateMs,
+    parentTaskId: input.parentTaskId ?? null,
+    customFields: {},
     ownedSnapshot,
     sourceUpdatedAt: new Date(source.updatedAt).toISOString(),
     generatedAt: (input.generatedAt ?? new Date()).toISOString(),
@@ -168,29 +282,30 @@ export function renderClickUpShadowProjection(input: {
 export function ownedSnapshotFromRemote(
   task: {
     title: string;
+    description: string;
     statusId: string;
+    assigneeIds: number[];
     timeEstimateMs: number | null;
+    dueDateMs: number | null;
     customFields: Record<string, string | boolean | null | undefined>;
   },
-  config: ClickUpDestinationConfig,
+  _config: ClickUpDestinationConfig,
 ): ClickUpOwnedSnapshot {
-  const field = (id: string): string | boolean | null => task.customFields[id] ?? null;
+  const parsed = parseClickUpMirrorDescription(task.description);
   const estimateHours = task.timeEstimateMs == null ? null : task.timeEstimateMs / (60 * 60 * 1_000);
+  const nativeAssignee = task.assigneeIds.length === 1 ? task.assigneeIds[0]! : JSON.stringify([...task.assigneeIds].sort());
   return {
     title: redactClickUpText(task.title),
-    planningSummary: typeof field(config.fields.planningSummary) === "string"
-      ? redactClickUpText(String(field(config.fields.planningSummary)))
-      : null,
+    planningSummary: parsed.planningSummary,
     status: task.statusId,
-    assigneeDisplay: typeof field(config.fields.assigneeDisplay) === "string"
-      ? redactClickUpText(String(field(config.fields.assigneeDisplay)))
-      : null,
-    blocker: typeof field(config.fields.blocker) === "string"
-      ? redactClickUpText(String(field(config.fields.blocker)))
-      : null,
-    acceptanceSummary: typeof field(config.fields.acceptanceSummary) === "string"
-      ? redactClickUpText(String(field(config.fields.acceptanceSummary)))
-      : null,
+    assigneeDisplay: parsed.assigneeDisplay,
+    blocker: parsed.blocker,
+    acceptanceSummary: parsed.acceptanceSummary,
     estimate: estimateHours,
+    nativeAssignee,
+    dueDate: task.dueDateMs,
+    sourceStatus: parsed.sourceStatus,
+    forecastSource: parsed.forecastSource,
+    forecastRevision: parsed.forecastRevision,
   };
 }

@@ -1,4 +1,5 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import { mergeClickUpManagedDescription, parseClickUpMirrorDescription } from "./projection.js";
 import { ClickUpAmbiguousWriteError, ClickUpProviderError } from "./sync.js";
 import type {
   ClickUpApiPort,
@@ -68,6 +69,14 @@ function parseTask(value: unknown): ClickUpRemoteTask {
   const id = asString(task.id);
   const listId = asString(list.id);
   const title = asString(task.name);
+  const description = asString(task.description) ?? "";
+  const descriptionIdentity = parseClickUpMirrorDescription(description);
+  const assigneeIds = (Array.isArray(task.assignees) ? task.assignees : [])
+    .map((entry) => Number(asRecord(entry).id))
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .sort((left, right) => left - right);
+  const dueDateValue = task.due_date == null ? null : Number(task.due_date);
+  const dueDateMs = dueDateValue != null && Number.isFinite(dueDateValue) ? dueDateValue : null;
   const statusId = asString(status.id) ?? asString(status.status);
   if (!id || !listId || !title || !statusId) {
     throw new ClickUpProviderError("clickup_invalid_task_response", null, false, null);
@@ -78,8 +87,13 @@ function parseTask(value: unknown): ClickUpRemoteTask {
     url: asString(task.url),
     revision: asString(task.date_updated),
     title,
+    description,
+    correlationValue: descriptionIdentity.correlationValue,
+    projectionVersion: descriptionIdentity.projectionVersion,
     statusId,
+    assigneeIds,
     timeEstimateMs: task.time_estimate == null ? null : Number(task.time_estimate),
+    dueDateMs,
     customFields,
     parentTaskId: asString(parent.id) ?? asString(task.parent),
     dependencyTaskIds: [...new Set(dependencyTaskIds)].sort(),
@@ -142,10 +156,9 @@ export class ClickUpApiClient implements ClickUpApiPort {
 
   async findTasksByCorrelation(input: {
     listId: string;
-    correlationFieldId: string;
     correlationValue: string;
   }): Promise<ClickUpRemoteTask[]> {
-    if (input.listId !== this.config.listId || input.correlationFieldId !== this.config.fields.paperclipIssueId) {
+    if (input.listId !== this.config.listId) {
       throw new ClickUpProviderError("clickup_correlation_scope_mismatch", null, false, null);
     }
     const matches: ClickUpRemoteTask[] = [];
@@ -156,7 +169,7 @@ export class ClickUpApiClient implements ClickUpApiPort {
       target.searchParams.set("include_closed", "true");
       const payload = asRecord(await this.json(await this.request("GET", target)));
       const tasks = Array.isArray(payload.tasks) ? payload.tasks.map(parseTask) : [];
-      matches.push(...tasks.filter((task) => task.customFields[input.correlationFieldId] === input.correlationValue));
+      matches.push(...tasks.filter((task) => task.correlationValue === input.correlationValue));
       if (tasks.length < 100) break;
     }
     return matches;
@@ -179,21 +192,35 @@ export class ClickUpApiClient implements ClickUpApiPort {
     if (input.listId !== this.config.listId) throw new ClickUpProviderError("clickup_create_scope_mismatch", null, false, null);
     const response = await this.request("POST", this.url(`list/${encodeURIComponent(input.listId)}/task`), {
       name: input.title,
+      description: input.description,
       status: input.statusName,
+      assignees: [input.nativeAssigneeId],
       ...(input.timeEstimateMs == null ? {} : { time_estimate: input.timeEstimateMs }),
+      ...(input.dueDateMs == null ? {} : { due_date: input.dueDateMs, due_date_time: false }),
+      ...(input.parentTaskId == null ? {} : { parent: input.parentTaskId }),
       notify_all: false,
-      custom_fields: Object.entries(input.customFields)
-        .filter((entry): entry is [string, string | boolean] => entry[1] != null)
-        .map(([id, value]) => ({ id, value })),
+      ...(Object.keys(input.customFields).length === 0 ? {} : {
+        custom_fields: Object.entries(input.customFields)
+          .filter((entry): entry is [string, string | boolean] => entry[1] != null)
+          .map(([id, value]) => ({ id, value })),
+      }),
     }, true);
     return parseTask(await this.json(response));
   }
 
   async updateTask(taskId: string, input: ClickUpShadowProjection): Promise<ClickUpRemoteTask> {
+    const current = await this.getTask(taskId);
+    if (!current) throw new ClickUpAmbiguousWriteError("clickup_update_target_missing");
+    const removeAssignees = current.assigneeIds.filter((id) => id !== input.nativeAssigneeId);
+    const addAssignees = current.assigneeIds.includes(input.nativeAssigneeId) ? [] : [input.nativeAssigneeId];
     await this.request("PUT", this.url(`task/${encodeURIComponent(taskId)}`), {
       name: input.title,
+      description: mergeClickUpManagedDescription(current.description, input.description),
       status: input.statusName,
-      ...(input.timeEstimateMs == null ? {} : { time_estimate: input.timeEstimateMs }),
+      time_estimate: input.timeEstimateMs,
+      due_date: input.dueDateMs,
+      due_date_time: false,
+      assignees: { add: addAssignees, rem: removeAssignees },
     }, true);
     for (const [fieldId, value] of Object.entries(input.customFields)) {
       const target = this.url(`task/${encodeURIComponent(taskId)}/field/${encodeURIComponent(fieldId)}`);

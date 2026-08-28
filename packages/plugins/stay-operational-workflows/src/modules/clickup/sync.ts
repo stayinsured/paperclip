@@ -74,16 +74,20 @@ function receipt(
   };
 }
 
+function stableSnapshot(snapshot: ClickUpOwnedSnapshot): string {
+  return JSON.stringify(Object.entries(snapshot).sort(([left], [right]) => left.localeCompare(right)));
+}
+
 function remoteMatchesProjection(
   remote: ClickUpRemoteTask,
   projection: ClickUpShadowProjection,
   config: ClickUpDestinationConfig,
 ): boolean {
   if (remote.listId !== projection.listId) return false;
-  if (remote.customFields[config.fields.paperclipIssueId] !== projection.correlationValue) return false;
+  if (remote.correlationValue !== projection.correlationValue) return false;
   const remoteSnapshot = ownedSnapshotFromRemote(remote, config);
-  return JSON.stringify(remoteSnapshot) === JSON.stringify(projection.ownedSnapshot)
-    && remote.customFields[config.fields.projectionVersion] === projection.projectionVersion;
+  return stableSnapshot(remoteSnapshot) === stableSnapshot(projection.ownedSnapshot)
+    && remote.projectionVersion === projection.projectionVersion;
 }
 
 async function storeHealthyLink(input: {
@@ -121,7 +125,6 @@ async function reconcileAmbiguousCreate(input: {
 }): Promise<ClickUpProjectionReceipt> {
   const matches = await input.api.findTasksByCorrelation({
     listId: input.projection.listId,
-    correlationFieldId: input.config.fields.paperclipIssueId,
     correlationValue: input.projection.correlationValue,
   });
   if (matches.length === 1 && remoteMatchesProjection(matches[0]!, input.projection, input.config)) {
@@ -178,7 +181,6 @@ export async function projectIssueToClickUp(input: {
   if (!link) {
     const correlated = await input.api.findTasksByCorrelation({
       listId: input.projection.listId,
-      correlationFieldId: input.config.fields.paperclipIssueId,
       correlationValue: input.projection.correlationValue,
     });
     if (correlated.length > 1) {
@@ -264,10 +266,10 @@ export async function projectIssueToClickUp(input: {
       occurredAt: now,
     });
   }
-  const remoteCorrelation = remote.customFields[input.config.fields.paperclipIssueId];
+  const remoteCorrelation = remote.correlationValue;
   if (
     remote.listId !== input.config.listId ||
-    (remoteCorrelation != null && remoteCorrelation !== input.projection.correlationValue)
+    remoteCorrelation !== input.projection.correlationValue
   ) {
     return receipt(input.projection, {
       taskId: link.taskId,
@@ -376,15 +378,20 @@ export async function projectIssueToClickUp(input: {
 }
 
 function initialIntakeSnapshot(candidate: ClickUpIntakeCandidate, config: ClickUpDestinationConfig): ClickUpOwnedSnapshot {
-  const field = (id: string): string | boolean | null => candidate.customFields[id] ?? null;
+  const field = (id: string | null): string | boolean | null => id == null ? null : candidate.customFields[id] ?? null;
   return {
     title: redactClickUpText(candidate.title),
     planningSummary: redactClickUpText(candidate.planningSummary),
     status: candidate.statusId,
-    assigneeDisplay: typeof field(config.fields.assigneeDisplay) === "string" ? redactClickUpText(String(field(config.fields.assigneeDisplay))) : null,
-    blocker: typeof field(config.fields.blocker) === "string" ? redactClickUpText(String(field(config.fields.blocker))) : null,
-    acceptanceSummary: typeof field(config.fields.acceptanceSummary) === "string" ? redactClickUpText(String(field(config.fields.acceptanceSummary))) : null,
+    assigneeDisplay: typeof field(config.fields!.assigneeDisplay) === "string" ? redactClickUpText(String(field(config.fields!.assigneeDisplay))) : null,
+    blocker: typeof field(config.fields!.blocker) === "string" ? redactClickUpText(String(field(config.fields!.blocker))) : null,
+    acceptanceSummary: typeof field(config.fields!.acceptanceSummary) === "string" ? redactClickUpText(String(field(config.fields!.acceptanceSummary))) : null,
     estimate: null,
+    nativeAssignee: null,
+    dueDate: null,
+    sourceStatus: null,
+    forecastSource: null,
+    forecastRevision: null,
   };
 }
 
@@ -416,7 +423,7 @@ export async function intakeClickUpTask(input: {
   if (!allowedStatusIds.has(candidate.statusId)) {
     throw new ClickUpConfigurationError("clickup_intake_status_unmapped");
   }
-  if (candidate.customFields[config.fields.intakeOptIn!] !== config.intakeOptInValue) {
+  if (candidate.customFields[config.fields!.intakeOptIn!] !== config.intakeOptInValue) {
     return { action: "skipped", reason: "intake_opt_in_missing", issueId: null, link: null };
   }
 

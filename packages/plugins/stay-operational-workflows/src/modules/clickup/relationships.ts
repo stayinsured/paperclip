@@ -20,11 +20,12 @@ export async function reconcileClickUpRelationships(input: {
   correlationValue: string;
   desiredParentTaskId: string | null;
   desiredDependencyTaskIds: string[];
+  managedDependencyTaskIds: string[];
 }): Promise<{ action: "already_current" | "updated"; writes: number }> {
   const before = await input.api.getTask(input.taskId);
   if (!before) throw new ClickUpRelationshipError("clickup_relationship_task_missing");
   if (before.listId !== input.config.listId
-    || before.customFields[input.config.fields.paperclipIssueId] !== input.correlationValue) {
+    || before.correlationValue !== input.correlationValue) {
     throw new ClickUpRelationshipError("clickup_relationship_identity_mismatch");
   }
   if (before.parentTaskId && !input.desiredParentTaskId) {
@@ -38,9 +39,10 @@ export async function reconcileClickUpRelationships(input: {
   }
 
   const desiredDependencies = [...new Set(input.desiredDependencyTaskIds)].sort();
+  const managedDependencies = new Set(input.managedDependencyTaskIds);
   const existingDependencies = [...new Set(before.dependencyTaskIds)].sort();
   for (const dependencyId of existingDependencies) {
-    if (!desiredDependencies.includes(dependencyId)) {
+    if (managedDependencies.has(dependencyId) && !desiredDependencies.includes(dependencyId)) {
       await input.api.removeDependency(input.taskId, dependencyId);
       writes += 1;
     }
@@ -54,9 +56,10 @@ export async function reconcileClickUpRelationships(input: {
 
   if (writes === 0) return { action: "already_current", writes: 0 };
   const after = await input.api.getTask(input.taskId);
+  const afterManagedDependencies = after?.dependencyTaskIds.filter((dependencyId) => managedDependencies.has(dependencyId)) ?? [];
   if (!after
     || after.parentTaskId !== input.desiredParentTaskId
-    || !sameIds(after.dependencyTaskIds, desiredDependencies)) {
+    || !sameIds(afterManagedDependencies, desiredDependencies)) {
     throw new ClickUpRelationshipError("clickup_relationship_readback_mismatch");
   }
   return { action: "updated", writes };

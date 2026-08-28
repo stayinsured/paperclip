@@ -15,6 +15,11 @@ const OWNED_FIELDS: ClickUpOwnedField[] = [
   "blocker",
   "acceptanceSummary",
   "estimate",
+  "nativeAssignee",
+  "dueDate",
+  "sourceStatus",
+  "forecastSource",
+  "forecastRevision",
 ];
 
 function same(left: unknown, right: unknown): boolean {
