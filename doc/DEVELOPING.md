@@ -45,6 +45,14 @@ This starts:
 
 Issue execution may also use project execution workspace policies and workspace runtime services for per-project worktrees, preview servers, and managed dev commands. Configure those through the project workspace/runtime surfaces rather than starting long-running unmanaged processes when a task needs a reusable service.
 
+An isolated execution-workspace runtime service may opt into a credential-only
+Codex home with `credentialLease: { "provider": "codex" }` on that service's
+JSON definition. This is available only in `local_trusted` or
+`authenticated/private` deployments. Paperclip injects only the generated
+`CODEX_HOME`, never copies Codex config, skills, sessions, or MCP state, and
+revokes the lease when the service stops or startup recovery rejects an orphan.
+Do not use this opt-in for project-primary services or public deployments.
+
 ### Mobile-friendly preview (`pnpm dev:mobile`)
 
 The vite dev server serves an unbundled module graph. This is fast to reload on a local machine but too heavy for phones and tablets on slow links (airplane wifi, mobile data, distant tailnet peers). `pnpm dev:mobile` builds the UI once and serves the small production bundle on port `3101` via `vite preview`, proxying `/api` requests to the dev API on `3100`.

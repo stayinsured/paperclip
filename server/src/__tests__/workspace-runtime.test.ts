@@ -37,6 +37,7 @@ import {
   refreshRemoteTrackingBaseRef,
   releaseRuntimeServicesForRun,
   resetRuntimeServicesForTests,
+  runtimeCredentialLeaseDeploymentAllowed,
   resolveWorkspaceRuntimeReadinessTimeoutSec,
   resolveShell,
   sanitizeRuntimeServiceBaseEnv,
@@ -4354,6 +4355,110 @@ describe("ensureRuntimeServicesForRun", () => {
     expect(services[0]?.executionWorkspaceId).toBe("execution-workspace-1");
     expect(services[0]?.scopeType).toBe("execution_workspace");
     expect(services[0]?.scopeId).toBe("execution-workspace-1");
+  });
+
+  it("leases Codex auth only to an opted-in private execution-workspace service and revokes it on stop", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-codex-lease-"));
+    const workspaceRoot = path.join(root, "workspace");
+    const paperclipHome = path.join(root, "paperclip-home");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const authPath = path.join(sharedCodexHome, "auth.json");
+    const envCapturePath = path.join(workspaceRoot, "codex-home.txt");
+    await fs.mkdir(workspaceRoot, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(authPath, JSON.stringify({
+      tokens: {
+        account_id: "acct-runtime-lease",
+        access_token: "synthetic-runtime-access",
+        refresh_token: "synthetic-runtime-refresh",
+      },
+    }), { mode: 0o600 });
+    const sourceFingerprint = createHash("sha256").update(await fs.readFile(authPath)).digest("hex");
+    const serviceCommand = [
+      "node -e",
+      JSON.stringify(
+        `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(envCapturePath)}, process.env.CODEX_HOME); require('node:http').createServer((req,res)=>res.end('ok')).listen(Number(process.env.PORT), '127.0.0.1')`,
+      ),
+    ].join(" ");
+    const savedEnv = new Map<string, string | undefined>();
+    for (const key of [
+      "PAPERCLIP_HOME",
+      "PAPERCLIP_INSTANCE_ID",
+      "PAPERCLIP_DEPLOYMENT_MODE",
+      "PAPERCLIP_DEPLOYMENT_EXPOSURE",
+      "PAPERCLIP_BIND",
+      "HOST",
+      "CODEX_HOME",
+    ]) {
+      savedEnv.set(key, process.env[key]);
+    }
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "runtime-lease-test";
+    process.env.PAPERCLIP_DEPLOYMENT_MODE = "local_trusted";
+    process.env.PAPERCLIP_DEPLOYMENT_EXPOSURE = "private";
+    process.env.PAPERCLIP_BIND = "loopback";
+    process.env.HOST = "127.0.0.1";
+    process.env.CODEX_HOME = sharedCodexHome;
+    const runId = "run-codex-credential-lease";
+    leasedRunIds.add(runId);
+    const logs: string[] = [];
+
+    try {
+      const services = await ensureRuntimeServicesForRun({
+        runId,
+        agent: { id: "agent-1", name: "Runtime owner", companyId: "company-1" },
+        issue: null,
+        workspace: buildWorkspace(workspaceRoot),
+        executionWorkspaceId: "execution-workspace-credential-lease",
+        config: {
+          workspaceRuntime: {
+            services: [{
+              name: "paperclip-dev",
+              command: serviceCommand,
+              env: { CODEX_HOME: "/service-config-must-not-win" },
+              credentialLease: { provider: "codex" },
+              port: { type: "auto" },
+              readiness: {
+                type: "http",
+                urlTemplate: "http://127.0.0.1:{{port}}/api/health",
+                timeoutSec: 10,
+                intervalMs: 100,
+              },
+              lifecycle: "shared",
+              reuseScope: "execution_workspace",
+              stopPolicy: { type: "on_run_finish" },
+            }],
+          },
+        },
+        adapterEnv: {},
+        onLog: async (_stream, chunk) => { logs.push(chunk); },
+      });
+
+      expect(services).toHaveLength(1);
+      const leasedHome = await fs.readFile(envCapturePath, "utf8");
+      expect(path.basename(leasedHome)).toMatch(/^\.codex-credential-lease-/);
+      expect(await fs.readdir(leasedHome)).toEqual(["auth.json"]);
+      expect(await fs.realpath(path.join(leasedHome, "auth.json"))).toBe(await fs.realpath(authPath));
+      expect(logs.join("\n")).toMatch(/prepared Codex credential lease [0-9a-f-]+ \([0-9a-f]{64}\)/);
+      expect(logs.join("\n")).not.toContain("synthetic-runtime-access");
+
+      await releaseRuntimeServicesForRun(runId);
+      leasedRunIds.delete(runId);
+      await expect(fs.access(leasedHome)).rejects.toThrow();
+      expect(createHash("sha256").update(await fs.readFile(authPath)).digest("hex")).toBe(sourceFingerprint);
+    } finally {
+      for (const [key, value] of savedEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows runtime credential leases only in local-trusted or authenticated-private deployments", () => {
+    expect(runtimeCredentialLeaseDeploymentAllowed({ deploymentMode: "local_trusted", deploymentExposure: "private" })).toBe(true);
+    expect(runtimeCredentialLeaseDeploymentAllowed({ deploymentMode: "authenticated", deploymentExposure: "private" })).toBe(true);
+    expect(runtimeCredentialLeaseDeploymentAllowed({ deploymentMode: "authenticated", deploymentExposure: "public" })).toBe(false);
   });
 
   it("stops execution workspace runtime services by executionWorkspaceId", async () => {

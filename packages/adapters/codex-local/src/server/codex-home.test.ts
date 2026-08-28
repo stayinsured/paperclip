@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +11,7 @@ import {
   evaluateCodexCredentialReadiness,
   mergeManagedCodexMcpGateways,
   isManagedCodexHomePath,
+  prepareCodexCredentialLease,
   prepareManagedCodexHome,
   prepareOutputOnlyCodexHome,
   reconcileManagedCodexHome,
@@ -484,6 +486,52 @@ describe("prepareOutputOnlyCodexHome", () => {
       }
     },
   );
+});
+
+describe("prepareCodexCredentialLease", () => {
+  it("leases only auth, revokes idempotently, and leaves the source credential unchanged", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-credential-lease-"));
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    const authPath = path.join(sharedCodexHome, "auth.json");
+    const env: NodeJS.ProcessEnv = {
+      CODEX_HOME: sharedCodexHome,
+      PAPERCLIP_HOME: paperclipHome,
+      PAPERCLIP_INSTANCE_ID: "default",
+    };
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(authPath, JSON.stringify({
+      tokens: {
+        account_id: "acct-lease",
+        access_token: "synthetic-access-token",
+        refresh_token: "synthetic-refresh-token",
+      },
+    }), { mode: 0o600 });
+    await fs.writeFile(path.join(sharedCodexHome, "config.toml"), "model = 'ignored'\n", "utf8");
+    const sourceBefore = createHash("sha256").update(await fs.readFile(authPath)).digest("hex");
+
+    try {
+      const lease = await prepareCodexCredentialLease({
+        env,
+        companyId: "company-1",
+        configuredCodexHome: null,
+        configuredApiKey: null,
+      });
+
+      expect(path.basename(lease.homePath)).toMatch(/^\.codex-credential-lease-/);
+      expect(await fs.readdir(lease.homePath)).toEqual(["auth.json"]);
+      expect(lease.credentialFingerprint).toBe(sourceBefore);
+      expect(await codexHomeHasUsableAuth(lease.homePath)).toBe(true);
+      expect((await fs.lstat(path.join(lease.homePath, "auth.json"))).isSymbolicLink()).toBe(true);
+
+      await lease.cleanup();
+      await lease.cleanup();
+      await expect(fs.access(lease.homePath)).rejects.toThrow();
+      expect(createHash("sha256").update(await fs.readFile(authPath)).digest("hex")).toBe(sourceBefore);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("seedManagedCodexHome", () => {

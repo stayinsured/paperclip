@@ -7,6 +7,11 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
+import {
+  cleanupCodexCredentialLeaseHome,
+  prepareCodexCredentialLease,
+  type CodexCredentialLease,
+} from "@paperclipai/adapter-codex-local/server";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
@@ -22,6 +27,7 @@ import {
 } from "@paperclipai/shared";
 import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { asNumber, asString, parseObject, renderTemplate } from "../adapters/utils.js";
+import { loadConfig } from "../config.js";
 import { resolveHomeAwarePath } from "../home-paths.js";
 import {
   createLocalServiceKey,
@@ -172,6 +178,7 @@ interface RuntimeServiceRecord extends RuntimeServiceRef {
   serviceKey: string;
   profileKind: string;
   processGroupId: number | null;
+  credentialLease: CodexCredentialLease | null;
 }
 
 type LocalRuntimeServiceStart = {
@@ -204,11 +211,24 @@ type ProcessOutputAccumulator = {
 export async function resetRuntimeServicesForTests() {
   for (const record of runtimeServicesById.values()) {
     clearIdleTimer(record);
+    await record.credentialLease?.cleanup().catch(() => undefined);
   }
   runtimeServicesById.clear();
   runtimeServicesByReuseKey.clear();
   runtimeServiceLeasesByRun.clear();
   runtimeProvisionByWorkspace.clear();
+}
+
+function resolveRuntimeServiceCredentialLeaseProvider(service: Record<string, unknown>): "codex" | null {
+  const configured = parseObject(service.credentialLease);
+  return configured.provider === "codex" && configured.enabled !== false ? "codex" : null;
+}
+
+export function runtimeCredentialLeaseDeploymentAllowed(input: {
+  deploymentMode: "local_trusted" | "authenticated";
+  deploymentExposure: "private" | "public";
+}): boolean {
+  return input.deploymentMode === "local_trusted" || input.deploymentExposure === "private";
 }
 
 function stableStringify(value: unknown): string {
@@ -3723,6 +3743,7 @@ function resolveRuntimeServiceReuseIdentity(input: {
   const serviceCwdTemplate = asString(input.service.cwd, ".");
   const portConfig = parseObject(input.service.port);
   const envConfig = parseObject(input.service.env);
+  const credentialLeaseProvider = resolveRuntimeServiceCredentialLeaseProvider(input.service);
   const explicitPort = asNumber(portConfig.value, asNumber(input.service.port, 0));
   const identityPort = explicitPort > 0 ? explicitPort : null;
   const templateData = buildTemplateData({
@@ -3737,7 +3758,11 @@ function resolveRuntimeServiceReuseIdentity(input: {
     envConfig,
     templateData,
   });
-  const envFingerprint = createHash("sha256").update(stableStringify(renderedEnv)).digest("hex");
+  const identityEnv = {
+    ...renderedEnv,
+    ...(credentialLeaseProvider ? { __paperclipCredentialLease: credentialLeaseProvider } : {}),
+  };
+  const envFingerprint = createHash("sha256").update(stableStringify(identityEnv)).digest("hex");
   const reuseKey =
     lifecycle === "shared"
       ? createHash("sha256")
@@ -3749,7 +3774,7 @@ function resolveRuntimeServiceReuseIdentity(input: {
               command,
               cwd: serviceCwd,
               port: identityPort,
-              env: renderedEnv,
+              env: identityEnv,
             }),
           )
           .digest("hex")
@@ -4310,6 +4335,7 @@ function createProvisioningRuntimeServiceRecord(
     serviceKey: `runtime-provision:${runtimeProvisionWorkspaceKey(input)}:${id}`,
     profileKind: "workspace-runtime",
     processGroupId: null,
+    credentialLease: null,
   };
 }
 
@@ -4402,7 +4428,8 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       reuseKey: input.reuseKey,
     },
   });
-  const adoptedRecord = await findAdoptableLocalService({
+  const credentialLeaseProvider = resolveRuntimeServiceCredentialLeaseProvider(input.service);
+  let adoptedRecord = await findAdoptableLocalService({
     serviceKey,
     profileKind: "workspace-runtime",
     serviceName,
@@ -4412,6 +4439,11 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     port: port ?? identityPort,
     url,
   });
+  if (adoptedRecord && credentialLeaseProvider) {
+    await terminateLocalService(adoptedRecord);
+    await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
+    adoptedRecord = null;
+  }
   if (adoptedRecord) {
     const adoptedUrl = adoptedRecord.url ?? url;
     if (!(await isRuntimeServiceUrlHealthy(adoptedUrl, { serviceName, command }))) {
@@ -4454,6 +4486,7 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
           serviceKey,
           profileKind: "workspace-runtime",
           processGroupId: adoptedRecord.processGroupId ?? null,
+          credentialLease: null,
         },
         readiness: Promise.resolve(),
       };
@@ -4498,13 +4531,48 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     }
   }
 
+  let credentialLease: CodexCredentialLease | null = null;
+  if (credentialLeaseProvider) {
+    if (!input.executionWorkspaceId) {
+      throw new Error(`Runtime service "${serviceName}" requested a Codex credential lease outside an execution workspace`);
+    }
+    const runtimeConfig = loadConfig();
+    if (!runtimeCredentialLeaseDeploymentAllowed(runtimeConfig)) {
+      throw new Error(`Runtime service "${serviceName}" cannot lease Codex credentials in ${runtimeConfig.deploymentMode}/${runtimeConfig.deploymentExposure} mode`);
+    }
+    credentialLease = await prepareCodexCredentialLease({
+      env: process.env,
+      companyId: input.agent.companyId,
+      configuredCodexHome: asString(input.adapterEnv.CODEX_HOME, "").trim() || null,
+      configuredApiKey: asString(input.adapterEnv.OPENAI_API_KEY, "").trim() || null,
+    });
+    env.CODEX_HOME = credentialLease.homePath;
+    if (input.onLog) {
+      try {
+        await input.onLog(
+          "stdout",
+          `[service:${serviceName}] prepared Codex credential lease ${credentialLease.id} (${credentialLease.credentialFingerprint})\n`,
+        );
+      } catch (error) {
+        await credentialLease.cleanup().catch(() => undefined);
+        throw error;
+      }
+    }
+  }
+
   const shell = resolveShell();
-  const child = spawn(shell, ["-lc", command], {
-    cwd: serviceCwd,
-    env,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  let child: ChildProcess;
+  try {
+    child = spawn(shell, ["-lc", command], {
+      cwd: serviceCwd,
+      env,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    await credentialLease?.cleanup().catch(() => undefined);
+    throw error;
+  }
   const spawnErrorPromise = new Promise<never>((_, reject) => {
     child.once("error", (err) => {
       reject(err);
@@ -4559,35 +4627,46 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     serviceKey,
     profileKind: "workspace-runtime",
     processGroupId: child.pid ?? null,
+    credentialLease,
   };
 
   if (child.pid) {
-    await writeLocalServiceRegistryRecord({
-      version: 1,
-      serviceKey,
-      profileKind: "workspace-runtime",
-      serviceName,
-      command,
-      cwd: serviceCwd,
-      envFingerprint: serviceIdentityFingerprint,
-      port,
-      url,
-      pid: child.pid,
-      processGroupId: child.pid,
-      provider: "local_process",
-      runtimeServiceId: record.id,
-      reuseKey: input.reuseKey,
-      startedAt: record.startedAt,
-      lastSeenAt: record.lastUsedAt,
-      metadata: {
-        projectId: record.projectId,
-        projectWorkspaceId: record.projectWorkspaceId,
-        executionWorkspaceId: record.executionWorkspaceId,
-        issueId: record.issueId,
-        scopeType: record.scopeType,
-        scopeId: record.scopeId,
-      },
-    });
+    try {
+      await writeLocalServiceRegistryRecord({
+        version: 1,
+        serviceKey,
+        profileKind: "workspace-runtime",
+        serviceName,
+        command,
+        cwd: serviceCwd,
+        envFingerprint: serviceIdentityFingerprint,
+        port,
+        url,
+        pid: child.pid,
+        processGroupId: child.pid,
+        provider: "local_process",
+        runtimeServiceId: record.id,
+        reuseKey: input.reuseKey,
+        startedAt: record.startedAt,
+        lastSeenAt: record.lastUsedAt,
+        metadata: {
+          projectId: record.projectId,
+          projectWorkspaceId: record.projectWorkspaceId,
+          executionWorkspaceId: record.executionWorkspaceId,
+          issueId: record.issueId,
+          scopeType: record.scopeType,
+          scopeId: record.scopeId,
+          credentialLeaseId: record.credentialLease?.id ?? null,
+          credentialLeaseHomePath: record.credentialLease?.homePath ?? null,
+          credentialFingerprint: record.credentialLease?.credentialFingerprint ?? null,
+        },
+      });
+    } catch (error) {
+      terminateChildProcess(child);
+      await record.credentialLease?.cleanup().catch(() => undefined);
+      record.credentialLease = null;
+      throw error;
+    }
   }
 
   const readinessPromise = Promise.race([
@@ -4609,6 +4688,8 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     record.lastUsedAt = new Date().toISOString();
     record.stoppedAt = new Date().toISOString();
     await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
+    await record.credentialLease?.cleanup().catch(() => undefined);
+    record.credentialLease = null;
     throw new Error(
       `Failed to start runtime service "${serviceName}": ${err instanceof Error ? err.message : String(err)}${stderrExcerpt ? ` | stderr: ${stderrExcerpt.trim()}` : ""}`,
     );
@@ -4747,7 +4828,9 @@ async function stopRuntimeService(serviceId: string) {
       });
     }
   }
-  await removeLocalServiceRegistryRecord(record.serviceKey);
+  await removeLocalServiceRegistryRecord(record.serviceKey).catch(() => undefined);
+  await record.credentialLease?.cleanup().catch(() => undefined);
+  record.credentialLease = null;
   await persistRuntimeServiceRecord(record.db, record);
 }
 
@@ -4793,7 +4876,11 @@ function registerRuntimeService(db: Db | undefined, record: RuntimeServiceRecord
       runtimeServicesByReuseKey.delete(current.reuseKey);
     }
     void removeLocalServiceRegistryRecord(current.serviceKey);
-    void persistRuntimeServiceRecord(db, current);
+    const credentialCleanup = current.credentialLease?.cleanup() ?? Promise.resolve();
+    current.credentialLease = null;
+    void credentialCleanup.catch(() => undefined).finally(() => {
+      void persistRuntimeServiceRecord(db, current);
+    });
   });
 }
 
@@ -5425,6 +5512,19 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
       runtimeServiceId: row.id,
       profileKind: "workspace-runtime",
     });
+    const staleCredentialLeaseHome = typeof adoptedRecord?.metadata?.credentialLeaseHomePath === "string"
+      ? adoptedRecord.metadata.credentialLeaseHomePath
+      : null;
+    if (adoptedRecord && staleCredentialLeaseHome) {
+      await terminateLocalService(adoptedRecord);
+      await cleanupCodexCredentialLeaseHome({
+        env: process.env,
+        companyId: row.companyId,
+        homePath: staleCredentialLeaseHome,
+      }).catch(() => false);
+      await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);
+      adoptedRecord = null;
+    }
     if (
       adoptedRecord
       && (
@@ -5503,6 +5603,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
           serviceKey: adoptedRecord.serviceKey,
           profileKind: "workspace-runtime",
           processGroupId: adoptedRecord.processGroupId ?? null,
+          credentialLease: null,
         };
         registerRuntimeService(db, record);
         await touchLocalServiceRegistryRecord(adoptedRecord.serviceKey, {
