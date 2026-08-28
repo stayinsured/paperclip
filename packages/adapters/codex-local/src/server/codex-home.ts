@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
@@ -676,7 +677,7 @@ export async function prepareOutputOnlyCodexHome(
   try {
     await fs.mkdir(outputOnlyHomeParent, { recursive: true });
     outputOnlyHome = await fs.mkdtemp(
-      path.join(outputOnlyHomeParent, ".codex-output-only-"),
+      path.join(outputOnlyHomeParent, ".codex-credential-lease-"),
     );
     await fs.chmod(outputOnlyHome, 0o700);
 
@@ -722,6 +723,69 @@ export async function prepareOutputOnlyCodexHome(
       },
     );
   }
+}
+
+export interface CodexCredentialLease {
+  id: string;
+  homePath: string;
+  credentialFingerprint: string;
+  cleanup(): Promise<void>;
+}
+
+export interface PrepareCodexCredentialLeaseInput {
+  env: NodeJS.ProcessEnv;
+  companyId: string;
+  configuredCodexHome: string | null;
+  configuredApiKey: string | null;
+}
+
+/**
+ * Materializes a private, credential-only Codex home whose lifetime is owned by
+ * the returned in-memory handle. No config, skills, sessions, MCP state, or
+ * other shared Codex state is copied. The fingerprint is a one-way audit value;
+ * callers must never persist or log credential bytes.
+ */
+export async function prepareCodexCredentialLease(
+  input: PrepareCodexCredentialLeaseInput,
+): Promise<CodexCredentialLease> {
+  const homePath = await prepareOutputOnlyCodexHome({
+    ...input,
+    onLog: async () => {},
+  });
+  let cleaned = false;
+  try {
+    const authPayload = await fs.readFile(path.join(homePath, "auth.json"));
+    const credentialFingerprint = createHash("sha256").update(authPayload).digest("hex");
+    return {
+      id: randomUUID(),
+      homePath,
+      credentialFingerprint,
+      cleanup: async () => {
+        if (cleaned) return;
+        cleaned = true;
+        await fs.rm(homePath, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    await fs.rm(homePath, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Reclaims a lease recovered from non-secret runtime registry metadata. The
+ * path must be a generated lease directory within the expected company tree.
+ */
+export async function cleanupCodexCredentialLeaseHome(input: {
+  env: NodeJS.ProcessEnv;
+  companyId: string;
+  homePath: string;
+}): Promise<boolean> {
+  const resolved = path.resolve(input.homePath);
+  if (!path.basename(resolved).startsWith(".codex-credential-lease-")) return false;
+  if (!isManagedCodexHomePath(input.env, input.companyId, resolved)) return false;
+  await fs.rm(resolved, { recursive: true, force: true });
+  return true;
 }
 
 export async function prepareManagedCodexHome(
