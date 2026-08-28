@@ -56,6 +56,14 @@ import {
 } from "@paperclipai/shared";
 import { z } from "zod";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import {
+  evaluateSdlcActivationCandidates,
+  logSdlcActivity,
+  parseSdlcGateIdempotencyKey,
+  recordSdlcActivations,
+  recordSdlcGateDecision,
+  recordSdlcGateRequest,
+} from "./sdlc-lifecycle.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
@@ -1105,6 +1113,104 @@ export function issueThreadInteractionService(db: Db) {
     return current;
   }
 
+  async function applySdlcGateResolutionEffects(
+    dbOrTx: Db,
+    issue: { id: string; companyId: string },
+    interaction: IssueThreadInteraction,
+    actor: InteractionActor,
+    verdict: "accepted" | "rejected",
+    reason?: string | null,
+  ): Promise<{
+    continuationIssue: IssueWakeTarget | null;
+    activatedIssues: IssueWakeTarget[];
+  } | null> {
+    const binding = parseSdlcGateIdempotencyKey(interaction.idempotencyKey);
+    if (!binding || binding.issueId !== issue.id) return null;
+    const sdlcActor = {
+      agentId: actor.agentId ?? null,
+      userId: actor.userId ?? null,
+      runId: actor.runId ?? null,
+    };
+    const decision = await recordSdlcGateDecision(dbOrTx, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      binding,
+      verdict,
+      confirmationToken: interaction.id,
+      reason,
+      actor: sdlcActor,
+    });
+    if (!decision) return null;
+
+    const activatedIssues: IssueWakeTarget[] = [];
+    if (verdict === "accepted" && binding.gate === "gate2") {
+      const { candidates } = await evaluateSdlcActivationCandidates(dbOrTx, issue.id);
+      for (const candidate of candidates) {
+        const updated = await issueService(db).update(candidate.child.id, {
+          status: "todo",
+          assigneeAgentId: candidate.child.assigneeAgentId,
+          assigneeUserId: null,
+          actorAgentId: actor.agentId ?? null,
+          actorUserId: actor.userId ?? null,
+        }, dbOrTx);
+        if (!updated) throw notFound("SDLC activation child not found");
+        activatedIssues.push({
+          id: updated.id,
+          assigneeAgentId: updated.assigneeAgentId ?? null,
+          assigneeUserId: updated.assigneeUserId ?? null,
+          status: updated.status,
+        });
+        await recordSdlcActivations(dbOrTx, issue.id, issue.companyId, [candidate], sdlcActor);
+        await logSdlcActivity(dbOrTx, {
+          companyId: issue.companyId,
+          issueId: candidate.child.id,
+          action: "issue.lifecycle_task_activated",
+          details: {
+            rootIssueId: issue.id,
+            childIssueId: candidate.child.id,
+            agentId: candidate.child.assigneeAgentId,
+            order: candidate.order,
+          },
+          actor: sdlcActor,
+        });
+      }
+    }
+
+    const shouldResumeRoot = binding.gate === "gate1" || verdict === "accepted";
+    let continuationIssue: IssueWakeTarget | null = null;
+    if (shouldResumeRoot) {
+      const updatedRoot = await issueService(db).update(issue.id, {
+        status: "in_progress",
+        actorAgentId: actor.agentId ?? null,
+        actorUserId: actor.userId ?? null,
+      }, dbOrTx);
+      if (updatedRoot) {
+        continuationIssue = {
+          id: updatedRoot.id,
+          assigneeAgentId: updatedRoot.assigneeAgentId ?? null,
+          assigneeUserId: updatedRoot.assigneeUserId ?? null,
+          status: updatedRoot.status,
+        };
+      }
+    }
+
+    await logSdlcActivity(dbOrTx, {
+      companyId: issue.companyId,
+      issueId: issue.id,
+      action: "issue.lifecycle_gate_decided",
+      details: {
+        gate: binding.gate,
+        verdict,
+        revisionId: binding.revisionId,
+        graphRev: binding.graphRev,
+        interactionId: interaction.id,
+        activatedIssueIds: activatedIssues.map((activated) => activated.id),
+      },
+      actor: sdlcActor,
+    });
+    return { continuationIssue, activatedIssues };
+  }
+
   async function acceptRequestConfirmation(args: {
     issue: { id: string; companyId: string };
     current: IssueThreadInteractionRow;
@@ -1113,13 +1219,14 @@ export function issueThreadInteractionService(db: Db) {
   }): Promise<{
     interaction: IssueThreadInteraction;
     continuationIssue: IssueWakeTarget | null;
+    activatedIssues: IssueWakeTarget[];
   }> {
     const expired = await expireStaleRequestConfirmationTarget(db, {
       row: args.current,
       actor: args.actor,
     });
     if (expired) {
-      return { interaction: expired, continuationIssue: null };
+      return { interaction: expired, continuationIssue: null, activatedIssues: [] };
     }
 
     const interaction = hydrateInteraction(args.current);
@@ -1174,6 +1281,22 @@ export function issueThreadInteractionService(db: Db) {
         throw notFound("Issue not found");
       }
 
+      const resolvedInteraction = hydrateInteraction(updated);
+      const gateEffects = await applySdlcGateResolutionEffects(
+        tx as unknown as Db,
+        args.issue,
+        resolvedInteraction,
+        args.actor,
+        "accepted",
+      );
+      if (gateEffects) {
+        return {
+          interaction: resolvedInteraction,
+          continuationIssue: gateEffects.continuationIssue,
+          activatedIssues: gateEffects.activatedIssues,
+        };
+      }
+
       let continuationIssue: IssueWakeTarget | null = null;
       if (shouldReturnAcceptedConfirmationToCreatorAgent({
         issue: issueContext,
@@ -1202,8 +1325,9 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       return {
-        interaction: hydrateInteraction(updated),
+        interaction: resolvedInteraction,
         continuationIssue,
+        activatedIssues: [],
       };
     });
     await emitInteractionResolvedTelemetry(db, result.interaction);
@@ -1231,32 +1355,43 @@ export function issueThreadInteractionService(db: Db) {
     }
 
     const now = new Date();
-    const [updated] = await db
-      .update(issueThreadInteractions)
-      .set({
-        status: "rejected",
-        result: {
-          version: 1,
-          outcome: "rejected",
-          reason: reason || null,
-        },
-        resolvedByAgentId: args.actor.agentId ?? null,
-        resolvedByRunId: args.actor.runId ?? null,
-        resolvedByUserId: args.actor.userId ?? null,
-        resolvedAt: now,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(issueThreadInteractions.id, args.current.id),
-        eq(issueThreadInteractions.status, "pending"),
-      ))
-      .returning();
+    const rejected = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(issueThreadInteractions)
+        .set({
+          status: "rejected",
+          result: {
+            version: 1,
+            outcome: "rejected",
+            reason: reason || null,
+          },
+          resolvedByAgentId: args.actor.agentId ?? null,
+          resolvedByRunId: args.actor.runId ?? null,
+          resolvedByUserId: args.actor.userId ?? null,
+          resolvedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(issueThreadInteractions.id, args.current.id),
+          eq(issueThreadInteractions.status, "pending"),
+        ))
+        .returning();
 
-    if (!updated) {
-      throw conflict("Interaction has already been resolved");
-    }
-    await touchIssue(db, args.issue.id);
-    const rejected = hydrateInteraction(updated);
+      if (!updated) {
+        throw conflict("Interaction has already been resolved");
+      }
+      const resolved = hydrateInteraction(updated);
+      await applySdlcGateResolutionEffects(
+        tx as unknown as Db,
+        args.issue,
+        resolved,
+        args.actor,
+        "rejected",
+        reason || null,
+      );
+      await touchIssue(tx, args.issue.id);
+      return resolved;
+    });
     await emitInteractionResolvedTelemetry(db, rejected);
     return rejected;
   }
@@ -1547,6 +1682,25 @@ export function issueThreadInteractionService(db: Db) {
             })
             .returning();
 
+          if (data.kind === "request_confirmation") {
+            const binding = parseSdlcGateIdempotencyKey(row.idempotencyKey);
+            if (binding) {
+              await recordSdlcGateRequest(tx as unknown as Db, {
+                issue: {
+                  id: issue.id,
+                  companyId: issue.companyId,
+                },
+                binding,
+                interactionId: row.id,
+                actor: {
+                  agentId: actor.agentId ?? null,
+                  userId: actor.userId ?? null,
+                  runId: actor.runId ?? null,
+                },
+              });
+            }
+          }
+
           if (data.kind !== "request_confirmation" || !actor.agentId) {
             return { row, supersededRows: [] };
           }
@@ -1634,7 +1788,7 @@ export function issueThreadInteractionService(db: Db) {
           return {
             interaction: accepted.interaction,
             continuationIssue: accepted.continuationIssue,
-            createdIssues: [],
+            createdIssues: accepted.activatedIssues,
           };
         }
         case "request_checkbox_confirmation": {
@@ -1648,7 +1802,7 @@ export function issueThreadInteractionService(db: Db) {
           return {
             interaction: accepted.interaction,
             continuationIssue: accepted.continuationIssue,
-            createdIssues: [],
+            createdIssues: accepted.activatedIssues,
           };
         }
         default:

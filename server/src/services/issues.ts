@@ -66,6 +66,10 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import {
+  assertSdlcIssueStartAllowed,
+  assertSdlcTransitionAllowed,
+} from "./sdlc-lifecycle.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
 import {
@@ -7518,6 +7522,22 @@ export function issueService(db: Db) {
 
       if (issueData.status) {
         assertTransition(existing.status, issueData.status);
+        // SDLC lifecycle gates (STA-2781): inert for issue trees whose
+        // root carries no sdlc-evidence classification record.
+        await assertSdlcTransitionAllowed(
+          dbOrTx,
+          {
+            id: existing.id,
+            companyId: existing.companyId,
+            parentId: existing.parentId,
+            description: existing.description,
+            identifier: existing.identifier,
+            status: existing.status,
+          },
+          issueData.status,
+          db,
+          { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+        );
       }
 
       const patch: Partial<typeof issues.$inferInsert> = {
@@ -8020,6 +8040,21 @@ export function issueService(db: Db) {
         issueId: id,
         agentId,
       });
+
+      const sdlcCheckoutGovernanceRow = await db
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          parentId: issues.parentId,
+        })
+        .from(issues)
+        .where(eq(issues.id, id))
+        .limit(1);
+      if (sdlcCheckoutGovernanceRow[0]) {
+        // SDLC lifecycle gates (STA-2781): checkout is the real work start
+        // for implementation children, so it enforces Gate 2 as well.
+        await assertSdlcIssueStartAllowed(db, sdlcCheckoutGovernanceRow[0], db);
+      }
 
       const sameRunAssigneeCondition = checkoutRunId
         ? and(

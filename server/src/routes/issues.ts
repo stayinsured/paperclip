@@ -139,6 +139,10 @@ import {
   resolveWorkProductHandoff,
   workProductService,
 } from "../services/index.js";
+import {
+  buildSdlcTaskIdempotencyKey,
+  recordSdlcProvisioningComplete,
+} from "../services/sdlc-lifecycle.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import {
   decideIssueReviewPathRecovery,
@@ -8143,8 +8147,35 @@ export function issueRoutes(
     if (!sourceIssue) return;
     if (!(await assertAgentIssueMutationAllowed(req, res, sourceIssue))) return;
 
+    const sdlcProvisioning = req.body.sdlc as undefined | {
+      graphRev: number;
+      tasks: Array<{
+        taskKey: string;
+        plannedAssigneeAgentId: string;
+        blockedByTaskKeys: string[];
+      }>;
+    };
+    const normalizedSdlcTasks = [] as NonNullable<typeof sdlcProvisioning>["tasks"];
+    if (sdlcProvisioning) {
+      for (const task of sdlcProvisioning.tasks) {
+        const plannedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
+          sourceIssue.companyId,
+          task.plannedAssigneeAgentId,
+          { actorType: req.actor.type },
+        );
+        if (!plannedAssigneeAgentId) throw unprocessable("SDLC planned owner must resolve to an agent");
+        await assertCanAssignTasks(req, sourceIssue.companyId, {
+          projectId: sourceIssue.projectId ?? null,
+          parentIssueId: sourceIssue.id,
+          assigneeAgentId: plannedAssigneeAgentId,
+          assigneeUserId: null,
+        });
+        normalizedSdlcTasks.push({ ...task, plannedAssigneeAgentId });
+      }
+    }
+
     const requestedChildren = [];
-    for (const child of req.body.children as Array<typeof req.body.children[number]>) {
+    for (const [childIndex, child] of (req.body.children as Array<typeof req.body.children[number]>).entries()) {
       const sanitizedChild = await sanitizeIssueCreateAttribution(db, req, res, sourceIssue.companyId, child, {
         surface: "issues.accepted_plan_decomposition",
         entityId: sourceIssue.id,
@@ -8158,6 +8189,9 @@ export function issueRoutes(
       const childBody = {
         ...sanitizedChild,
         ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
+        ...(sdlcProvisioning
+          ? { idempotencyKey: buildSdlcTaskIdempotencyKey(sourceIssue.id, normalizedSdlcTasks[childIndex]!.taskKey) }
+          : {}),
       };
       requestedChildren.push(childBody);
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
@@ -8229,6 +8263,43 @@ export function issueRoutes(
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       actorRunId: actor.runId ?? null,
     });
+
+    let sdlcResult: { graphRev: number; taskKeys: string[] } | null = null;
+    if (sdlcProvisioning) {
+      const childIssueIdByTaskKey = new Map(normalizedSdlcTasks.map((task, index) => [
+        task.taskKey,
+        result.childIssueIds[index]!,
+      ]));
+      for (const task of normalizedSdlcTasks) {
+        const childIssueId = childIssueIdByTaskKey.get(task.taskKey)!;
+        await svc.update(childIssueId, {
+          blockedByIssueIds: task.blockedByTaskKeys.map((taskKey) => childIssueIdByTaskKey.get(taskKey)!),
+          actorAgentId: actor.agentId,
+          actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        });
+      }
+      await recordSdlcProvisioningComplete(db, {
+        companyId: sourceIssue.companyId,
+        rootIssueId: sourceIssue.id,
+        revisionId: req.body.acceptedPlanRevisionId,
+        graphRev: sdlcProvisioning.graphRev,
+        tasks: normalizedSdlcTasks.map((task) => ({
+          taskKey: task.taskKey,
+          childIssueId: childIssueIdByTaskKey.get(task.taskKey)!,
+          plannedAssigneeAgentId: task.plannedAssigneeAgentId,
+          blockedByTaskKeys: task.blockedByTaskKeys,
+        })),
+        actor: {
+          agentId: actor.agentId,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+          runId: actor.runId,
+        },
+      });
+      sdlcResult = {
+        graphRev: sdlcProvisioning.graphRev,
+        taskKeys: normalizedSdlcTasks.map((task) => task.taskKey),
+      };
+    }
 
     await logActivity(db, {
       companyId: sourceIssue.companyId,
@@ -8335,6 +8406,7 @@ export function issueRoutes(
       decomposition: result.decomposition,
       childIssueIds: result.childIssueIds,
       newlyCreatedChildIssueIds: result.newlyCreatedIssues.map((issue) => issue.id),
+      ...(sdlcResult ? { sdlc: sdlcResult } : {}),
     });
   });
 
