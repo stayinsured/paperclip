@@ -164,6 +164,7 @@ class MemoryClickUp implements ClickUpApiPort {
   calls: string[] = [];
   ambiguousCreate = false;
   commitAmbiguousCreate = false;
+  dueDateReadbackOffsetMs = 0;
 
   async findTasksByCorrelation(input: { listId: string; correlationValue: string }): Promise<ClickUpRemoteTask[]> {
     this.calls.push(`find:${input.correlationValue}`);
@@ -190,7 +191,7 @@ class MemoryClickUp implements ClickUpApiPort {
       statusId: input.statusId,
       assigneeIds: [input.nativeAssigneeId],
       timeEstimateMs: input.timeEstimateMs,
-      dueDateMs: input.dueDateMs,
+      dueDateMs: input.dueDateMs == null ? null : input.dueDateMs + this.dueDateReadbackOffsetMs,
       customFields: { ...input.customFields },
       parentTaskId: input.parentTaskId,
       dependencyTaskIds: [],
@@ -518,6 +519,34 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     expect(repository.links).toHaveLength(1);
     expect(api.calls.filter((call) => call.startsWith("create:"))).toHaveLength(1);
     expect(api.calls.filter((call) => call === "get:task-1").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("normalizes the approved list's date-only due-date readback before create verification", async () => {
+    const api = new MemoryClickUp();
+    const repository = new MemoryLinks();
+    api.dueDateReadbackOffsetMs = 2 * 60 * 60 * 1_000;
+    const expected = projection({ dueDate: "2026-09-04" });
+    const input = {
+      projection: expected, config, authorization: authorization(), api, repository,
+      now: proofValidNow(),
+    };
+
+    const first = await projectIssueToClickUp(input);
+    const replay = await projectIssueToClickUp(input);
+
+    expect(expected.dueDateMs).toBe(1788480000000);
+    expect(api.tasks.get("task-1")?.dueDateMs).toBe(1788487200000);
+    expect(first).toMatchObject({ action: "created", outcome: "succeeded", errorClass: null });
+    expect(replay).toMatchObject({ action: "already_current", outcome: "succeeded", errorClass: null });
+    api.tasks.get("task-1")!.dueDateMs = 1788487200000 + 24 * 60 * 60 * 1_000;
+    const drift = await projectIssueToClickUp(input);
+
+    expect(drift).toMatchObject({ action: "conflict", outcome: "conflict" });
+    expect(repository.conflicts.map((conflict) => conflict.field)).toContain("dueDate");
+
+    expect(repository.links).toHaveLength(1);
+    expect(api.calls.filter((call) => call.startsWith("create:"))).toHaveLength(1);
+    expect(api.calls.filter((call) => call.startsWith("update:"))).toHaveLength(0);
   });
 
   it("reconciles an ambiguous create by stable correlation before retry", async () => {

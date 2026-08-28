@@ -1,4 +1,8 @@
-import { assertClickUpDestinationConfigured, ClickUpConfigurationError } from "./config.js";
+import {
+  APPROVED_CLICKUP_LIST_TIME_ZONE,
+  assertClickUpDestinationConfigured,
+  ClickUpConfigurationError,
+} from "./config.js";
 import { clickUpCorrelationValue, clickUpProjectionVersion } from "./identity.js";
 import type {
   ApprovedEstimateSource,
@@ -142,6 +146,23 @@ function dueDateMilliseconds(value: string | null): number | null {
   const milliseconds = Date.parse(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(milliseconds)) throw new ClickUpConfigurationError("clickup_due_date_invalid");
   return milliseconds;
+}
+
+const approvedClickUpDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: APPROVED_CLICKUP_LIST_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+function normalizeClickUpDateOnlyMilliseconds(value: number | null): number | null {
+  if (value == null) return null;
+  const parts = Object.fromEntries(
+    approvedClickUpDateFormatter.formatToParts(new Date(value))
+      .filter((part) => part.type === "year" || part.type === "month" || part.type === "day")
+      .map((part) => [part.type, part.value]),
+  );
+  return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day));
 }
 
 function conservativeEstimateHours(source: ApprovedEstimateSource | null): number | null {
@@ -303,7 +324,7 @@ export function ownedSnapshotFromRemote(
     acceptanceSummary: parsed.acceptanceSummary,
     estimate: estimateHours,
     nativeAssignee,
-    dueDate: task.dueDateMs,
+    dueDate: normalizeClickUpDateOnlyMilliseconds(task.dueDateMs),
     sourceStatus: parsed.sourceStatus,
     forecastSource: parsed.forecastSource,
     forecastRevision: parsed.forecastRevision,
