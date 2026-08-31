@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import { reconcileClickUpRelationships } from "../src/modules/clickup/relationships.js";
 import { ClickUpApiClient } from "../src/modules/clickup/provider.js";
 import type { ClickUpDestinationConfig, ClickUpShadowProjection } from "../src/modules/clickup/types.js";
 
@@ -77,10 +78,10 @@ const projection: ClickUpShadowProjection = {
 
 type CapturedCall = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
-function providerHarness() {
+function providerHarness(initialTask: Record<string, unknown> | null = null) {
   const calls: CapturedCall[] = [];
   let revision = 0;
-  let task: Record<string, unknown> | null = null;
+  let task: Record<string, unknown> | null = initialTask;
   const response = (body: unknown) => new Response(JSON.stringify(body), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -92,7 +93,7 @@ function providerHarness() {
       const headers = { authorization: new Headers(init.headers).get("authorization") ?? "" };
       const body = typeof init.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
       calls.push({ url: rawUrl, method, headers, body });
-      const taskPath = "/api/v2/task/task-1";
+      const taskPath = `/api/v2/task/${String(task?.id ?? "task-1")}`;
       if (method === "POST" && url.pathname === `/api/v2/list/${config.listId}/task`) {
         revision += 1;
         task = {
@@ -127,7 +128,7 @@ function providerHarness() {
         return response({});
       }
       if (url.pathname === `${taskPath}/dependency` && method === "POST") {
-        task = { ...task!, dependencies: [{ depends_on: body!.depends_on }] };
+        task = { ...task!, dependencies: [{ task_id: task!.id, depends_on: body!.depends_on }] };
         return response({});
       }
       if (url.pathname === `${taskPath}/dependency` && method === "DELETE") {
@@ -138,6 +139,25 @@ function providerHarness() {
     },
   } as unknown as PluginContext["http"];
   return { calls, http };
+}
+
+function remoteTask(taskId: string, dependencies: unknown = []): Record<string, unknown> {
+  return {
+    id: taskId,
+    name: `Remote ${taskId}`,
+    description: projection.description,
+    assignees: [],
+    due_date: null,
+    due_date_time: false,
+    status: { id: projection.statusId, status: projection.statusName },
+    list: { id: config.listId },
+    url: `https://app.clickup.com/t/${taskId}`,
+    date_updated: String(Date.parse("2026-08-31T10:00:00.000Z")),
+    time_estimate: null,
+    custom_fields: [],
+    parent: null,
+    dependencies,
+  };
 }
 
 describe("ClickUp list-scoped provider", () => {
@@ -170,6 +190,92 @@ describe("ClickUp list-scoped provider", () => {
     expect(created.dueDateTime).toBe(false);
     expect(harness.calls.filter((call) => call.url.includes("/dependency"))).toHaveLength(2);
     expect(harness.calls.every((call) => call.headers.authorization === "synthetic-token")).toBe(true);
+  });
+
+  it("counts only the current task side of ClickUp bilateral dependency rows as outgoing", async () => {
+    const currentTaskId = "task-dependent";
+    const blockerTaskId = "task-blocker";
+    const downstreamTaskId = "task-downstream";
+    const http = {
+      fetch: async () => new Response(JSON.stringify({
+        id: currentTaskId,
+        name: "Dependent task",
+        description: projection.description,
+        assignees: [],
+        due_date: null,
+        due_date_time: false,
+        status: { id: projection.statusId, status: projection.statusName },
+        list: { id: config.listId },
+        date_updated: String(Date.parse("2026-08-31T10:00:00.000Z")),
+        time_estimate: null,
+        custom_fields: [],
+        parent: null,
+        dependencies: [
+          { task_id: currentTaskId, depends_on: blockerTaskId },
+          { task_id: currentTaskId, depends_on: blockerTaskId },
+          { task_id: downstreamTaskId, depends_on: currentTaskId },
+        ],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    } as unknown as PluginContext["http"];
+    const client = new ClickUpApiClient(http, config, "synthetic-token");
+
+    expect(await client.getTask(currentTaskId)).toMatchObject({
+      id: currentTaskId,
+      dependencyTaskIds: [blockerTaskId],
+    });
+  });
+
+  it("excludes the reflected incoming copy when reading the blocker task", async () => {
+    const dependentTaskId = "task-dependent";
+    const blockerTaskId = "task-blocker";
+    const dependency = { task_id: dependentTaskId, depends_on: blockerTaskId };
+    const harness = providerHarness(remoteTask(blockerTaskId, [dependency]));
+    const client = new ClickUpApiClient(harness.http, config, "synthetic-token");
+
+    expect(await client.getTask(blockerTaskId)).toMatchObject({
+      id: blockerTaskId,
+      dependencyTaskIds: [],
+    });
+  });
+
+  it("does not delete an authoritative edge while reconciling its reflected counterpart", async () => {
+    const dependentTaskId = "task-dependent";
+    const blockerTaskId = "task-blocker";
+    const dependency = { task_id: dependentTaskId, depends_on: blockerTaskId };
+    const harness = providerHarness(remoteTask(blockerTaskId, [dependency]));
+    const client = new ClickUpApiClient(harness.http, config, "synthetic-token");
+
+    await expect(reconcileClickUpRelationships({
+      api: client,
+      config,
+      taskId: blockerTaskId,
+      correlationValue: projection.correlationValue,
+      desiredParentTaskId: null,
+      desiredDependencyTaskIds: [],
+      managedDependencyTaskIds: [dependentTaskId, blockerTaskId],
+    })).resolves.toEqual({ action: "already_current", writes: 0 });
+    expect(harness.calls.filter((call) => call.method === "DELETE")).toEqual([]);
+  });
+
+  it("fails closed for malformed or ambiguous dependency rows", async () => {
+    const currentTaskId = "task-current";
+    const invalidDependencyShapes: unknown[] = [
+      [{ depends_on: "task-blocker" }],
+      [{ task_id: currentTaskId, depends_on: currentTaskId }],
+      [{ task_id: "task-a", depends_on: "task-b" }],
+      "not-an-array",
+    ];
+
+    for (const dependencies of invalidDependencyShapes) {
+      const harness = providerHarness(remoteTask(currentTaskId, dependencies));
+      const client = new ClickUpApiClient(harness.http, config, "synthetic-token");
+      await expect(client.getTask(currentTaskId)).rejects.toEqual(
+        expect.objectContaining({ code: "clickup_invalid_task_response" }),
+      );
+    }
   });
 
   it("rejects a create for any other list before an HTTP call", async () => {
