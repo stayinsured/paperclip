@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import type { SdlcWorkflowSummary } from "../lib/sdlc-workflow";
-import { SdlcWorkflowPanelContent } from "./SdlcWorkflowPanel";
+import { SdlcWorkflowError, SdlcWorkflowPanelContent } from "./SdlcWorkflowPanel";
 
 vi.mock("../lib/router", () => ({
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
@@ -109,5 +109,17 @@ describe("SdlcWorkflowPanelContent", () => {
     const link = node.querySelector<HTMLAnchorElement>('a[href="https://example.test/pr/1"]');
     expect(link?.target).toBe("_blank");
     expect(link?.rel).toContain("noreferrer");
+  });
+
+  it("shows a fail-closed repair state when workflow evidence cannot be read", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    flushSync(() => root?.render(<SdlcWorkflowError message="Evidence line 7 is not valid JSON." />));
+
+    expect(container.querySelector('[data-testid="sdlc-workflow-error"]')?.textContent).toContain(
+      "Evidence line 7 is not valid JSON.",
+    );
+    expect(container.textContent).toContain("must be repaired");
   });
 });

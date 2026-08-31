@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { SdlcWorkflowPanelContent } from "@/components/SdlcWorkflowPanel";
+import { SdlcWorkflowError, SdlcWorkflowPanelContent } from "@/components/SdlcWorkflowPanel";
 import type { SdlcWorkflowSummary } from "@/lib/sdlc-workflow";
 
 const boardDecisionSummary: SdlcWorkflowSummary = {
@@ -107,3 +107,7 @@ type Story = StoryObj<typeof meta>;
 
 export const BoardDecisionNeeded: Story = { args: { summary: boardDecisionSummary } };
 export const GateRejected: Story = { args: { summary: rejectedSummary } };
+export const EvidenceUnavailable: Story = {
+  args: { summary: boardDecisionSummary },
+  render: () => <SdlcWorkflowError message="Evidence line 7 is not valid JSON." />,
+};

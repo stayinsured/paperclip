@@ -60,7 +60,7 @@ function Matrix({ title, rows }: { title: string; rows: SdlcMatrixRow[] }) {
   );
 }
 
-function WorkflowError({ message }: { message: string }) {
+export function SdlcWorkflowError({ message }: { message: string }) {
   return (
     <section
       data-testid="sdlc-workflow-error"
@@ -239,7 +239,7 @@ export function SdlcWorkflowPanel({ issue, agentMap }: { issue: Issue; agentMap:
 
   if (rootIssueQuery.error || documentsQuery.error || evidenceQuery.error || interactionsQuery.error || treeIssuesQuery.error) {
     const error = rootIssueQuery.error ?? documentsQuery.error ?? evidenceQuery.error ?? interactionsQuery.error ?? treeIssuesQuery.error;
-    return <WorkflowError message={error instanceof Error ? error.message : "The lifecycle readback failed."} />;
+    return <SdlcWorkflowError message={error instanceof Error ? error.message : "The lifecycle readback failed."} />;
   }
   if (documentsQuery.isLoading || (evidenceSummary && (evidenceQuery.isLoading || interactionsQuery.isLoading || treeIssuesQuery.isLoading))) {
     return <Skeleton className="h-28 w-full rounded-lg" />;
@@ -247,7 +247,7 @@ export function SdlcWorkflowPanel({ issue, agentMap }: { issue: Issue; agentMap:
   if (!rootIssue || !evidenceSummary || !evidenceQuery.data) return null;
 
   const parsed = parseSdlcEvidenceRegistry((evidenceQuery.data as IssueDocument).body);
-  if (parsed.error) return <WorkflowError message={parsed.error} />;
+  if (parsed.error) return <SdlcWorkflowError message={parsed.error} />;
   const hasClassification = parsed.records.some((record) => record.type === "classification" && record.companyId === issue.companyId);
   if (!hasClassification) return null;
 

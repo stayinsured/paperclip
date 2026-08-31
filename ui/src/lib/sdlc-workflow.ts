@@ -250,7 +250,7 @@ function deriveGateSummary(input: {
       gate: input.gate,
       label,
       state: "pending",
-      detail: interaction.payload.prompt,
+      detail: interaction.kind === "request_confirmation" ? interaction.payload.prompt : "Board confirmation is pending.",
       reason: null,
       interactionId: interaction.id,
     };
