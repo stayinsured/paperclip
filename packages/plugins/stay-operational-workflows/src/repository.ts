@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import {
   candidateFromIssueRow,
+  isClickUpActiveConfig,
   isOutlineActiveConfig,
   outcomeIdentity,
   type AuditIdentity,
@@ -13,6 +14,7 @@ import {
   type WorkflowModule,
 } from "./contracts.js";
 import type { OutlineModuleActivation } from "./modules/outline/types.js";
+import type { ClickUpModuleActivation } from "./modules/clickup/types.js";
 
 export interface OperationRecord {
   id: string;
@@ -139,6 +141,7 @@ type ConfigRow = {
   destination_enabled: boolean;
   destination_key: string | null;
   outline_activation: OutlineModuleActivation | null;
+  clickup_activation: ClickUpModuleActivation | null;
   source_version: string;
   policy_version: string;
   max_attempts: number;
@@ -176,6 +179,7 @@ function configFromRow(row: ConfigRow): ModuleConfig {
     destinationEnabled: row.destination_enabled,
     destinationKey: row.destination_key,
     outlineActivation: row.outline_activation ?? null,
+    clickUpActivation: row.clickup_activation ?? null,
     sourceVersion: row.source_version,
     policyVersion: row.policy_version,
     maxAttempts: row.max_attempts,
@@ -230,15 +234,16 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     await this.db.execute(
       `INSERT INTO ${this.table("project_configs")}
        (id, company_id, project_id, module, enabled, read_only, destination_enabled, destination_key,
-        outline_activation, source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
+        outline_activation, clickup_activation, source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
         overlap_seconds, batch_size, created_by_actor_type, created_by_actor_id, created_by_run_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
        ON CONFLICT (company_id, project_id, module) DO UPDATE SET
          enabled = EXCLUDED.enabled,
          read_only = EXCLUDED.read_only,
          destination_enabled = EXCLUDED.destination_enabled,
          destination_key = EXCLUDED.destination_key,
          outline_activation = EXCLUDED.outline_activation,
+         clickup_activation = EXCLUDED.clickup_activation,
          source_version = EXCLUDED.source_version,
          policy_version = EXCLUDED.policy_version,
          max_attempts = EXCLUDED.max_attempts,
@@ -254,6 +259,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         randomUUID(), config.companyId, config.projectId, config.module, config.enabled, config.readOnly,
         config.destinationEnabled, config.destinationKey,
         config.outlineActivation ? JSON.stringify(config.outlineActivation) : null,
+        config.clickUpActivation ? JSON.stringify(config.clickUpActivation) : null,
         config.sourceVersion, config.policyVersion,
         config.maxAttempts, config.baseDelayMs, config.maxDelayMs, config.overlapSeconds, config.batchSize,
         audit.actorType, audit.actorId, audit.runId,
@@ -264,7 +270,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   async listConfigs(companyId: string, enabledOnly = false): Promise<ModuleConfig[]> {
     const rows = await this.db.query<ConfigRow>(
       `SELECT company_id, project_id, module, enabled, read_only, destination_enabled, destination_key,
-              outline_activation, source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
+              outline_activation, clickup_activation, source_version, policy_version, max_attempts, base_delay_ms, max_delay_ms,
               overlap_seconds, batch_size
        FROM ${this.table("project_configs")}
        WHERE company_id = $1 AND ($2::boolean = false OR enabled = true)
@@ -577,7 +583,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     return {
       companyId,
       generatedAt: new Date().toISOString(),
-      mode: configs.some((config) => isOutlineActiveConfig(config)) ? "active" : "shadow",
+      mode: configs.some((config) => isOutlineActiveConfig(config) || isClickUpActiveConfig(config)) ? "active" : "shadow",
       externalWrites: recentRuns.reduce((sum, row) => sum + row.external_write_count, 0),
       modules: configs.map((config) => ({
         projectId: config.projectId,

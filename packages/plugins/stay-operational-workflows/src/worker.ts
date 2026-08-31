@@ -6,6 +6,7 @@ import {
   type PluginJobContext,
 } from "@paperclipai/plugin-sdk";
 import {
+  isClickUpActiveConfig,
   isOutlineActiveConfig,
   parseModuleConfig,
   WorkflowRequestError,
@@ -13,6 +14,7 @@ import {
 } from "./contracts.js";
 import { ShadowReconciler } from "./reconciler.js";
 import { PostgresWorkflowRepository } from "./repository.js";
+import { ClickUpReconciliationService } from "./modules/clickup/runtime.js";
 import { assertOutlineModuleActivationUsable, parseOutlineModuleActivation } from "./modules/outline/activation.js";
 import { PostgresOutlineAssessmentRepository } from "./modules/outline/assessment.js";
 import { createOutlineRuntime } from "./modules/outline/runtime.js";
@@ -41,6 +43,7 @@ const plugin = definePlugin({
       managedToolProfiles: ctx.managedToolProfiles,
     });
     const reconciler = new ShadowReconciler(repository, undefined, outlineRuntime);
+    const clickup = new ClickUpReconciliationService(ctx, repository);
     const sentryRepository = new PostgresSentryWorkflowRepository(ctx.db);
     const sentryControlPlane = new PluginSentryControlPlane(ctx);
     const sentryClient = new SentryApiClient(ctx.http);
@@ -87,6 +90,17 @@ const plugin = definePlugin({
               runId: job.runId,
             });
           }
+          try {
+            const clickupResult = await clickup.reconcileCompany(company.id, systemAudit(job.runId));
+            await ctx.metrics.write("clickup_issues_scanned", clickupResult.scanned, { companyId: company.id });
+            await ctx.metrics.write("clickup_external_writes", clickupResult.externalWrites, { companyId: company.id });
+            await ctx.metrics.write("clickup_conflicts", clickupResult.conflicts, { companyId: company.id });
+          } catch {
+            ctx.logger.error("Company ClickUp reconciliation failed", {
+              companyId: company.id,
+              runId: job.runId,
+            });
+          }
         }
         if (companies.length < limit) break;
         offset += limit;
@@ -124,11 +138,11 @@ const plugin = definePlugin({
     ctx.jobs.register("sentry-poll", pollSentryForAllCompanies);
 
     ctx.events.on("issue.created", async (event) => {
-      await reconcileEventHint(reconciler, event);
+      await reconcileEventHint(reconciler, clickup, event);
     });
 
     ctx.events.on("issue.updated", async (event) => {
-      await reconcileEventHint(reconciler, event);
+      await reconcileEventHint(reconciler, clickup, event);
     });
 
     const reconcileSentryDocument = async (event: PluginEvent): Promise<void> => {
@@ -173,7 +187,7 @@ const plugin = definePlugin({
           );
         }
         await repository.upsertConfig(config, audit);
-        const active = isOutlineActiveConfig(config);
+        const active = isOutlineActiveConfig(config) || isClickUpActiveConfig(config);
         await ctx.activity.log({
           companyId: input.companyId,
           entityType: "project",
@@ -243,6 +257,7 @@ const plugin = definePlugin({
           trigger: "manual",
           audit,
         });
+        const clickupResult = await clickup.reconcileCompany(input.companyId, audit);
         await ctx.activity.log({
           companyId: input.companyId,
           message: "Stay Operational Workflows completed a manual reconciliation",
@@ -254,10 +269,11 @@ const plugin = definePlugin({
             published: result.published,
             duplicates: result.duplicates,
             exceptions: result.exceptions,
-            externalWrites: result.externalWrites,
+            externalWrites: result.externalWrites + clickupResult.externalWrites,
+            clickup: clickupResult,
           },
         });
-        return { body: result };
+        return { body: { ...result, clickup: clickupResult, externalWrites: result.externalWrites + clickupResult.externalWrites } };
       }
       if (input.routeKey === "sentry.reconcile.manual") {
         const result = await sentryWorkflow.reconcileCompany({
@@ -336,7 +352,7 @@ const plugin = definePlugin({
       ok: true,
       warnings: [
         "Outline publishing stays disabled unless an approved activation payload with an accepted exact configuration fingerprint, current writer proofs, and a bound MCP runtime all match; default configurations remain zero-write.",
-        "ClickUp remains structurally locked to shadow mode.",
+        "ClickUp writes require the exact approved workspace/list, accepted configuration fingerprint, current list-scoped read/write proof, secret reference, and all outer switches; otherwise reconciliation fails closed.",
         "Sentry polling and Slack notification remain disabled unless exact scope, least-privilege identities, non-expired proofs, and an immutable board-approved configuration revision all match.",
       ],
     };
@@ -348,7 +364,7 @@ const plugin = definePlugin({
       message: "Operational reconciliation worker is running",
       details: {
         outlineMode: "activation-gated",
-        clickupMode: "shadow",
+        clickupMode: "activation-gated",
         sentryMode: "configuration-gated",
         slackApprovalCapability: false,
         authoritativeSource: "scheduled-reconciliation",
@@ -380,18 +396,26 @@ function auditFromApi(input: PluginApiRequestInput): AuditIdentity {
   };
 }
 
-async function reconcileEventHint(reconciler: ShadowReconciler, event: PluginEvent): Promise<void> {
+async function reconcileEventHint(
+  reconciler: ShadowReconciler,
+  clickup: ClickUpReconciliationService,
+  event: PluginEvent,
+): Promise<void> {
   if (!event.entityId) return;
-  await reconciler.reconcileCompany({
-    companyId: event.companyId,
-    trigger: "event",
-    sourceId: event.entityId,
-    audit: {
-      actorType: event.actorType ?? "system",
-      actorId: event.actorId ?? null,
-      runId: null,
-    },
-  });
+  const audit = {
+    actorType: event.actorType ?? "system",
+    actorId: event.actorId ?? null,
+    runId: null,
+  } as const;
+  await Promise.all([
+    reconciler.reconcileCompany({
+      companyId: event.companyId,
+      trigger: "event",
+      sourceId: event.entityId,
+      audit,
+    }),
+    clickup.reconcileCompany(event.companyId, audit),
+  ]);
 }
 
 function redactSentryConfig(config: SentryPilotConfig): Record<string, unknown> {

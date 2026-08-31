@@ -1,4 +1,4 @@
-# Constrained ClickUp projection and intake
+# Constrained ClickUp projection
 
 This module implements the release-1 contract for one explicitly configured
 Paperclip project to one explicitly configured ClickUp list. Paperclip owns
@@ -7,36 +7,34 @@ list, status, custom field, or assignee from a display name.
 
 ## Current activation state
 
-The worker remains shadow/read-only and has no outbound-network or issue-create
-capability. The accepted pilot policy records the ClickUp list, custom fields,
-principal, and effective write scope as unprovisioned. Consequently the write
-and intake services in this module are deliberately unwired and their gates
-reject any call without all of the following:
+The activation is fail-closed and requires:
 
 - one exact workspace, space, and list ID;
-- exact `to do`, `in progress`, `ready for qa`, and `complete` status IDs;
-- exact IDs for every projected custom field and the dedicated
-  `paperclip_issue_id` correlation field;
-- an accepted configuration revision whose fingerprint matches the runtime
-  configuration;
-- a current list-scoped identity/scope proof bound to the same fingerprint;
-- write or intake switches enabled by the separately approved activation
-  revision.
+- exact `to do`, `in progress`, and `done` status IDs;
+- the exact native assignee ID and a managed secret reference;
+- an accepted configuration revision whose fingerprint matches runtime;
+- a current list-scoped identity/scope proof bound to that fingerprint; and
+- the separately approved external-write switch.
 
-`in_review` always maps to the configured `ready for qa` status. A list without
-that exact status is invalid; there is no downgrade. `blocked` retains the last
-projected status and requires the protected blocker field. Unknown and
-cancelled states create a mapping failure instead of a guessed transition.
+Reverse intake and managed custom fields are not approved for this rollout.
+
+`backlog`, `todo`, and `blocked` map to `to do`; `in_progress` and
+`in_review` map to `in progress`; `done` and `cancelled` map to `done`.
+`complete` is readable provider context but is never an owned projection target.
 
 ## Projection boundary
 
-The only projected values are title, short planning summary, status, assignee
-display reference, blocker summary, acceptance summary, approved estimate, and
-the stable Paperclip issue identity/URL. Estimates must arrive as structured
-data from the latest accepted `plan` or `cto-refinement` revision. The upper
-bound is converted at eight hours per person-day and rounded upward to four
-hours. Missing estimates remain unset and set the configured estimate-needed
-field.
+The projection owns the `[STA-NNNN] title`, three-state status, one native
+assignee, native estimate and due date, and one marker-bounded description
+block. The block carries the Paperclip URL and correlation value, exact
+Paperclip status, owner label, planning and acceptance summaries, blockers, and
+forecast source/revision. Text outside the managed block is preserved exactly.
+
+Forecast metadata is accepted only from the strict provisioned-plan format or
+the explicit bootstrap `## Planning metadata` format. The upper bound is
+converted at eight hours per person-day and rounded upward to four hours.
+Missing or malformed estimate, due date, or revision metadata produces one
+stable visible exception and no provider write.
 
 Comments, attachments, watchers, deletion, arbitrary descriptions, list moves,
 universal assignment synchronization, customer data, and unknown fields have no
@@ -45,8 +43,8 @@ port in the module.
 ## Reliability and conflicts
 
 The task-link table enforces one active mapping per company/issue and per
-company/list/task. Before any create, the synchronizer reads by the exact
-correlation field. An ambiguous create is reconciled through that field before
+company/list/task. Before any create, the synchronizer reads the marker-bounded correlation value.
+An ambiguous create is reconciled through that identity before
 retry. Replays reuse the link and projection version.
 
 The last projected version and connector service-account identity both suppress

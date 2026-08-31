@@ -28,6 +28,7 @@ function moduleConfig(overrides: Partial<ModuleConfig> = {}): ModuleConfig {
     destinationEnabled: false,
     destinationKey: "digital",
     outlineActivation: null,
+    clickUpActivation: null,
     sourceVersion: "paperclip-v1",
     policyVersion: "shadow-v1",
     maxAttempts: 5,

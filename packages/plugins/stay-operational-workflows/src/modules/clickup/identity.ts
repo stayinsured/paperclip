@@ -25,8 +25,7 @@ export function clickUpConfigurationFingerprint(config: ClickUpDestinationConfig
     spaceId: config.spaceId,
     listId: config.listId,
     statuses: config.statuses,
-    fields: config.fields,
-    intakeOptInValue: config.intakeOptInValue,
+    ownerAssigneeId: config.ownerAssigneeId,
   }))}`;
 }
 

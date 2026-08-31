@@ -69,6 +69,7 @@ describe("stay operational workflows plugin", () => {
     expect(manifest.capabilities).toContain("database.namespace.write");
     expect(manifest.capabilities).toContain("http.outbound");
     expect(manifest.capabilities).toContain("secrets.read-ref");
+    expect(manifest.capabilities).toContain("issue.relations.read");
     expect(manifest.capabilities).toContain("projects.read");
     expect(manifest.agents).toEqual(expect.arrayContaining([
       expect.objectContaining({ agentKey: "outline-runtime", identityOnly: "tool_profile" }),
@@ -260,6 +261,14 @@ describe("stay operational workflows plugin", () => {
     expect(sql).not.toMatch(/secret|token|bearer/i);
   });
 
+  it("scopes the ClickUp activation migration to ClickUp without storing credential values", async () => {
+    const sql = await readFile(new URL("../migrations/006_clickup_activation.sql", import.meta.url), "utf8");
+    expect(sql).toContain("module IN ('outline', 'clickup')");
+    expect(sql).toContain("CHECK (clickup_activation IS NULL OR module = 'clickup')");
+    expect(sql).toContain("clickup_activation jsonb");
+    expect(sql).not.toMatch(/secret_value|access_token|bearer/i);
+  });
+
   it("rejects an unusable outline activation before persistence and reports the gated modes", async () => {
     const harness = createTestHarness({ manifest });
     harness.seed({ projects: [PROJECT_A] });
@@ -320,7 +329,7 @@ describe("stay operational workflows plugin", () => {
       status: "ok",
       details: {
         outlineMode: "activation-gated",
-        clickupMode: "shadow",
+        clickupMode: "activation-gated",
         sentryMode: "configuration-gated",
         slackApprovalCapability: false,
         authoritativeSource: "scheduled-reconciliation",

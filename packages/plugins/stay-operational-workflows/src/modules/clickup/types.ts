@@ -7,7 +7,7 @@ export type PaperclipProjectionStatus =
   | "done"
   | "cancelled";
 
-export type ClickUpStatusKey = "toDo" | "inProgress" | "readyForQa" | "complete";
+export type ClickUpStatusKey = "toDo" | "inProgress" | "done";
 
 export interface ClickUpConfiguredStatus {
   id: string;
@@ -15,26 +15,41 @@ export interface ClickUpConfiguredStatus {
 }
 
 export interface ClickUpFieldIds {
-  paperclipIssueId: string;
-  planningSummary: string;
-  assigneeDisplay: string;
-  blocker: string;
-  acceptanceSummary: string;
-  estimateNeeded: string;
-  projectionVersion: string;
+  paperclipIssueId: string | null;
+  planningSummary: string | null;
+  assigneeDisplay: string | null;
+  blocker: string | null;
+  acceptanceSummary: string | null;
+  estimateNeeded: string | null;
+  projectionVersion: string | null;
   intakeOptIn: string | null;
 }
 
 export interface ClickUpDestinationConfig {
   apiBaseUrl: string;
   tokenSecretId: string;
-  tokenSecretVersion?: number | null;
+  tokenSecretVersion?: number | "latest" | null;
   workspaceId: string;
   spaceId: string;
   listId: string;
   statuses: Record<ClickUpStatusKey, ClickUpConfiguredStatus>;
-  fields: ClickUpFieldIds;
-  intakeOptInValue: string | null;
+  ownerAssigneeId: number;
+  fields?: ClickUpFieldIds;
+  intakeOptInValue?: string | null;
+}
+
+export interface ClickUpSecretRef {
+  type: "secret_ref";
+  secretId: string;
+  version?: number | "latest";
+}
+
+export interface ClickUpModuleActivation {
+  schemaVersion: 1;
+  paperclipBaseUrl: string;
+  tokenRef: ClickUpSecretRef;
+  destination: ClickUpDestinationConfig;
+  authorization: ClickUpAuthorization;
 }
 
 export interface ClickUpAcceptedConfigurationApproval {
@@ -58,7 +73,10 @@ export interface ClickUpListAccessProof {
     tasksRead: true;
     tasksCreate: boolean;
     tasksUpdate: boolean;
-    customFieldsRead: true;
+    customFieldsRead?: boolean;
+    dependenciesRead?: boolean;
+    dependenciesCreate?: boolean;
+    dependenciesDelete?: boolean;
   };
 }
 
@@ -93,6 +111,7 @@ export interface ClickUpProjectionSource {
   blockerSummary: string | null;
   acceptanceSummary: string;
   approvedEstimate: ApprovedEstimateSource | null;
+  dueDate: string | null;
   updatedAt: string;
 }
 
@@ -103,7 +122,12 @@ export type ClickUpOwnedField =
   | "assigneeDisplay"
   | "blocker"
   | "acceptanceSummary"
-  | "estimate";
+  | "estimate"
+  | "nativeAssignee"
+  | "dueDate"
+  | "sourceStatus"
+  | "forecastSource"
+  | "forecastRevision";
 
 export type ClickUpOwnedSnapshot = Record<ClickUpOwnedField, string | number | boolean | null>;
 
@@ -119,9 +143,13 @@ export interface ClickUpShadowProjection {
   correlationValue: string;
   projectionVersion: string;
   title: string;
+  description: string;
   statusId: string;
   statusName: string;
+  nativeAssigneeId: number;
   timeEstimateMs: number | null;
+  dueDateMs: number | null;
+  parentTaskId: string | null;
   customFields: Record<string, string | boolean | null>;
   ownedSnapshot: ClickUpOwnedSnapshot;
   sourceUpdatedAt: string;
@@ -134,9 +162,17 @@ export interface ClickUpRemoteTask {
   url: string | null;
   revision: string | null;
   title: string;
+  description: string;
+  correlationValue: string | null;
+  projectionVersion: string | null;
   statusId: string;
+  assigneeIds: number[];
   timeEstimateMs: number | null;
+  dueDateMs: number | null;
+  dueDateTime: boolean;
   customFields: Record<string, string | boolean | null | undefined>;
+  parentTaskId: string | null;
+  dependencyTaskIds: string[];
   updatedAt: string;
 }
 
@@ -198,12 +234,14 @@ export interface ClickUpIntakeCandidate {
 export interface ClickUpApiPort {
   findTasksByCorrelation(input: {
     listId: string;
-    correlationFieldId: string;
     correlationValue: string;
   }): Promise<ClickUpRemoteTask[]>;
   getTask(taskId: string): Promise<ClickUpRemoteTask | null>;
   createTask(input: ClickUpShadowProjection): Promise<ClickUpRemoteTask>;
   updateTask(taskId: string, input: ClickUpShadowProjection): Promise<ClickUpRemoteTask>;
+  updateParent(taskId: string, parentTaskId: string): Promise<void>;
+  addDependency(taskId: string, dependsOnTaskId: string): Promise<void>;
+  removeDependency(taskId: string, dependsOnTaskId: string): Promise<void>;
 }
 
 export interface ClickUpLinkRepository {

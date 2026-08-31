@@ -18,6 +18,7 @@ const config: ModuleConfig = {
   destinationEnabled: false,
   destinationKey: "digital/architecture",
   outlineActivation: null,
+  clickUpActivation: null,
   sourceVersion: "paperclip-v1",
   policyVersion: "shadow-v1",
   maxAttempts: 5,
