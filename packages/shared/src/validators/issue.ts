@@ -532,9 +532,98 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(createIssueBa
 
 export type CreateChildIssue = z.infer<typeof createChildIssueSchema>;
 
+const sdlcTaskKeySchema = z.string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "SDLC task keys may contain letters, numbers, dots, underscores, and hyphens");
+
+const sdlcPlanTaskSchema = z.object({
+  taskKey: sdlcTaskKeySchema,
+  plannedAssigneeAgentId: z.string().uuid(),
+  blockedByTaskKeys: z.array(sdlcTaskKeySchema).max(25).optional().default([]),
+}).strict();
+
 export const createAcceptedPlanDecompositionSchema = z.object({
   acceptedPlanRevisionId: z.string().uuid(),
   children: z.array(createChildIssueSchema).min(1).max(25),
+  sdlc: z.object({
+    graphRev: z.number().int().nonnegative(),
+    tasks: z.array(sdlcPlanTaskSchema).min(1).max(25),
+  }).strict().optional(),
+}).superRefine((value, ctx) => {
+  if (!value.sdlc) return;
+  if (value.sdlc.tasks.length !== value.children.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "SDLC tasks must align one-to-one with children",
+      path: ["sdlc", "tasks"],
+    });
+    return;
+  }
+
+  const taskKeys = new Set<string>();
+  for (let index = 0; index < value.sdlc.tasks.length; index += 1) {
+    const task = value.sdlc.tasks[index]!;
+    if (taskKeys.has(task.taskKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate SDLC task key: ${task.taskKey}`,
+        path: ["sdlc", "tasks", index, "taskKey"],
+      });
+    }
+    taskKeys.add(task.taskKey);
+
+    const child = value.children[index]!;
+    if (child.status !== "backlog" || child.assigneeAgentId || child.assigneeUserId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "SDLC-provisioned children must start unassigned in backlog",
+        path: ["children", index],
+      });
+    }
+  }
+
+  const adjacency = new Map(value.sdlc.tasks.map((task) => [task.taskKey, task.blockedByTaskKeys]));
+  for (let index = 0; index < value.sdlc.tasks.length; index += 1) {
+    const task = value.sdlc.tasks[index]!;
+    for (const blockerKey of task.blockedByTaskKeys) {
+      if (!taskKeys.has(blockerKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Unknown SDLC blocker task key: ${blockerKey}`,
+          path: ["sdlc", "tasks", index, "blockedByTaskKeys"],
+        });
+      } else if (blockerKey === task.taskKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "An SDLC task cannot block itself",
+          path: ["sdlc", "tasks", index, "blockedByTaskKeys"],
+        });
+      }
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const hasCycle = (taskKey: string): boolean => {
+    if (visiting.has(taskKey)) return true;
+    if (visited.has(taskKey)) return false;
+    visiting.add(taskKey);
+    for (const blockerKey of adjacency.get(taskKey) ?? []) {
+      if (hasCycle(blockerKey)) return true;
+    }
+    visiting.delete(taskKey);
+    visited.add(taskKey);
+    return false;
+  };
+  if ([...taskKeys].some(hasCycle)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "SDLC task dependencies must form an acyclic graph",
+      path: ["sdlc", "tasks"],
+    });
+  }
 });
 
 export type CreateAcceptedPlanDecomposition = z.infer<typeof createAcceptedPlanDecompositionSchema>;
