@@ -1271,6 +1271,8 @@ export interface RequestConfirmationResult {
     updatedAt?: string | null;
   } | null;
   toolAction?: RequestConfirmationToolActionResult;
+  consumedAt?: string;
+  consumedByRunId?: string;
 }
 
 export interface RequestCheckboxConfirmationResult extends RequestConfirmationResult {

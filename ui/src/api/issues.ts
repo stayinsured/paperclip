@@ -14,6 +14,7 @@ import type {
   IssueCostSummary,
   IssueComment,
   IssueDocument,
+  IssueReflectionEvidence,
   IssueLabel,
   IssueRecoveryAction,
   IssueRetryNowResponse,
@@ -152,6 +153,8 @@ export const issuesApi = {
   get: (id: string, options?: RequestOptions) => options
     ? api.get<Issue>(`/issues/${id}`, options)
     : api.get<Issue>(`/issues/${id}`),
+  getReflectionEvidence: (id: string) =>
+    api.get<IssueReflectionEvidence>(`/issues/${id}/reflection-evidence`),
   getWatchdog: (id: string) => api.get<IssueWatchdog | null>(`/issues/${id}/watchdog`),
   upsertWatchdog: (id: string, data: UpsertIssueWatchdog) =>
     api.put<IssueWatchdog>(`/issues/${id}/watchdog`, data),

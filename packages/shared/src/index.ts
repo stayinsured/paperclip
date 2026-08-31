@@ -2387,3 +2387,4 @@ export {
   type FeatureTier,
   type InstanceFeatureKey,
 } from "./feature-catalog.js";
+export * from "./reflection.js";

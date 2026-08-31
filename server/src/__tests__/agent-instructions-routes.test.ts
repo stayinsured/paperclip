@@ -40,6 +40,10 @@ const mockEnvironmentService = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockSyncInstructionsBundleConfigFromFilePath = vi.hoisted(() => vi.fn());
 const mockFindServerAdapter = vi.hoisted(() => vi.fn());
+const mockReflectionLedger = vi.hoisted(() => ({
+  findInstructionConsent: vi.fn(),
+  consumeInstructionConsent: vi.fn(),
+}));
 
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
@@ -70,6 +74,22 @@ vi.mock("../services/environments.js", () => ({
 vi.mock("../adapters/index.js", () => ({
   findServerAdapter: mockFindServerAdapter,
   listAdapterModels: vi.fn(),
+}));
+
+vi.mock("../services/reflection-ledger.js", () => ({
+  buildInstructionContentDiff: (path: string, before: string, after: string) => {
+    if (before === after) return "";
+    const beforeLines = before.split("\n");
+    const afterLines = after.split("\n");
+    return [
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
+      ...beforeLines.map((line) => `-${line}`),
+      ...afterLines.map((line) => `+${line}`),
+    ].join("\n");
+  },
+  reflectionLedgerService: () => mockReflectionLedger,
 }));
 
 function registerModuleMocks() {
@@ -202,6 +222,8 @@ describe("agent instructions bundle routes", () => {
     mockBuiltInAgentService.ensureCompanyDefaultAgentGrants.mockResolvedValue(0);
     mockSyncInstructionsBundleConfigFromFilePath.mockImplementation((_agent, config) => config);
     mockFindServerAdapter.mockImplementation((_type: string) => ({ type: _type }));
+    mockReflectionLedger.findInstructionConsent.mockResolvedValue(null);
+    mockReflectionLedger.consumeInstructionConsent.mockReset();
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       reason: "allow_explicit_grant",
@@ -417,6 +439,74 @@ describe("agent instructions bundle routes", () => {
       }),
       expect.any(Object),
     );
+  });
+
+  it("does not consume reflection consent or create a receipt when post-write readback mismatches", async () => {
+    const acceptedDiff = [
+      "--- a/AGENTS.md",
+      "+++ b/AGENTS.md",
+      "@@ -1,2 +1,2 @@",
+      "-# Agent",
+      "-",
+      "+# Updated Agent",
+      "+",
+    ].join("\n");
+    mockAccessService.decide
+      .mockResolvedValueOnce({
+        allowed: false,
+        reason: "deny_missing_consent",
+        explanation: "Accepted reflection consent is required.",
+      })
+      .mockResolvedValueOnce({
+        allowed: true,
+        reason: "allow_consented_change",
+        explanation: "Accepted reflection consent is present.",
+      });
+    mockReflectionLedger.findInstructionConsent.mockResolvedValue({
+      interactionId: "interaction-1",
+      issueId: "reflection-issue",
+      ledgerTargetId: "target-1",
+      applicationIssueId: "application-issue",
+      targetKey: "agent:11111111-1111-4111-8111-111111111111:instructions",
+      targetType: "agent_instructions",
+      targetLabel: "Agent instructions",
+      proposedDiff: acceptedDiff,
+      consumed: false,
+      existingReceipt: null,
+    });
+    mockAgentInstructionsService.writeFile.mockResolvedValueOnce({
+      bundle: null,
+      file: {
+        path: "AGENTS.md",
+        size: 13,
+        language: "markdown",
+        markdown: true,
+        isEntryFile: true,
+        editable: true,
+        deprecated: false,
+        virtual: false,
+        content: "# Updated Agent\n",
+      },
+      adapterConfig: {},
+    });
+
+    const res = await requestApp(
+      await createApp({
+        type: "agent",
+        agentId: "reflection-coach",
+        runId: "apply-run",
+        companyId: "company-1",
+        source: "agent_key",
+      }),
+      (baseUrl) => request(baseUrl)
+        .put("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle/file")
+        .send({ path: "AGENTS.md", content: "# Updated Agent\n" }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toContain("post-write readback");
+    expect(mockReflectionLedger.consumeInstructionConsent).not.toHaveBeenCalled();
+    expect(mockAgentService.update).toHaveBeenCalledTimes(1);
   });
 
   it("preserves managed instructions config when switching adapters", async () => {

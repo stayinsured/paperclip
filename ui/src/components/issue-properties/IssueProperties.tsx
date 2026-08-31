@@ -58,6 +58,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IssuePropertiesPlansTab } from "./IssuePropertiesPlansTab";
 import { IssuePropertiesArtifactsTab } from "./IssuePropertiesArtifactsTab";
+import { ReflectionEvidencePanel } from "./ReflectionEvidencePanel";
 import { User, ArrowUpRight, Plus, GitBranch, FolderOpen, HardDrive, Check, Clock, RotateCcw, Loader2, CheckCircle2, ArchiveRestore } from "lucide-react";
 import { AgentIcon } from "../AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "../InlineEntitySelector";
@@ -2010,6 +2011,7 @@ export function IssueProperties({
 
   const propertiesBody = (
     <div>
+      <ReflectionEvidencePanel issueId={issue.id} />
       <PropertySection title="Triage" first>
         <PropertyRow label="Status">
           <StatusIcon

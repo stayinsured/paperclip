@@ -66,7 +66,9 @@ This routine is **paused by default** and spends no tokens until an operator ena
 ## Hard limits for this routine
 
 - Proposal-only. This routine must not edit any agent's live AGENTS.md, skill assignments, or tool descriptions directly.
+- Register all targets from one proposal together in the reflection issue ledger before opening any target confirmation. Evidence-backed no-change targets are terminal ledger rows, not omitted findings.
 - Any actual instruction/skill/tool-description change requires a displayed diff and an **accepted** `request_confirmation` task interaction, applied only in a separate follow-up run.
+- Each accepted target uses its server-created Reflection Coach-owned application issue. Instruction success requires the server-authored receipt and exact post-write readback; replayed applies must not create new comments or runs.
 - Mutation confirmations must bind the exact resource key they will apply, using `agent:<agentId>:instructions`, `agent:<agentId>:profile`, `skill:<skillId>`, `skill-slug:<slug>`, `skill-import:<source>`, or `skills:scan-projects`.
 - Keep every read company-scoped. Do not cross company boundaries.
 - Every proposed rule needs linked issue/comment evidence or it is dropped. No scoring without trajectories.
@@ -74,4 +76,4 @@ This routine is **paused by default** and spends no tokens until an operator ena
 
 ## Output
 
-A single bounded routine issue that links one proposal document (or follow-up proposal issue) per reviewed target agent, plus a summary comment listing: agents reviewed, window, clusters found, surfaces proposed, and the next-step owner for each accepted-or-pending change.
+A single bounded routine issue that links one proposal document (or follow-up proposal issue) per reviewed target agent, plus a summary comment listing: agents reviewed, window, clusters found, every ledger target and state, and the next-step owner for each accepted-or-pending change.
