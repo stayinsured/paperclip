@@ -124,6 +124,7 @@ import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
 import { IssueProperties } from "../components/IssueProperties";
 import { PendingDecisionStrip } from "../components/PendingDecisionStrip";
 import { IssueReviewPanel } from "../components/IssueReviewPanel";
+import { SdlcWorkflowPanel } from "../components/SdlcWorkflowPanel";
 import { PauseAffectsSummaryView } from "../components/interrupt-handoff/InterruptHandoffViews";
 import { computePauseAffectsSummary } from "../lib/interrupt-handoff";
 import { useIssueExternalObjects } from "../hooks/useIssueExternalObjects";
@@ -4530,6 +4531,8 @@ export function IssueDetail() {
         <PendingDecisionStrip companyId={issue.companyId} issueId={issue.id} />
 
         <IssueReviewPanel issue={issue} />
+
+        <SdlcWorkflowPanel issue={issue} agentMap={agentMap} />
 
         {taskChatShellEnabled ? null : (
           <InlineEditor

@@ -193,6 +193,7 @@ export const queryKeys = {
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
     attachmentPreview: (attachmentId: string) => ["issues", "attachment-preview", attachmentId] as const,
     documents: (issueId: string) => ["issues", "documents", issueId] as const,
+    documentsIncludingSystem: (issueId: string) => ["issues", "documents", issueId, "including-system"] as const,
     document: (issueId: string, key: string) => ["issues", "document", issueId, key] as const,
     documentRevisions: (issueId: string, key: string) => ["issues", "document-revisions", issueId, key] as const,
     documentAnnotations: (issueId: string, key: string, status: "open" | "resolved" | "all" = "all") =>
