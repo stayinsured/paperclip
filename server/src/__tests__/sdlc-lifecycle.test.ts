@@ -30,6 +30,7 @@ import {
   parseSdlcGateIdempotencyKey,
   readSdlcIssueDocument,
   recordSdlcGateDecision,
+  recordSdlcActivations,
   recordSdlcProvisioningComplete,
   SDLC_EVIDENCE_DOCUMENT_KEY,
 } from "../services/sdlc-lifecycle.ts";
@@ -432,6 +433,57 @@ describeEmbeddedPostgres("sdlc lifecycle guards (STA-2781)", () => {
     expect(rowIds.some((rowId) => rowId.startsWith("descendant:"))).toBe(true);
   });
 
+  it("rejects governed backlog to done without mutating task state", async () => {
+    const { companyId, rootIssueId, childIssueId, planRevisionId } = await seedGovernedTree();
+    await acceptGateTwo({ companyId, rootIssueId, revisionId: planRevisionId });
+    await appendSdlcEvidenceRecords(db, rootIssueId, [
+      buildSdlcEvidenceRecord(
+        {
+          id: ["evd", "qa", companyId, childIssueId].join(":"),
+          type: "qa_verdict",
+          companyId,
+          issueId: rootIssueId,
+        },
+        { childIssueId, verdict: "pass", rowIds: ["ac-1", "ac-2"] },
+      ),
+    ]);
+
+    const rejection = await svc.update(childIssueId, { status: "done" }).catch((error) => error);
+    expect(rejection.status).toBe(409);
+    expect(rejection.details).toMatchObject({
+      code: "sdlc_invalid_transition",
+      fromStatus: "backlog",
+      toStatus: "done",
+    });
+    const [unchanged] = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(eq(issues.id, childIssueId));
+    expect(unchanged).toEqual({ status: "backlog", assigneeAgentId: null });
+  });
+
+  it("rejects governed root close when a child was cancelled instead of completed", async () => {
+    const { companyId, rootIssueId, childIssueId, planRevisionId } = await seedGovernedTree();
+    await acceptGateTwo({ companyId, rootIssueId, revisionId: planRevisionId });
+    await svc.update(childIssueId, { status: "cancelled" });
+
+    const rejection = await svc.update(rootIssueId, { status: "done" }).catch((error) => error);
+    expect(rejection.status).toBe(422);
+    const missingRows = (rejection.details as {
+      missingRows: Array<{ rowId: string; requiredEvidence: string }>;
+    }).missingRows;
+    expect(missingRows).toContainEqual({
+      rowId: ["descendant", childIssueId].join(":"),
+      text: expect.stringContaining("is cancelled"),
+      requiredEvidence: "descendant_done",
+    });
+    const [unchangedRoot] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, rootIssueId));
+    expect(unchangedRoot.status).toBe("in_progress");
+  });
+
   it("AC3: waiver rows satisfy closure", async () => {
     const { companyId, rootIssueId, childIssueId, planRevisionId } = await seedGovernedTree();
     await acceptGateTwo({ companyId, rootIssueId, revisionId: planRevisionId });
@@ -610,6 +662,98 @@ describeEmbeddedPostgres("sdlc lifecycle guards (STA-2781)", () => {
     expect(registry.filter((record) => record.type === "gate_request" && record.gate === "gate2")).toHaveLength(1);
     expect(registry.filter((record) => record.type === "gate_decision" && record.gate === "gate2")).toHaveLength(1);
     expect(registry.filter((record) => record.type === "activation" && record.childIssueId === childIssueId)).toHaveLength(1);
+  });
+
+  it("activates a newly unblocked governed child with its planned owner exactly once", async () => {
+    const { companyId, rootIssueId, childIssueId: firstChildIssueId, planRevisionId } = await seedGovernedTree();
+    const secondChildIssueId = await seedIssue({ companyId, parentId: rootIssueId });
+    const firstOwnerAgentId = await seedAgent(companyId);
+    const secondOwnerAgentId = await seedAgent(companyId);
+
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: firstChildIssueId,
+      relatedIssueId: secondChildIssueId,
+      type: "blocks",
+    });
+    await acceptGateOne({ companyId, rootIssueId, revisionId: planRevisionId });
+    await recordSdlcProvisioningComplete(db, {
+      companyId,
+      rootIssueId,
+      revisionId: planRevisionId,
+      graphRev: 1,
+      tasks: [
+        {
+          taskKey: "first",
+          childIssueId: firstChildIssueId,
+          plannedAssigneeAgentId: firstOwnerAgentId,
+          blockedByTaskKeys: [],
+        },
+        {
+          taskKey: "second",
+          childIssueId: secondChildIssueId,
+          plannedAssigneeAgentId: secondOwnerAgentId,
+          blockedByTaskKeys: ["first"],
+        },
+      ],
+    });
+    await recordSdlcGateDecision(db, {
+      companyId,
+      issueId: rootIssueId,
+      binding: {
+        gate: "gate2",
+        issueId: rootIssueId,
+        revisionId: planRevisionId,
+        graphRev: 1,
+      },
+      verdict: "accepted",
+      confirmationToken: randomUUID(),
+      actor: { userId: "board-user" },
+    });
+
+    await svc.update(firstChildIssueId, {
+      status: "todo",
+      assigneeAgentId: firstOwnerAgentId,
+    });
+    await recordSdlcActivations(db, rootIssueId, companyId, [{
+      child: {
+        id: firstChildIssueId,
+        identifier: null,
+        title: "First governed child",
+        assigneeAgentId: firstOwnerAgentId,
+      },
+      order: 1,
+    }]);
+    await appendSdlcEvidenceRecords(db, rootIssueId, [
+      buildSdlcEvidenceRecord(
+        {
+          id: ["evd", "qa", companyId, firstChildIssueId].join(":"),
+          type: "qa_verdict",
+          companyId,
+          issueId: rootIssueId,
+        },
+        { childIssueId: firstChildIssueId, verdict: "pass", rowIds: ["ac-1", "ac-2"] },
+      ),
+    ]);
+
+    const completed = await svc.update(firstChildIssueId, { status: "done" });
+    expect(completed?.sdlcActivatedIssues).toEqual([{
+      id: secondChildIssueId,
+      assigneeAgentId: secondOwnerAgentId,
+      status: "todo",
+    }]);
+    const [activated] = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(eq(issues.id, secondChildIssueId));
+    expect(activated).toEqual({ status: "todo", assigneeAgentId: secondOwnerAgentId });
+
+    await svc.update(firstChildIssueId, { status: "done" });
+    const registry = parseSdlcEvidenceRegistry(
+      (await readSdlcIssueDocument(db, rootIssueId, SDLC_EVIDENCE_DOCUMENT_KEY))?.body,
+    );
+    expect(registry.filter((record) =>
+      record.type === "activation" && record.childIssueId === secondChildIssueId)).toHaveLength(1);
   });
 
   it("AC4: activation evaluator skips blocked, busy, and already-activated children", async () => {
