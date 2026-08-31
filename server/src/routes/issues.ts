@@ -10111,6 +10111,29 @@ export function issueRoutes(
         }
       }
 
+      for (const activatedIssue of issue.sdlcActivatedIssues ?? []) {
+        addWakeup(activatedIssue.assigneeAgentId, {
+          source: "assignment",
+          triggerDetail: "system",
+          reason: "issue_assigned",
+          payload: {
+            issueId: activatedIssue.id,
+            mutation: "governed_dependency_activated",
+            resolvedBlockerIssueId: issue.id,
+          },
+          idempotencyKey: ["sdlc_dependency_activated", activatedIssue.id, issue.id].join(":"),
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: activatedIssue.id,
+            taskId: activatedIssue.id,
+            wakeReason: "issue_assigned",
+            source: "issue.sdlc_dependency_activation",
+            resolvedBlockerIssueId: issue.id,
+          },
+        });
+      }
+
       const becameDone = existing.status !== "done" && issue.status === "done";
       if (becameDone) {
         const dependents = await svc.listWakeableBlockedDependents(issue.id);
