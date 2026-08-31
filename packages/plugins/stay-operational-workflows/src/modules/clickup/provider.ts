@@ -48,11 +48,40 @@ function isoFromClickUp(value: unknown): string {
   throw new ClickUpProviderError("clickup_invalid_task_timestamp", null, false, null);
 }
 
+function parseDependencyTaskIds(taskId: string, value: unknown): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new ClickUpProviderError("clickup_invalid_task_response", null, false, null);
+  }
+
+  const dependencyTaskIds = new Set<string>();
+  for (const entry of value) {
+    const dependency = asRecord(entry);
+    const dependentTaskId = asString(dependency.task_id);
+    const dependsOnTaskId = asString(dependency.depends_on);
+    if (!dependentTaskId
+      || !dependsOnTaskId
+      || dependentTaskId === dependsOnTaskId
+      || (dependentTaskId !== taskId && dependsOnTaskId !== taskId)) {
+      throw new ClickUpProviderError("clickup_invalid_task_response", null, false, null);
+    }
+    if (dependentTaskId === taskId) dependencyTaskIds.add(dependsOnTaskId);
+  }
+  return [...dependencyTaskIds].sort();
+}
+
 function parseTask(value: unknown): ClickUpRemoteTask {
   const task = asRecord(value);
   const list = asRecord(task.list);
   const status = asRecord(task.status);
   const parent = asRecord(task.parent);
+  const id = asString(task.id);
+  const listId = asString(list.id);
+  const title = asString(task.name);
+  const statusId = asString(status.id) ?? asString(status.status);
+  if (!id || !listId || !title || !statusId) {
+    throw new ClickUpProviderError("clickup_invalid_task_response", null, false, null);
+  }
   const customFields: Record<string, string | boolean | null | undefined> = {};
   for (const entry of Array.isArray(task.custom_fields) ? task.custom_fields : []) {
     const field = asRecord(entry);
@@ -63,12 +92,7 @@ function parseTask(value: unknown): ClickUpRemoteTask {
       customFields[id] = fieldValue as string | boolean | null;
     }
   }
-  const dependencyTaskIds = (Array.isArray(task.dependencies) ? task.dependencies : [])
-    .map((entry) => asString(asRecord(entry).depends_on))
-    .filter((id): id is string => id != null);
-  const id = asString(task.id);
-  const listId = asString(list.id);
-  const title = asString(task.name);
+  const dependencyTaskIds = parseDependencyTaskIds(id, task.dependencies);
   const description = asString(task.description) ?? "";
   const descriptionIdentity = parseClickUpMirrorDescription(description);
   const assigneeIds = (Array.isArray(task.assignees) ? task.assignees : [])
@@ -77,10 +101,6 @@ function parseTask(value: unknown): ClickUpRemoteTask {
     .sort((left, right) => left - right);
   const dueDateValue = task.due_date == null ? null : Number(task.due_date);
   const dueDateMs = dueDateValue != null && Number.isFinite(dueDateValue) ? dueDateValue : null;
-  const statusId = asString(status.id) ?? asString(status.status);
-  if (!id || !listId || !title || !statusId) {
-    throw new ClickUpProviderError("clickup_invalid_task_response", null, false, null);
-  }
   return {
     id,
     listId,
@@ -97,7 +117,7 @@ function parseTask(value: unknown): ClickUpRemoteTask {
     dueDateTime: task.due_date_time === true,
     customFields,
     parentTaskId: asString(parent.id) ?? asString(task.parent),
-    dependencyTaskIds: [...new Set(dependencyTaskIds)].sort(),
+    dependencyTaskIds,
     updatedAt: isoFromClickUp(task.date_updated),
   };
 }
