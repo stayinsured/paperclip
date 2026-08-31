@@ -645,14 +645,14 @@ function collectCoveredRowIds(records: SdlcEvidenceRecord[], issueId: string): S
   return covered;
 }
 
-async function listNonTerminalDescendants(
+async function listIncompleteDescendants(
   dbOrTx: DbOrTx,
   rootIssueId: string,
 ): Promise<Array<{ id: string; identifier: string | null; title: string; status: string }>> {
-  const nonTerminal: Array<{ id: string; identifier: string | null; title: string; status: string }> = [];
+  const incomplete: Array<{ id: string; identifier: string | null; title: string; status: string }> = [];
   const visited = new Set<string>([rootIssueId]);
   let frontier = [rootIssueId];
-  while (frontier.length > 0 && nonTerminal.length < SDLC_MAX_DESCENDANTS) {
+  while (frontier.length > 0 && incomplete.length < SDLC_MAX_DESCENDANTS) {
     const rows = await dbOrTx
       .select({
         id: issues.id,
@@ -666,13 +666,16 @@ async function listNonTerminalDescendants(
     for (const row of rows) {
       if (visited.has(row.id)) continue;
       visited.add(row.id);
-      if (!isTerminalStatus(row.status)) {
-        nonTerminal.push(row);
+      // Governed closeout requires completed work. Cancellation is terminal
+      // for the generic issue state machine, but it is not a completed SDLC
+      // task and therefore cannot satisfy the initiative DoD.
+      if (row.status !== "done") {
+        incomplete.push(row);
       }
       frontier.push(row.id);
     }
   }
-  return nonTerminal;
+  return incomplete;
 }
 
 /**
@@ -709,12 +712,12 @@ export async function assertSdlcIssueClosureAllowed(
   }
 
   if (governance.rootIssueId === existing.id) {
-    const nonTerminal = await listNonTerminalDescendants(dbOrTx, existing.id);
-    for (const descendant of nonTerminal) {
+    const incomplete = await listIncompleteDescendants(dbOrTx, existing.id);
+    for (const descendant of incomplete) {
       missingRows.push({
         rowId: `descendant:${descendant.identifier ?? descendant.id}`,
         text: `${descendant.identifier ?? descendant.id} ${descendant.title} is ${descendant.status}`,
-        requiredEvidence: "descendant_terminal",
+        requiredEvidence: "descendant_done",
       });
     }
   }
@@ -846,8 +849,8 @@ export async function assertSdlcRootReviewRequestAllowed(
   const emergency = await readSdlcEmergencyRecord(dbOrTx, existing.id);
   if (emergency) return;
 
-  const nonTerminal = await listNonTerminalDescendants(dbOrTx, existing.id);
-  if (nonTerminal.length === 0) return;
+  const incomplete = await listIncompleteDescendants(dbOrTx, existing.id);
+  if (incomplete.length === 0) return;
 
   const currentRevisionId = await readCurrentSdlcPlanRevisionId(dbOrTx, existing.id);
   const dor = latestSdlcRecord(
@@ -906,6 +909,31 @@ export async function assertSdlcTransitionAllowed(
   actor?: SdlcActor,
 ): Promise<void> {
   if (existing.status === nextStatus) return;
+  if (existing.status === "backlog" && nextStatus === "done") {
+    const governance = await resolveSdlcGovernance(dbOrTx, existing);
+    if (governance) {
+      await logSdlcActivity(logDb, {
+        companyId: governance.companyId,
+        issueId: existing.id,
+        action: "issue.lifecycle_transition_forbidden",
+        details: {
+          code: "sdlc_invalid_transition",
+          reason: "Governed backlog work must activate before it can complete",
+          rootIssueId: governance.rootIssueId,
+          riskClass: governanceRiskClass(governance),
+          fromStatus: existing.status,
+          toStatus: nextStatus,
+        },
+        actor,
+      });
+      throw conflict("Governed backlog work must activate before it can transition to done", {
+        code: "sdlc_invalid_transition",
+        rootIssueId: governance.rootIssueId,
+        fromStatus: existing.status,
+        toStatus: nextStatus,
+      });
+    }
+  }
   if (SDLC_START_STATUSES.has(nextStatus)) {
     await assertSdlcIssueStartAllowed(dbOrTx, existing, logDb, actor);
     return;
@@ -1443,7 +1471,9 @@ export async function evaluateSdlcActivationCandidates(
       .from(issueRelations)
       .innerJoin(issues, eq(issues.id, issueRelations.issueId))
       .where(and(eq(issueRelations.relatedIssueId, child.id), eq(issueRelations.type, "blocks")));
-    if (blockerRows.some((row) => !isTerminalStatus(row.status))) continue;
+    // Generic dependency readiness treats cancelled blockers as unresolved;
+    // governed activation must use the same contract and wait for done.
+    if (blockerRows.some((row) => row.status !== "done")) continue;
     claimedAgents.add(plannedAssigneeAgentId);
     candidates.push({
       child: {
