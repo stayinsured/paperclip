@@ -87,6 +87,10 @@ Window: 2026-08-31T14:22:00Z through 2026-08-31T14:25:00Z. Loki returned
 exactly two lines. Inspecting the returned labels and parsed JSON showed only the
 allowlisted schema fields and no secret- or customer-bearing fields.
 
+The provider-failure rule evaluated the failure event to value `1` at
+2026-08-31T14:28:50Z, entered `Alerting`, reported health `ok`, retained
+`owner=devops-engineer`, and routed to `Slack eng alerts test`.
+
 ## Triage
 
 1. Open dashboard UID `stay-sdlc-workflow`; select the alert environment.
@@ -113,10 +117,17 @@ allowlisted schema fields and no secret- or customer-bearing fields.
 - Roll back code by reverting the STA-2785 observability commit; evidence registry
   writes and lifecycle guards remain intact because telemetry is downstream.
 
-## Sentry target gate
+## Sentry target and verification
 
-The verified Sentry organization is `stay-ki`. As of 2026-08-31 it has no
-Paperclip/SDLC project. Do not send control-plane events to `admin-panel`, `bff`,
-`hfs`, `ico`, or another product project by inference. Bind
-`PAPERCLIP_SDLC_SENTRY_DSN` only after the Board chooses or provisions the exact
-project through STA-2785 interaction `a2c35761-6cfa-457f-a1dc-e65f1d4e6ffb`.
+The Board selected a dedicated project in STA-2785 interaction
+`a2c35761-6cfa-457f-a1dc-e65f1d4e6ffb`. The resolved target is organization
+`stay-ki`, team `stay`, project `paperclip-sdlc` (project ID
+`4512005943132240`). Do not bind control-plane events to `admin-panel`, `bff`,
+`hfs`, `ico`, or another product project.
+
+On 2026-08-31 at 14:39:20 UTC, the allowlisted sender wrote
+`synthetic:STA-2785:sentry:failure:v1` as event
+`c530db3662344cf79ebd369867f6ee1b`. Provider readback retained the safe
+correlation IDs, event/phase/provider/outcome tags, `retryCount=3`, and
+`mismatchAgeSeconds=901`. It contained no request, user, exception, stack trace,
+attachment, credential, token, DSN, or customer-bearing payload.
