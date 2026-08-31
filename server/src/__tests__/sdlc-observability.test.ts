@@ -1,10 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  SDLC_OBSERVABILITY_SINK_TIMEOUT_MS,
   buildSdlcLifecycleEvent,
+  emitSdlcLifecycleEvent,
   lifecycleEventInputForEvidenceRecord,
   sendSdlcEventToLoki,
   sendSdlcFailureToSentry,
 } from "../services/sdlc-observability.ts";
+import { logger } from "../middleware/logger.js";
 
 const COMPANY_ID = "bc01148d-78ea-497c-8990-943eb6a7803e";
 const ISSUE_ID = "5d681a24-d20d-415e-b135-dba9c9826fde";
@@ -28,6 +31,13 @@ function failureEvent() {
   if (!event) throw new Error("expected valid event");
   return event;
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("SDLC observability", () => {
   it("emits only allowlisted safe correlation fields", () => {
@@ -118,6 +128,54 @@ describe("SDLC observability", () => {
     expect(body).not.toContain("public-key");
     expect(body).not.toContain("exception");
     expect(body).not.toContain("stacktrace");
+  });
+
+  it("bounds both sinks, fails open after abort, and warns for resolved failures", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("PAPERCLIP_SDLC_LOKI_URL", "https://logs.example.test");
+    vi.stubEnv("PAPERCLIP_SDLC_LOKI_USER", "tenant-123");
+    vi.stubEnv("PAPERCLIP_SDLC_LOKI_TOKEN", "super-secret-loki-token");
+    vi.stubEnv("PAPERCLIP_SDLC_SENTRY_DSN", "https://public-key@events.example.test/12345");
+
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal("fetch", vi.fn((_input: string | URL | Request, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!(signal instanceof AbortSignal)) {
+          reject(new Error("expected an AbortSignal"));
+          return;
+        }
+        signals.push(signal);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      })
+    )));
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+
+    const emission = emitSdlcLifecycleEvent({
+      event: "lifecycle_provider_outage",
+      companyId: COMPANY_ID,
+      issueId: ISSUE_ID,
+      phase: "reconciliation",
+      riskClass: "C2",
+      correlationId: `evd:provider-outage:${ISSUE_ID}`,
+      actorRunId: RUN_ID,
+      provider: "clickup",
+      op: "readback",
+      outcome: "failed",
+      errorClass: "provider_unavailable",
+      retryCount: 3,
+      captureInSentry: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(SDLC_OBSERVABILITY_SINK_TIMEOUT_MS);
+
+    await expect(emission).resolves.toMatchObject({ event: "lifecycle_provider_outage" });
+    expect(signals).toHaveLength(2);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      { event: "lifecycle_provider_outage", correlationId: `evd:provider-outage:${ISSUE_ID}` },
+      "sdlc_observability_sink_failed",
+    );
   });
 
   it("maps append-only evidence records to the contract event taxonomy", () => {

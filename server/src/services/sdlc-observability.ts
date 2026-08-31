@@ -3,6 +3,7 @@ import { logger } from "../middleware/logger.js";
 
 export const SDLC_OBSERVABILITY_SCHEMA_VERSION = 1;
 export const SDLC_LOKI_APP = "paperclip-sdlc-workflow";
+export const SDLC_OBSERVABILITY_SINK_TIMEOUT_MS = 2_000;
 
 export const SDLC_LIFECYCLE_EVENT_NAMES = [
   "lifecycle_class_assigned",
@@ -77,6 +78,22 @@ export type SdlcLifecycleEvent = {
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type SdlcObservabilityEnv = Record<string, string | undefined>;
+type SdlcSinkResult = "sent" | "disabled" | "failed";
+
+async function fetchSdlcSink(
+  fetchImpl: FetchLike,
+  input: string | URL | Request,
+  init: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SDLC_OBSERVABILITY_SINK_TIMEOUT_MS);
+  timeout.unref?.();
+  try {
+    return await fetchImpl(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9:._/-]{0,199}$/;
@@ -154,7 +171,7 @@ function lokiPushUrl(value: string): URL | null {
 export async function sendSdlcEventToLoki(
   event: SdlcLifecycleEvent,
   options: { fetchImpl?: FetchLike; env?: SdlcObservabilityEnv } = {},
-): Promise<"sent" | "disabled" | "failed"> {
+): Promise<SdlcSinkResult> {
   const env = options.env ?? process.env;
   const endpoint = env.PAPERCLIP_SDLC_LOKI_URL?.trim();
   const user = env.PAPERCLIP_SDLC_LOKI_USER?.trim();
@@ -166,7 +183,7 @@ export async function sendSdlcEventToLoki(
   const environment = safeEnvironment(env.PAPERCLIP_SDLC_ENVIRONMENT);
   const timestampNs = `${BigInt(Date.parse(event.occurredAt)) * 1_000_000n}`;
   try {
-    const response = await (options.fetchImpl ?? fetch)(url, {
+    const response = await fetchSdlcSink(options.fetchImpl ?? fetch, url, {
       method: "POST",
       headers: {
         Authorization: `Basic ${Buffer.from(`${user}:${token}`).toString("base64")}`,
@@ -210,7 +227,7 @@ function sentryStoreTarget(dsnValue: string): { url: URL; publicKey: string } | 
 export async function sendSdlcFailureToSentry(
   event: SdlcLifecycleEvent,
   options: { fetchImpl?: FetchLike; env?: SdlcObservabilityEnv } = {},
-): Promise<"sent" | "disabled" | "failed"> {
+): Promise<SdlcSinkResult> {
   const env = options.env ?? process.env;
   const dsn = env.PAPERCLIP_SDLC_SENTRY_DSN?.trim();
   if (!dsn) return "disabled";
@@ -247,7 +264,7 @@ export async function sendSdlcFailureToSentry(
     },
   };
   try {
-    const response = await (options.fetchImpl ?? fetch)(target.url, {
+    const response = await fetchSdlcSink(options.fetchImpl ?? fetch, target.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -266,10 +283,10 @@ export async function emitSdlcLifecycleEvent(input: SdlcLifecycleEventInput): Pr
   if (!event) return null;
   logger.info({ sdlcEvent: event }, "sdlc_lifecycle_event");
 
-  const writes: Array<Promise<unknown>> = [sendSdlcEventToLoki(event)];
+  const writes: Array<Promise<SdlcSinkResult>> = [sendSdlcEventToLoki(event)];
   if (input.captureInSentry) writes.push(sendSdlcFailureToSentry(event));
   const results = await Promise.allSettled(writes);
-  if (results.some((result) => result.status === "rejected")) {
+  if (results.some((result) => result.status === "rejected" || result.value === "failed")) {
     logger.warn({ event: event.event, correlationId: event.correlationId }, "sdlc_observability_sink_failed");
   }
   return event;
