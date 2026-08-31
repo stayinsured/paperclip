@@ -55,6 +55,25 @@ If a dimension is privacy-protected before emission, emit only the protected
 value and its matching public marker as defined by the typed helper or generated
 contract. Do not emit private source material in telemetry dimensions.
 
+## SDLC Workflow Operational Events
+
+The server emits SDLC workflow lifecycle events to optional operator-managed Loki
+and Sentry sinks. This is an operational control-plane surface. It is separate
+from the first-party product telemetry contract in
+`generated/paperclip-telemetry.ts`. The closed event taxonomy and runtime schema
+live in `server/src/services/sdlc-observability.ts`.
+
+Each event carries internal company, issue, run, and correlation identifiers. It
+can also carry a lifecycle phase, risk class, provider operation, safe outcome or
+error class, and bounded numeric timing or retry fields. It must not carry issue
+titles, descriptions, comments, document bodies, request or provider payloads,
+customer identifiers, raw exceptions, stack traces, credentials, tokens, or
+DSNs. The builder drops unknown fields and rejects unsafe identifier values.
+
+Loki stores the complete allowlisted event. Sentry stores only explicitly
+classified failures. Both exports are opt-in and best-effort. A sink failure must
+not change the lifecycle mutation result.
+
 ## Sandbox Startup Trace Spans
 
 Paperclip opens OpenTelemetry spans on the sandbox start path. These spans are a
