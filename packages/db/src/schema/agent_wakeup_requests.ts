@@ -18,6 +18,7 @@ export const agentWakeupRequests = pgTable(
     requestedByActorType: text("requested_by_actor_type"),
     requestedByActorId: text("requested_by_actor_id"),
     idempotencyKey: text("idempotency_key"),
+    continuationKey: text("continuation_key"),
     runId: uuid("run_id"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
@@ -40,5 +41,8 @@ export const agentWakeupRequests = pgTable(
     reviewPathRecoveryIdempotencyUq: uniqueIndex("agent_wakeup_requests_review_path_recovery_idempotency_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} LIKE 'issue_review_path_lost:%' AND ${table.status} <> 'skipped'`),
+    continuationKeyUq: uniqueIndex("agent_wakeup_requests_continuation_key_uq")
+      .on(table.companyId, table.agentId, table.continuationKey)
+      .where(sql`${table.continuationKey} IS NOT NULL AND ${table.status} <> 'skipped'`),
   }),
 );

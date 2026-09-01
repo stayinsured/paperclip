@@ -158,6 +158,7 @@ import {
 } from "./workspace-instance-cleanup.js";
 import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
+import { readIssueContinuationSnapshot } from "./issue-continuations.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
@@ -2459,6 +2460,7 @@ interface WakeupOptions {
   reason?: string | null;
   payload?: Record<string, unknown> | null;
   idempotencyKey?: string | null;
+  changeDrivenContinuation?: boolean;
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
@@ -8487,6 +8489,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         triggerDetail: input.triggerDetail,
         reason: wakeReason,
         idempotencyKey: `issue-monitor:${claimed.id}:${scheduledAtIso}`,
+        changeDrivenContinuation: true,
         payload: {
           issueId: claimed.id,
           nextCheckAt: scheduledAtIso,
@@ -18472,6 +18475,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       parseObject(enrichedContextSnapshot.paperclipPluginExecution).attemptId,
     );
     let issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
+    let continuationKey: string | null = null;
 
     const agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
@@ -18491,6 +18495,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
         idempotencyKey: opts.idempotencyKey ?? null,
+        continuationKey,
         finishedAt: new Date(),
         ...patch,
       });
@@ -18766,8 +18771,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             executionWorkspacePreference: issues.executionWorkspacePreference,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
             assigneeAgentId: issues.assigneeAgentId,
+            assigneeUserId: issues.assigneeUserId,
+            parentId: issues.parentId,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
+            monitorNextCheckAt: issues.monitorNextCheckAt,
+            monitorLastTriggeredAt: issues.monitorLastTriggeredAt,
+            monitorAttemptCount: issues.monitorAttemptCount,
             createdAt: issues.createdAt,
           })
           .from(issues)
@@ -18786,9 +18796,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
+            continuationKey,
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
+        }
+
+        if (opts.changeDrivenContinuation) {
+          const continuation = await readIssueContinuationSnapshot(tx as unknown as Db, issue);
+          continuationKey = continuation.key;
+          enrichedContextSnapshot.continuationKey = continuation.key;
+          enrichedContextSnapshot.continuationSources = {
+            interactionRevisions: continuation.interactionRevisions,
+            evidenceRevisionId: continuation.evidenceRevisionId,
+            blockerSetRevision: continuation.blockerSetRevision,
+            monitorAnchor: continuation.monitorAnchor,
+          };
+          const existingContinuationWake = await tx
+            .select({ runId: agentWakeupRequests.runId })
+            .from(agentWakeupRequests)
+            .where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.continuationKey, continuation.key),
+              ne(agentWakeupRequests.status, "skipped"),
+            ))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (existingContinuationWake) {
+            return {
+              kind: "deduplicated" as const,
+              runId: existingContinuationWake.runId,
+            };
+          }
         }
 
         if (opts.normalModelHandback && opts.idempotencyKey) {
@@ -18827,6 +18867,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
+            continuationKey,
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
@@ -19083,6 +19124,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
+            continuationKey,
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
@@ -19194,6 +19236,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
               idempotencyKey: opts.idempotencyKey ?? null,
+              continuationKey,
               finishedAt: now,
             });
             await logActivity(tx as unknown as Db, {
@@ -19287,6 +19330,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
               idempotencyKey: opts.idempotencyKey ?? null,
+              continuationKey,
               runId: mergedRun.id,
               finishedAt: new Date(),
             });
@@ -19353,6 +19397,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
               idempotencyKey: opts.idempotencyKey ?? null,
+              continuationKey,
             });
 
             return { kind: "deferred" as const };
@@ -19467,6 +19512,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 requestedByActorType: opts.requestedByActorType ?? null,
                 requestedByActorId: opts.requestedByActorId ?? null,
                 idempotencyKey: opts.idempotencyKey ?? null,
+                continuationKey,
                 finishedAt: throttleNow,
               });
               return { kind: "skipped" as const };
@@ -19495,6 +19541,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
+            continuationKey,
             finishedAt: now,
           });
           if (source === "timer") {
@@ -19522,6 +19569,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
+            continuationKey,
           })
           .returning()
           .then((rows) => rows[0]);
@@ -19646,6 +19694,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         requestedByActorType: opts.requestedByActorType ?? null,
         requestedByActorId: opts.requestedByActorId ?? null,
         idempotencyKey: opts.idempotencyKey ?? null,
+        continuationKey,
         runId: mergedRun.id,
         finishedAt: new Date(),
       });
@@ -19678,6 +19727,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           requestedByActorType: opts.requestedByActorType ?? null,
           requestedByActorId: opts.requestedByActorId ?? null,
           idempotencyKey: opts.idempotencyKey ?? null,
+          continuationKey,
           finishedAt: now,
         });
         if (source === "timer") {
@@ -19705,6 +19755,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           requestedByActorType: opts.requestedByActorType ?? null,
           requestedByActorId: opts.requestedByActorId ?? null,
           idempotencyKey: opts.idempotencyKey ?? null,
+          continuationKey,
         })
         .returning()
         .then((rows) => rows[0]);

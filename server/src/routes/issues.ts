@@ -142,7 +142,12 @@ import {
 import {
   buildSdlcTaskIdempotencyKey,
   recordSdlcProvisioningComplete,
+  SDLC_EVIDENCE_DOCUMENT_KEY,
 } from "../services/sdlc-lifecycle.js";
+import {
+  projectIssueNextAction,
+  readIssueContinuationSnapshot,
+} from "../services/issue-continuations.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import {
   decideIssueReviewPathRecovery,
@@ -2061,6 +2066,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
       mutation: "interaction",
     },
     idempotencyKey: input.idempotencyKey ?? `interaction:${input.interaction.id}:${input.interaction.status}`,
+    changeDrivenContinuation: true,
     requestedByActorType: input.actor.actorType,
     requestedByActorId: input.actor.actorId,
     contextSnapshot: {
@@ -6082,6 +6088,7 @@ export function issueRoutes(
       referenceSummary,
       successfulRunHandoffStates,
       scheduledRetry,
+      continuationSnapshot,
       activeRecoveryAction,
       linkedCases,
       inboxArchiveFields,
@@ -6097,6 +6104,7 @@ export function issueRoutes(
       issueReferencesSvc.listIssueReferenceSummary(issue.id),
       listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id]),
       svc.getCurrentScheduledRetry(issue.id),
+      readIssueContinuationSnapshot(db, issue),
       recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
       listIssueLinkedCases(db, issue.companyId, issue.id),
       inboxArchiveFieldsPromise,
@@ -6133,6 +6141,11 @@ export function issueRoutes(
       productivityReview,
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       scheduledRetry,
+      nextAction: projectIssueNextAction({
+        issue,
+        snapshot: continuationSnapshot,
+        scheduledRetry,
+      }),
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       blockedBy: relationsWithRecoveryActions.blockedBy,
       blocks: relationsWithRecoveryActions.blocks,
@@ -6876,6 +6889,36 @@ export function issueRoutes(
       actor,
       documentChanged: true,
     });
+
+    if (
+      doc.key === SDLC_EVIDENCE_DOCUMENT_KEY
+      && issue.assigneeAgentId
+      && !(actor.actorType === "agent" && actor.actorId === issue.assigneeAgentId)
+      && !["done", "cancelled"].includes(issue.status)
+    ) {
+      void heartbeat.wakeup(issue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "sdlc_evidence_revised",
+        payload: {
+          issueId: issue.id,
+          documentId: doc.id,
+          evidenceRevisionId: doc.latestRevisionId,
+          mutation: "document",
+        },
+        changeDrivenContinuation: true,
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: issue.id,
+          taskId: issue.id,
+          documentId: doc.id,
+          evidenceRevisionId: doc.latestRevisionId,
+          wakeReason: "sdlc_evidence_revised",
+          source: "issue.sdlc_evidence.updated",
+        },
+      }).catch((err) => logger.warn({ err, issueId: issue.id }, "failed to wake assignee after SDLC evidence revision"));
+    }
 
     res.status(result.created ? 201 : 200).json(doc);
   });
@@ -9950,6 +9993,7 @@ export function issueRoutes(
             mutation: input.mutation,
           },
           idempotencyKey,
+          changeDrivenContinuation: true,
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
@@ -10122,6 +10166,7 @@ export function issueRoutes(
             resolvedBlockerIssueId: issue.id,
           },
           idempotencyKey: ["sdlc_dependency_activated", activatedIssue.id, issue.id].join(":"),
+          changeDrivenContinuation: true,
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
@@ -10666,6 +10711,7 @@ export function issueRoutes(
           mutation: "interaction",
         },
         idempotencyKey: `interaction-pending:${interaction.id}`,
+        changeDrivenContinuation: true,
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
         contextSnapshot: {
@@ -11854,6 +11900,7 @@ export function issueRoutes(
             mutation: "comment",
           },
           idempotencyKey,
+          changeDrivenContinuation: true,
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
