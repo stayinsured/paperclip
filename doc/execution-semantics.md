@@ -334,6 +334,18 @@ Document-scoped activity may still route work when it is converted into an expli
 
 Freeform document approval text is not auto-acceptance. Plan approval, implementation approval, or review acceptance must flow through the explicit interaction, approval, execution-policy, assignment, or blocker primitives that define who owns the next move.
 
+### Change-driven continuation suppression
+
+Change-driven wake paths may tag their wake with `changeDrivenContinuation`. Before such a wake creates a run, the runtime computes a continuation key from the current issue state: the ids and revisions of pending thread interactions, the governed evidence-document revision, a hash of the unresolved blocker set, and the persisted monitor anchor. The key is stored on the wake request row under a partial uniqueness guarantee `(company_id, agent_id, continuation_key)` over non-skipped requests.
+
+If a non-skipped wake request with the same key already exists, the wake returns deduplicated: no new run, no new comment. The key changes only when the underlying state changes, so replaying an unchanged pending interaction or an unchanged deterministic guard rejection is silent, while a new evidence revision, a new interaction revision, a blocker-set change, or a monitor re-anchor each wake exactly once. The check runs before run creation and before same-issue coalescing, and it never suppresses guard rejections themselves — a fail-closed guard still skips without a run, and its replay stays silent for the same reason.
+
+Wakes that are not tagged `changeDrivenContinuation` keep their existing semantics. Persisted monitor wakes join the scheme by including the monitor anchor in their key, so a re-armed monitor produces a new key and wakes normally.
+
+### Next-action projection
+
+The issue detail payload exposes a single `nextAction` projection derived from the same state: `approval` when a thread interaction is pending, `blocker` while unresolved blockers exist, `monitor` while a persisted monitor is scheduled, `run_retry` while a scheduled run retry is pending, and `evidence` when a governed issue has no live execution and no evidence document yet. The projection names the owner type, the source id, the source revision, and the scheduled time where applicable, and the issue detail UI renders it as one card so the board sees the same next action the scheduler would act on.
+
 ### Comment interrupts and ownership handoffs
 
 A board comment can be an interrupt, an ownership change, both, or neither. Paperclip must keep those concepts separate in the product contract.
