@@ -33,6 +33,7 @@ import {
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
+import { terminalCommentDraftSchema } from "../terminal-comment.js";
 import { agentAdmissionCapabilitySchema } from "./agent.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -769,6 +770,9 @@ export const addIssueCommentSchema = z.object({
   authorType: issueCommentAuthorTypeSchema.optional(),
   presentation: issueCommentPresentationSchema.nullable().optional(),
   metadata: issueCommentMetadataSchema.nullable().optional(),
+  // Structured terminal summary submitted by adapter runs. Run-scoped only;
+  // the comment route gates and renders it via the shared finalizer.
+  terminal: terminalCommentDraftSchema.nullable().optional(),
   reopen: z.boolean().optional(),
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),

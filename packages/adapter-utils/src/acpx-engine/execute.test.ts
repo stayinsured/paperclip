@@ -570,6 +570,32 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(prompt).not.toContain("$PAPERCLIP_API_BASE/api/issues/$PAPERCLIP_TASK_ID");
   });
 
+  it("documents structured terminal-comment fields in the scoped comment note", async () => {
+    const { meta } = await runExecutor(
+      { agent: "custom", agentCommand: "node ./fake-acp.js" },
+      {
+        authToken: "runtime-secret-token",
+        context: {
+          taskId: "issue-1",
+          wakeReason: "issue_assigned",
+          paperclipWake: {
+            reason: "issue_assigned",
+            issue: { id: "issue-1", identifier: "TEST-1" },
+          },
+        },
+      },
+    );
+
+    const prompt = String(meta[0]?.prompt ?? "");
+    expect(prompt).toContain("Terminal summary comments may also carry structured fields");
+    expect(prompt).toContain("progress-transcript headings are stripped before the comment is stored");
+    expect(prompt).toContain("raw execution detail belongs in run logs");
+    expect(prompt).toContain('"terminal":{"status":"done - outcome"');
+    expect(prompt).toContain('"evidence":["focused checks pass"]');
+    expect(prompt).toContain('"nextOwner":"reviewer"');
+    expect(prompt).toContain('"disposition":"PR merged"');
+  });
+
   it("emits ACP text deltas as stdout transcript records", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
