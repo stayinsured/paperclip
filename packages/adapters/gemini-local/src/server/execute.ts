@@ -123,6 +123,7 @@ function renderApiAccessNote(env: Record<string, string>): string {
     `  run_shell_command({ command: "curl -s -H \\"Authorization: Bearer $PAPERCLIP_API_KEY\\" \\"$PAPERCLIP_API_URL/api/agents/me\\"" })`,
     "POST/PATCH example:",
     `  run_shell_command({ command: "curl -s -X POST -H \\"Authorization: Bearer $PAPERCLIP_API_KEY\\" -H 'Content-Type: application/json' -H \\"X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID\\" -d '{...}' \\"$PAPERCLIP_API_URL/api/issues/{id}/checkout\\"" })`,
+    "Terminal summary comments may also carry structured fields: terminal {status (required), evidence, limitation, nextOwner, disposition} on POST /api/issues/{issueId}/comments. Progress-transcript headings are stripped before the comment is stored; raw execution detail belongs in run logs.",
     "",
     "",
   ].join("\n");

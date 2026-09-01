@@ -101,6 +101,7 @@ import {
   type WorkspaceRuntimeService,
   issueWriteDenialCodeForResponsibleUserDenial,
   issueWriteDenialResponse,
+  finalizeTerminalComment,
   type IssueWriteDenialCode,
   type IssueWriteDenialContext,
 } from "@paperclipai/shared";
@@ -11401,6 +11402,30 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    // Structured terminal-comment finalizer: adapter-run comments may carry a
+    // structured draft, and every run-scoped body is stripped of known
+    // progress-transcript headings before it becomes durable. The rewritten
+    // body below is what every downstream consumer (presentation derivation,
+    // auto-approval matching, persistence) reads, so the write and its audit
+    // trail can never diverge. Raw execution detail stays in run logs.
+    const runScopedComment = typeof actor.runId === "string" && actor.runId.length > 0;
+    if (req.body.terminal != null && !runScopedComment) {
+      res.status(403).json({
+        error: "Only run-scoped adapter comments may submit structured terminal fields",
+        details: { securityPrinciples: ["Least Privilege", "Complete Mediation"] },
+      });
+      return;
+    }
+    const terminalFinalization = finalizeTerminalComment({
+      runScoped: runScopedComment,
+      body: req.body.body,
+      terminal: req.body.terminal ?? null,
+    });
+    if (!terminalFinalization.ok) {
+      res.status(422).json({ error: terminalFinalization.error });
+      return;
+    }
+    req.body.body = terminalFinalization.body;
     const commentPresentation = req.body.presentation ??
       await deriveRecoveryCommentPresentation(req, issue.companyId, req.body.body);
     const reopenRequested = req.body.reopen === true;

@@ -78,6 +78,7 @@ function renderApiAccessNote(env: Record<string, string>): string {
     "Paperclip API access note:",
     "Use shell commands with curl to make Paperclip API requests when needed.",
     "Include X-Paperclip-Run-Id on mutating requests.",
+    "Terminal summary comments may also carry structured fields: terminal {status (required), evidence, limitation, nextOwner, disposition} on POST /api/issues/{issueId}/comments. Progress-transcript headings are stripped before the comment is stored; raw execution detail belongs in run logs.",
     "",
     "",
   ].join("\n");
