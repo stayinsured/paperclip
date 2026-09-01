@@ -143,6 +143,7 @@ import {
   buildSdlcTaskIdempotencyKey,
   recordSdlcProvisioningComplete,
 } from "../services/sdlc-lifecycle.js";
+import { resolveTerminalReviewerRouting } from "../services/terminal-reviewer-routing.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import {
   decideIssueReviewPathRecovery,
@@ -8842,6 +8843,7 @@ export function issueRoutes(
       onBehalfOfUserId: _requestedOnBehalfOfUserId,
       ...updateFields
     } = req.body;
+    let effectiveReviewRequest = reviewRequest;
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -9054,10 +9056,20 @@ export function issueRoutes(
       );
     }
     const previousExecutionPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
-    const nextExecutionPolicy =
+    let nextExecutionPolicy =
       updateFields.executionPolicy !== undefined
         ? (updateFields.executionPolicy as NormalizedExecutionPolicy | null)
         : previousExecutionPolicy;
+    const terminalReviewerRouting = await resolveTerminalReviewerRouting(db, {
+      issue: existing,
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      policy: nextExecutionPolicy,
+    });
+    if (terminalReviewerRouting) {
+      nextExecutionPolicy = terminalReviewerRouting.policy;
+      updateFields.executionPolicy = terminalReviewerRouting.policy;
+      effectiveReviewRequest ??= terminalReviewerRouting.reviewRequest;
+    }
     if (normalizedAssigneeAgentId !== undefined) {
       updateFields.assigneeAgentId = normalizedAssigneeAgentId;
     }
@@ -9086,7 +9098,7 @@ export function issueRoutes(
       },
       allowBoardOverride: req.actor.type === "board",
       commentBody,
-      reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
+      reviewRequest: effectiveReviewRequest === undefined ? undefined : effectiveReviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
     });
     const decisionId = transition.decision ? randomUUID() : null;
@@ -9160,17 +9172,17 @@ export function issueRoutes(
         return;
       }
     }
-    if (reviewRequest !== undefined && transition.patch.executionState === undefined) {
+    if (effectiveReviewRequest !== undefined && transition.patch.executionState === undefined) {
       const existingExecutionState = parseIssueExecutionState(existing.executionState);
       if (!existingExecutionState || existingExecutionState.status !== "pending") {
-        if (reviewRequest !== null) {
+        if (effectiveReviewRequest !== null) {
           res.status(422).json({ error: "reviewRequest requires an active review or approval stage" });
           return;
         }
       } else {
         updateFields.executionState = {
           ...existingExecutionState,
-          reviewRequest,
+          reviewRequest: effectiveReviewRequest,
         };
       }
     }

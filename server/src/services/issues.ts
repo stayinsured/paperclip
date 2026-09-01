@@ -95,7 +95,12 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
-import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  buildInitialIssueMonitorFields,
+  normalizeIssueExecutionPolicy,
+} from "./issue-execution-policy.js";
+import { resolveTerminalReviewerRouting } from "./terminal-reviewer-routing.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -7624,6 +7629,35 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
+      }
+
+      if (issueData.status === "in_review" && existing.status !== "in_review") {
+        const requestedPolicy = normalizeIssueExecutionPolicy(
+          issueData.executionPolicy === undefined
+            ? existing.executionPolicy
+            : issueData.executionPolicy,
+        );
+        const routing = await resolveTerminalReviewerRouting(dbOrTx, {
+          issue: existing,
+          requestedStatus: issueData.status,
+          policy: requestedPolicy,
+        });
+        if (routing) {
+          const transition = applyIssueExecutionPolicyTransition({
+            issue: existing,
+            policy: routing.policy,
+            previousPolicy: normalizeIssueExecutionPolicy(existing.executionPolicy),
+            requestedStatus: issueData.status,
+            requestedAssigneePatch: {
+              assigneeAgentId: issueData.assigneeAgentId,
+              assigneeUserId: issueData.assigneeUserId,
+            },
+            actor: { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+            reviewRequest: routing.reviewRequest,
+          });
+          issueData.executionPolicy = routing.policy as unknown as Record<string, unknown>;
+          Object.assign(issueData, transition.patch);
+        }
       }
 
       if (issueData.status) {

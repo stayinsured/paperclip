@@ -67,8 +67,12 @@ const mockIssueThreadInteractionService = vi.hoisted(() => ({
 const mockIssueApprovalService = vi.hoisted(() => ({
   listApprovalsForIssue: vi.fn(async () => []),
 }));
+const mockResolveTerminalReviewerRouting = vi.hoisted(() => vi.fn(async () => null));
 
 function registerModuleMocks() {
+  vi.doMock("../services/terminal-reviewer-routing.js", () => ({
+    resolveTerminalReviewerRouting: mockResolveTerminalReviewerRouting,
+  }));
   vi.doMock("../services/index.js", () => ({
     companyService: () => ({
       getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
@@ -187,6 +191,7 @@ describe("issue execution policy routes", () => {
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../routes/issues.js");
     vi.doUnmock("../middleware/index.js");
+    vi.doUnmock("../services/terminal-reviewer-routing.js");
     registerModuleMocks();
     vi.clearAllMocks();
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
