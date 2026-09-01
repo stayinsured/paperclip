@@ -121,6 +121,7 @@ import {
   hasVisibleMonitorSurface,
 } from "../components/IssueMonitorBanner";
 import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
+import { IssueNextActionCard } from "../components/IssueNextActionCard";
 import { IssueProperties } from "../components/IssueProperties";
 import { PendingDecisionStrip } from "../components/PendingDecisionStrip";
 import { IssueReviewPanel } from "../components/IssueReviewPanel";
@@ -1596,6 +1597,7 @@ function IssueDetailActivityTab({
           ))}
         </div>
       )}
+      <IssueNextActionCard projection={issue.nextAction} />
       <IssueScheduledRetryCard issueId={issue.id} scheduledRetry={issue.scheduledRetry ?? null} />
       {/* Waiting-monitor state now lives in the pinned top banner (IssueMonitorBanner) — PAP-14557 decision 1. */}
     </>
