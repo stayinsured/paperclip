@@ -330,6 +330,53 @@ describe("successful run handoff decision", () => {
     });
   });
 
+  it.each([
+    [
+      "source_scoped_recovery_action",
+      { source: "issue_recovery_action", recoveryCause: "successful_run_missing_state" },
+    ],
+    [
+      "issue_continuation_needed",
+      { retryReason: "issue_continuation_needed", source: "issue.productive_terminal_continuation_recovery" },
+    ],
+    ["issue_assignment_recovery", {}],
+    ["execution_review_participant_recovery", {}],
+    ["provider_quota_recovery", {}],
+  ])(
+    "does not re-flag a recovery machinery run it spawned to close the loop (%s)",
+    (wakeReason, extraContext) => {
+      const decision = decide({
+        run: {
+          ...run,
+          id: "run-recovery",
+          contextSnapshot: {
+            issueId: "issue-1",
+            taskId: "issue-1",
+            wakeReason,
+            ...extraContext,
+          },
+        } as any,
+      });
+
+      expect(decision).toEqual({
+        kind: "skip",
+        reason: "stranded recovery machinery owns the next action",
+      });
+      expect(isSuccessfulRunHandoffValidPathSkip(decision)).toBe(true);
+    },
+  );
+
+  it("still flags an ordinary successful run whose only disposition is a comment and an in_progress re-assertion", () => {
+    const decision = decide({
+      run: {
+        ...run,
+        contextSnapshot: { issueId: "issue-1", wakeReason: "issue_heartbeat" },
+      } as any,
+    });
+
+    expect(decision.kind).toBe("enqueue");
+  });
+
   it("does not queue for issue monitor maintenance runs", () => {
     expect(decide({
       run: {

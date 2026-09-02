@@ -975,6 +975,41 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .then((rows) => Boolean(rows[0]));
   }
 
+  // STA-2951: the disposition of record for an explicit continuation is a
+  // first-class status write by the assignee. PATCHing an issue to in_progress
+  // always either flips `status` or refreshes `startedAt`, and agent-authored
+  // updates carry actor attribution in the activity log, so an `issue.updated`
+  // activity by the assignee touching either field during or after the given
+  // run is an unambiguous continuation re-assertion.
+  async function hasAssigneeContinuationAssertionSinceRun(
+    issue: typeof issues.$inferSelect,
+    latestRun: LatestIssueRun,
+  ) {
+    if (!issue.assigneeAgentId || !latestRun) return false;
+    const since = latestRun.startedAt ?? latestRun.createdAt ?? null;
+    if (!since) return false;
+    const assertion = await db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, issue.companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issue.id),
+          eq(activityLog.action, "issue.updated"),
+          eq(activityLog.agentId, issue.assigneeAgentId),
+          gte(activityLog.createdAt, since),
+          sql`(
+            ${activityLog.details} -> 'changes' -> 'status' ->> 'to' = 'in_progress'
+            or ${activityLog.details} -> 'changes' ? 'startedAt'
+          )`,
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return Boolean(assertion);
+  }
+
   async function wasTodoHandedBackDuringOrAfterLatestRun(
     issue: typeof issues.$inferSelect,
     latestRun: LatestIssueRun,
@@ -3668,6 +3703,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       successfulContinuationObserved: 0,
       orphanBlockersAssigned: 0,
       successfulRunHandoffEscalated: 0,
+      successfulRunHandoffContinuationAsserted: 0,
       reviewParticipantRequeued: 0,
       escalated: 0,
       waitingOnReviewResolved: 0,
@@ -4128,20 +4164,29 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
-        const updated = await escalateStrandedAssignedIssue({
-          issue,
-          previousStatus: "in_progress",
-          latestRun,
-          recoveryCause: SUCCESSFUL_RUN_MISSING_STATE_REASON,
-          successfulRunHandoffEvidence: handoffEvidence,
-        });
-        if (updated) {
-          result.successfulRunHandoffEscalated += 1;
-          result.issueIds.push(issue.id);
+        // STA-2951: an in_progress re-assertion by the assignee during the
+        // corrective handoff run (a first-class status write, not a comment)
+        // is the recorded continuation disposition. Escalating past it
+        // re-blocks a live issue and re-enters the recovery loop the run just
+        // closed; fall through to the standard continuation ladder instead.
+        if (await hasAssigneeContinuationAssertionSinceRun(issue, latestRun)) {
+          result.successfulRunHandoffContinuationAsserted += 1;
         } else {
-          result.skipped += 1;
+          const updated = await escalateStrandedAssignedIssue({
+            issue,
+            previousStatus: "in_progress",
+            latestRun,
+            recoveryCause: SUCCESSFUL_RUN_MISSING_STATE_REASON,
+            successfulRunHandoffEvidence: handoffEvidence,
+          });
+          if (updated) {
+            result.successfulRunHandoffEscalated += 1;
+            result.issueIds.push(issue.id);
+          } else {
+            result.skipped += 1;
+          }
+          continue;
         }
-        continue;
       }
       if (isSuccessfulInProgressContinuationRun(latestRun)) {
         const successfulRun = latestRun;
