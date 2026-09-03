@@ -159,8 +159,19 @@ From a reflection issue (assigned to the target's manager or the requester):
 
 1. Attach the proposal document: `PUT /api/issues/{issueId}/documents/reflection-proposal`.
 2. If a draft skill was written, commit it under `skills/<skill-slug>/` (or attach it) and link it in the proposal.
-3. Open the acceptance gate with a task interaction on the reflection issue. Mutations that change instructions, skills, or tool descriptions must use `request_confirmation`, show the diff in `payload.detailsMarkdown`, set `continuationPolicy: wake_assignee_on_accept`, and include the exact `payload.target.key` listed below.
-4. Leave a comment summarizing: target agent, window, clusters found, surfaces touched, link to the proposal, link to the interaction, and the next-step owner.
+3. Register **every target from this proposal in one request before opening any confirmation**:
+
+   ```sh
+   curl -sS -X POST "$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/reflection-proposals" \
+     -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+     -H "Content-Type: application/json" \
+     -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
+     -d '{"version":1,"proposalKey":"<stable-proposal-key>","targets":[...]}'
+   ```
+
+   Each target needs `targetKey`, `targetType`, `targetLabel`, `proposalRevision`, and either an exact `proposedDiff` with state `proposed` or evidence with state `evidence_backed_no_change`. Reuse the exact same body and proposal key on retry. Never omit an earlier target from a retry.
+4. Open the acceptance gates on the reflection issue. Mutations that change instructions, skills, or tool descriptions must use `request_confirmation`, show the **exact registered diff** in `payload.detailsMarkdown`, set `continuationPolicy: wake_assignee_on_accept`, and bind both `payload.target.key` and `payload.target.revisionId` to the registered target. Open one confirmation per target. A later target does not replace an earlier pending or accepted target; serialize the decisions when that is easier to review.
+5. Leave a comment summarizing: target agent, window, clusters found, all ledger targets and states, link to the proposal, link to each interaction, and the next-step owner.
 
 Server-enforced mutation target keys:
 
@@ -173,13 +184,15 @@ Server-enforced mutation target keys:
 
 ### 10) Apply only after acceptance, in a follow-up run
 
-When the interaction resolves **accepted**, apply the change in a *separate* run:
+When an interaction resolves **accepted**, Paperclip creates or resumes one separate child application issue, assigns it to the Reflection Coach that proposed the target, and wakes that coach even when the reflection issue belongs to a manager or another agent. Apply only from that child issue and its run:
 
-- **AGENTS.md** — update the target's managed instruction file exactly as the accepted diff specified.
+- **AGENTS.md** — update the target's managed instruction file exactly as the accepted diff specified. The instruction endpoint consumes the accepted interaction only after write/readback and returns a server-authored `reflectionReceipt`.
 - **Skill** — install/update the skill in the company library, then `POST /api/agents/<targetAgentId>/skills/sync` when the target should receive it.
 - **Tool description** — update the target agent's description/profile field that the accepted diff named.
 
-The server rejects Reflection Coach mutations unless the accepted `request_confirmation` was created by Reflection Coach in a previous run, has a displayed diff, and is bound to the resource by one of the target keys above. If the interaction was rejected or is still pending, apply nothing. If you were asked to apply without a reviewed diff and an accepted interaction, refuse and name the gate — no-same-run-apply is load-bearing.
+After an instruction apply, read `GET /api/issues/{reflectionIssueId}/reflection-evidence` and confirm the target is `applied`, exactly one receipt exists for it, `postWriteContent` matches the requested content, and the receipt names the application issue and current run. A retry with identical content returns the same receipt with `replay: true`; do not post another completion comment for that replay.
+
+The server rejects Reflection Coach mutations unless the accepted `request_confirmation` was created by Reflection Coach in a previous run, has a displayed diff, is registered in the reflection ledger, and is bound to the resource by one of the target keys above. If the interaction was rejected or is still pending, apply nothing. If you were asked to apply without a reviewed diff and an accepted interaction, refuse and name the gate — no-same-run-apply is load-bearing.
 
 ## Pitfalls
 
@@ -198,5 +211,7 @@ The server rejects Reflection Coach mutations unless the accepted `request_confi
 - [ ] `AGENTS.md` growth ≤ 20%, skills ≤ 15KB, tool descriptions ≤ 500 chars
 - [ ] Replay set has ≥3 past issues the rules still pass against
 - [ ] Proposal document linked from the reflection issue
+- [ ] Every target was registered together in the reflection ledger before confirmations were opened
 - [ ] An acceptance interaction (showing the diff) is open before any mutation
+- [ ] Applied instructions have one server receipt with exact post-write readback; replays did not create another receipt, run, or comment
 - [ ] No claim that the target has already "been updated" before acceptance + follow-up run

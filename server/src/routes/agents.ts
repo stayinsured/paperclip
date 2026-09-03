@@ -116,6 +116,11 @@ import {
   changeConsentGateService,
   touchesAgentProfileChangeConsentFields,
 } from "../services/change-consent-gate.js";
+import {
+  buildInstructionContentDiff,
+  reflectionLedgerService,
+} from "../services/reflection-ledger.js";
+import type { InstructionConsentGrant } from "../services/reflection-ledger.js";
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
@@ -1435,7 +1440,8 @@ export function agentRoutes(
     req: Request,
     targetAgent: { id: string; companyId: string },
     targetKeys: string[],
-  ) {
+    options?: { deferInstructionConsent?: boolean },
+  ): Promise<InstructionConsentGrant | null> {
     if (!hasCompanyAccess(req, targetAgent.companyId)) {
       throw notFound("Agent not found");
     }
@@ -1447,18 +1453,32 @@ export function agentRoutes(
       resource: { type: "agent", companyId: targetAgent.companyId, agentId: targetAgent.id },
       scope: changeScope,
     });
-    if (decision.allowed) {
-      return;
-    }
+    if (decision.allowed) return null;
 
     if (decision.reason === "deny_missing_consent" && req.actor.type === "agent" && targetKeys.length > 0) {
+      let consentGrant: InstructionConsentGrant | null = null;
       try {
-        await changeConsentGateService(db).assertConsented({
-          companyId: targetAgent.companyId,
-          actorAgentId: req.actor.agentId,
-          actorRunId: req.actor.runId ?? null,
-          targetKeys,
-        });
+        if (options?.deferInstructionConsent) {
+          const actorAgentId = req.actor.agentId;
+          const actorRunId = req.actor.runId;
+          if (!actorAgentId || !actorRunId || targetKeys.length !== 1) {
+            throw forbidden("A Reflection Coach run and one instruction target are required");
+          }
+          consentGrant = await reflectionLedgerService(db).findInstructionConsent({
+            companyId: targetAgent.companyId,
+            actorAgentId,
+            actorRunId,
+            targetKey: targetKeys[0]!,
+          });
+          if (!consentGrant) throw forbidden("Accepted reflection consent is not available");
+        } else {
+          await changeConsentGateService(db).assertConsented({
+            companyId: targetAgent.companyId,
+            actorAgentId: req.actor.agentId,
+            actorRunId: req.actor.runId ?? null,
+            targetKeys,
+          });
+        }
       } catch (err) {
         if (err instanceof HttpError && err.status === 403) {
           throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
@@ -1472,20 +1492,23 @@ export function agentRoutes(
         resource: { type: "agent", companyId: targetAgent.companyId, agentId: targetAgent.id },
         scope: { ...changeScope, consentedChange: true },
       });
-      if (consentedDecision.allowed) {
-        return;
-      }
+      if (consentedDecision.allowed) return consentGrant;
       throw forbidden(consentedDecision.explanation, authorizationDeniedDetails(consentedDecision));
     }
 
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
   }
 
-  async function assertCanManageInstructionsPath(req: Request, targetAgent: { id: string; companyId: string }) {
-    await assertCanApplyProtectedAgentChange(
+  async function assertCanManageInstructionsPath(
+    req: Request,
+    targetAgent: { id: string; companyId: string },
+    options?: { deferInstructionConsent?: boolean },
+  ) {
+    return assertCanApplyProtectedAgentChange(
       req,
       targetAgent,
       [agentInstructionsChangeTargetKey(targetAgent.id)],
+      options,
     );
   }
 
@@ -2979,18 +3002,55 @@ export function agentRoutes(
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
-    await assertCanManageInstructionsPath(req, existing);
-
+    const consentGrant = await assertCanManageInstructionsPath(req, existing, {
+      deferInstructionConsent: true,
+    });
     const actor = getActorInfo(req);
+    const beforeFile = consentGrant
+      ? await instructions.readFile(existing, req.body.path).catch((error) => {
+          if (error instanceof HttpError && error.status === 404) return null;
+          throw error;
+        })
+      : null;
+
+    if (consentGrant?.consumed) {
+      const receipt = consentGrant.existingReceipt;
+      if (
+        !receipt
+        || receipt.targetAgentId !== existing.id
+        || receipt.instructionPath !== req.body.path
+        || receipt.postWriteContent !== req.body.content
+        || beforeFile?.content !== req.body.content
+      ) {
+        throw forbidden("Accepted reflection consent was already consumed by a different instruction mutation");
+      }
+      res.json({ ...beforeFile, reflectionReceipt: receipt, replay: true });
+      return;
+    }
+
+    if (
+      consentGrant
+      && consentGrant.proposedDiff !== buildInstructionContentDiff(
+        req.body.path,
+        beforeFile?.content ?? "",
+        req.body.content,
+      )
+    ) {
+      throw forbidden("Instruction mutation must exactly match the accepted reflection diff");
+    }
+
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
       clearLegacyPromptTemplate: req.body.clearLegacyPromptTemplate,
     });
+    if (result.file.content !== req.body.content) {
+      throw unprocessable("Instruction post-write readback did not match the requested content");
+    }
     const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
       existing.companyId,
       result.adapterConfig,
       { strictMode: strictSecretsMode, adapterType: existing.adapterType },
     );
-    await svc.update(
+    const updatedAgent = await svc.update(
       id,
       { adapterConfig: normalizedAdapterConfig },
       {
@@ -3001,6 +3061,25 @@ export function agentRoutes(
         },
       },
     );
+    if (!updatedAgent) throw notFound("Agent not found");
+    const authoritativeFile = consentGrant
+      ? await instructions.readFile(updatedAgent, req.body.path)
+      : result.file;
+    if (authoritativeFile.content !== req.body.content) {
+      throw unprocessable("Instruction post-write readback did not match the requested content");
+    }
+
+    const receiptResult = consentGrant
+      ? await reflectionLedgerService(db).consumeInstructionConsent({
+          grant: consentGrant,
+          targetAgentId: existing.id,
+          instructionPath: req.body.path,
+          beforeContent: beforeFile?.content ?? "",
+          postWriteContent: authoritativeFile.content,
+          actorAgentId: actor.agentId!,
+          actorRunId: actor.runId!,
+        })
+      : null;
 
     await logActivity(db, {
       companyId: existing.companyId,
@@ -3016,10 +3095,71 @@ export function agentRoutes(
         path: result.file.path,
         size: result.file.size,
         clearLegacyPromptTemplate: req.body.clearLegacyPromptTemplate === true,
+        reflectionReceiptId: receiptResult?.receipt.id ?? null,
+        reflectionIssueId: receiptResult?.receipt.issueId ?? null,
       },
     });
 
-    res.json(result.file);
+    if (receiptResult && !receiptResult.replay) {
+      const receipt = receiptResult.receipt;
+      await logActivity(db, {
+        companyId: receipt.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "reflection.target_applied",
+        entityType: "issue",
+        entityId: receipt.issueId,
+        details: {
+          targetId: receipt.ledgerTargetId,
+          targetKey: receipt.targetKey,
+          receiptId: receipt.id,
+          acceptedInteractionId: receipt.acceptedInteractionId,
+          applicationIssueId: receipt.applicationIssueId,
+        },
+      });
+      const sourceIssue = await issueService(db).getById(receipt.issueId);
+      if (
+        sourceIssue?.companyId === receipt.companyId
+        && sourceIssue.assigneeAgentId
+        && sourceIssue.assigneeAgentId !== actor.agentId
+      ) {
+        void heartbeat.wakeup(sourceIssue.assigneeAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_commented",
+          payload: {
+            issueId: sourceIssue.id,
+            reflectionTargetId: receipt.ledgerTargetId,
+            instructionMutationReceiptId: receipt.id,
+            mutation: "reflection_evidence",
+          },
+          idempotencyKey: `reflection-evidence:${receipt.ledgerTargetId}:applied`,
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: sourceIssue.id,
+            taskId: sourceIssue.id,
+            reflectionTargetId: receipt.ledgerTargetId,
+            instructionMutationReceiptId: receipt.id,
+            wakeReason: "reflection_evidence",
+            source: "agent.instructions.receipt",
+          },
+        }).catch((error) => logger.warn({
+          error,
+          issueId: sourceIssue.id,
+          targetId: receipt.ledgerTargetId,
+          agentId: sourceIssue.assigneeAgentId,
+        }, "failed to wake reflection QA owner after instruction receipt"));
+      }
+    }
+
+    res.json({
+      ...result.file,
+      ...(receiptResult ? { reflectionReceipt: receiptResult.receipt, replay: receiptResult.replay } : {}),
+    });
   });
 
   router.delete("/agents/:id/instructions-bundle/file", async (req, res) => {

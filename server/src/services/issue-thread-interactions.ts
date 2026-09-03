@@ -67,6 +67,7 @@ import {
 import { getTelemetryClient } from "../telemetry.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
+import { reflectionLedgerService } from "./reflection-ledger.js";
 
 type InteractionActor = {
   agentId?: string | null;
@@ -1030,6 +1031,7 @@ async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
 }
 
 export function issueThreadInteractionService(db: Db) {
+  const reflectionLedger = reflectionLedgerService(db);
   async function getIdempotentInteraction(args: {
     issueId: string;
     companyId: string;
@@ -1212,7 +1214,7 @@ export function issueThreadInteractionService(db: Db) {
   }
 
   async function acceptRequestConfirmation(args: {
-    issue: { id: string; companyId: string };
+    issue: { id: string; companyId: string; projectId?: string | null; goalId?: string | null };
     current: IssueThreadInteractionRow;
     input: AcceptIssueThreadInteraction;
     actor: InteractionActor;
@@ -1282,6 +1284,8 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       const resolvedInteraction = hydrateInteraction(updated);
+      const reflectionTarget = await reflectionLedger.markDecision(tx as unknown as Db, updated.id, "accepted");
+      if (reflectionTarget) await touchIssue(tx, args.issue.id);
       const gateEffects = await applySdlcGateResolutionEffects(
         tx as unknown as Db,
         args.issue,
@@ -1289,6 +1293,7 @@ export function issueThreadInteractionService(db: Db) {
         args.actor,
         "accepted",
       );
+      if (reflectionTarget) return { interaction: resolvedInteraction, continuationIssue: null, activatedIssues: [] };
       if (gateEffects) {
         return {
           interaction: resolvedInteraction,
@@ -1330,8 +1335,18 @@ export function issueThreadInteractionService(db: Db) {
         activatedIssues: [],
       };
     });
+    const applicationIssue = await reflectionLedger.ensureApplicationPath(args.issue, result.interaction.id);
     await emitInteractionResolvedTelemetry(db, result.interaction);
-    return result;
+    if (!applicationIssue) return result;
+    return {
+      ...result,
+      continuationIssue: {
+        id: applicationIssue.id,
+        assigneeAgentId: applicationIssue.assigneeAgentId ?? null,
+        assigneeUserId: applicationIssue.assigneeUserId ?? null,
+        status: applicationIssue.status,
+      },
+    };
   }
 
   async function rejectRequestConfirmation(args: {
@@ -1381,6 +1396,7 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
       const resolved = hydrateInteraction(updated);
+      await reflectionLedger.markDecision(tx as unknown as Db, updated.id, "rejected");
       await applySdlcGateResolutionEffects(
         tx as unknown as Db,
         args.issue,
@@ -1682,6 +1698,16 @@ export function issueThreadInteractionService(db: Db) {
             })
             .returning();
 
+
+          const linkedReflectionTarget = data.kind === "request_confirmation" && actor.agentId
+            ? await reflectionLedger.linkConfirmation(tx as unknown as Db, {
+                issue,
+                interactionId: row.id,
+                actorAgentId: actor.agentId,
+                target: data.payload.target ?? null,
+                detailsMarkdown: data.payload.detailsMarkdown ?? null,
+              })
+            : null;
           if (data.kind === "request_confirmation") {
             const binding = parseSdlcGateIdempotencyKey(row.idempotencyKey);
             if (binding) {
@@ -1701,7 +1727,7 @@ export function issueThreadInteractionService(db: Db) {
             }
           }
 
-          if (data.kind !== "request_confirmation" || !actor.agentId) {
+          if (data.kind !== "request_confirmation" || !actor.agentId || linkedReflectionTarget) {
             return { row, supersededRows: [] };
           }
 
@@ -1769,6 +1795,27 @@ export function issueThreadInteractionService(db: Db) {
       actor: InteractionActor,
     ): Promise<ResolvedInteractionResult> => {
       const data = acceptIssueThreadInteractionSchema.parse(input);
+      const existing = await db.select().from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId))
+        .then((rows) => rows[0] ?? null);
+      if (!existing || existing.companyId !== issue.companyId || existing.issueId !== issue.id) {
+        throw notFound("Interaction not found");
+      }
+      if (existing.status === "accepted" && existing.kind === "request_confirmation") {
+        const applicationIssue = await reflectionLedger.ensureApplicationPath(issue, existing.id);
+        if (applicationIssue) {
+          return {
+            interaction: hydrateInteraction(existing),
+            createdIssues: [],
+            continuationIssue: {
+              id: applicationIssue.id,
+              assigneeAgentId: applicationIssue.assigneeAgentId ?? null,
+              assigneeUserId: applicationIssue.assigneeUserId ?? null,
+              status: applicationIssue.status,
+            },
+          };
+        }
+      }
       const current = await getPendingInteractionForResolution({ issue, interactionId });
       assertAgentResolutionAllowed(current, actor);
       switch (current.kind) {

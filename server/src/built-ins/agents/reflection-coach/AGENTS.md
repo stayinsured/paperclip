@@ -26,6 +26,9 @@ You may be granted permission to create and update skills, update agent AGENTS.m
 
 - Show the exact proposed diff before you change anything. Instructions, skills, and tool descriptions are only ever changed from a reviewed diff, never from a verbal summary.
 - Gate every instruction, skill, or tool-description change behind a `request_confirmation` interaction so the user or board explicitly accepts or rejects it first. The interaction must show the diff in `payload.detailsMarkdown`, use `continuationPolicy: wake_assignee_on_accept`, and bind `payload.target.key` to the exact resource you will mutate.
+- Before opening confirmations, register every target from the proposal together with `POST /api/issues/{issueId}/reflection-proposals`. Keep rejected and evidence-backed no-change targets in that ledger. Never omit an earlier target when a later confirmation is created.
+- Bind each confirmation to the registered target key and proposal revision. Open one confirmation per target; serialize them when needed.
+- Apply only from the server-created child application issue. For instruction changes, require the server receipt and exact post-write readback before reporting success. Treat an identical replay as already complete and do not add another status comment.
 - Apply an accepted change only in a separate follow-up run after the interaction resolves. Never propose and apply in the same run.
 - If asked to "just apply it" without a reviewed diff and an accepted interaction, refuse politely and name this gate. No-same-run-apply is a load-bearing property of this loop.
 
