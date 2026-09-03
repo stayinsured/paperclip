@@ -10,6 +10,10 @@ import {
 import { conflict, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { documentService } from "./documents.js";
+import {
+  emitSdlcLifecycleEvent,
+  lifecycleEventInputForEvidenceRecord,
+} from "./sdlc-observability.js";
 
 /**
  * SDLC lifecycle gates (STA-2781, rollout task D).
@@ -69,6 +73,11 @@ export type SdlcActor = {
   userId?: string | null;
   runId?: string | null;
 };
+
+function governanceRiskClass(governance: SdlcGovernance): SdlcRiskClass | null {
+  const value = readRecordString(governance.classification, "class");
+  return value === "C1" || value === "C2" || value === "C3" ? value : null;
+}
 
 type DbOrTx = Pick<Db, "select">;
 
@@ -219,6 +228,24 @@ export async function appendSdlcEvidenceRecords(
         createdByRunId: actor?.runId ?? null,
         lockedDocumentStrategy: "conflict",
       });
+      const combinedRecords = [...records, ...pending];
+      const classification = [...combinedRecords]
+        .reverse()
+        .find((record) => record.type === "classification" && !isSuperseded(combinedRecords, record));
+      const classValue = classification ? readRecordString(classification, "class") : null;
+      const riskClass = classValue === "C1" || classValue === "C2" || classValue === "C3"
+        ? classValue
+        : null;
+      for (const record of pending) {
+        const eventInput = lifecycleEventInputForEvidenceRecord(record, riskClass);
+        if (!eventInput) continue;
+        try {
+          await emitSdlcLifecycleEvent(eventInput);
+        } catch {
+          // Observability is best-effort and must not fail evidence writes.
+        }
+      }
+
       return { appended: pending, skipped };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -371,6 +398,29 @@ export async function logSdlcActivity(
   } catch {
     // Intentionally swallowed: see docblock.
   }
+  const mapped = input.action === "issue.lifecycle_transition_forbidden"
+    ? { event: "lifecycle_transition_forbidden" as const, phase: "guard" as const }
+    : input.action === "issue.lifecycle_emergency_used"
+      ? { event: "lifecycle_emergency_used" as const, phase: "emergency" as const }
+      : null;
+  if (!mapped) return;
+  try {
+    await emitSdlcLifecycleEvent({
+      ...mapped,
+      companyId: input.companyId,
+      issueId: input.issueId,
+      riskClass: input.details.riskClass === "C1" || input.details.riskClass === "C2" || input.details.riskClass === "C3"
+        ? input.details.riskClass
+        : null,
+      correlationId: input.actor?.runId
+        ?? `${mapped.event}:${input.issueId}:${String(input.details.code ?? "observed")}`,
+      actorRunId: input.actor?.runId ?? null,
+      outcome: mapped.event === "lifecycle_transition_forbidden" ? "forbidden" : "used",
+      errorClass: typeof input.details.code === "string" ? input.details.code : null,
+    });
+  } catch {
+    // Intentionally swallowed: see docblock.
+  }
 }
 
 function findAcceptedGateOneDecision(
@@ -437,6 +487,7 @@ export async function assertSdlcIssueStartAllowed(
       details: {
         code: "sdlc_emergency_used",
         rootIssueId: governance.rootIssueId,
+        riskClass: governanceRiskClass(governance),
         authorizerRole: readRecordString(emergency.record, "authorizerRole"),
         backfillStatus: readRecordString(emergency.record, "backfillStatus") ?? "open",
       },
@@ -455,6 +506,7 @@ export async function assertSdlcIssueStartAllowed(
         code: "sdlc_gate2_required",
         reason: "Gate 2 start authorization has not been accepted for this initiative",
         rootIssueId: governance.rootIssueId,
+        riskClass: governanceRiskClass(governance),
         gate: "gate2",
       },
       actor,
@@ -477,6 +529,7 @@ export async function assertSdlcIssueStartAllowed(
         code: "sdlc_stale_plan_revision",
         reason: "Gate 2 decision is bound to a superseded plan revision",
         rootIssueId: governance.rootIssueId,
+        riskClass: governanceRiskClass(governance),
         gate: "gate2",
         boundRevisionId,
         currentRevisionId,
@@ -502,6 +555,7 @@ export async function assertSdlcIssueStartAllowed(
         code: "sdlc_provisioning_required",
         reason: "Gate 2 cannot activate work without a completed provisioned graph",
         rootIssueId: governance.rootIssueId,
+        riskClass: governanceRiskClass(governance),
       },
       actor,
     });
@@ -521,6 +575,7 @@ export async function assertSdlcIssueStartAllowed(
         code: "sdlc_stale_graph_rev",
         reason: "Gate 2 decision is bound to a superseded provisioned graph",
         rootIssueId: governance.rootIssueId,
+        riskClass: governanceRiskClass(governance),
         gate: "gate2",
         boundGraphRev,
         currentGraphRev,
@@ -590,14 +645,14 @@ function collectCoveredRowIds(records: SdlcEvidenceRecord[], issueId: string): S
   return covered;
 }
 
-async function listNonTerminalDescendants(
+async function listIncompleteDescendants(
   dbOrTx: DbOrTx,
   rootIssueId: string,
 ): Promise<Array<{ id: string; identifier: string | null; title: string; status: string }>> {
-  const nonTerminal: Array<{ id: string; identifier: string | null; title: string; status: string }> = [];
+  const incomplete: Array<{ id: string; identifier: string | null; title: string; status: string }> = [];
   const visited = new Set<string>([rootIssueId]);
   let frontier = [rootIssueId];
-  while (frontier.length > 0 && nonTerminal.length < SDLC_MAX_DESCENDANTS) {
+  while (frontier.length > 0 && incomplete.length < SDLC_MAX_DESCENDANTS) {
     const rows = await dbOrTx
       .select({
         id: issues.id,
@@ -611,13 +666,16 @@ async function listNonTerminalDescendants(
     for (const row of rows) {
       if (visited.has(row.id)) continue;
       visited.add(row.id);
-      if (!isTerminalStatus(row.status)) {
-        nonTerminal.push(row);
+      // Governed closeout requires completed work. Cancellation is terminal
+      // for the generic issue state machine, but it is not a completed SDLC
+      // task and therefore cannot satisfy the initiative DoD.
+      if (row.status !== "done") {
+        incomplete.push(row);
       }
       frontier.push(row.id);
     }
   }
-  return nonTerminal;
+  return incomplete;
 }
 
 /**
@@ -654,12 +712,12 @@ export async function assertSdlcIssueClosureAllowed(
   }
 
   if (governance.rootIssueId === existing.id) {
-    const nonTerminal = await listNonTerminalDescendants(dbOrTx, existing.id);
-    for (const descendant of nonTerminal) {
+    const incomplete = await listIncompleteDescendants(dbOrTx, existing.id);
+    for (const descendant of incomplete) {
       missingRows.push({
         rowId: `descendant:${descendant.identifier ?? descendant.id}`,
         text: `${descendant.identifier ?? descendant.id} ${descendant.title} is ${descendant.status}`,
-        requiredEvidence: "descendant_terminal",
+        requiredEvidence: "descendant_done",
       });
     }
   }
@@ -707,6 +765,7 @@ export async function assertSdlcIssueClosureAllowed(
       details: {
         code: "sdlc_dod_incomplete",
         rootIssueId: governance.rootIssueId,
+        riskClass: governanceRiskClass(governance),
         missingRows,
       },
       actor,
@@ -790,8 +849,8 @@ export async function assertSdlcRootReviewRequestAllowed(
   const emergency = await readSdlcEmergencyRecord(dbOrTx, existing.id);
   if (emergency) return;
 
-  const nonTerminal = await listNonTerminalDescendants(dbOrTx, existing.id);
-  if (nonTerminal.length === 0) return;
+  const incomplete = await listIncompleteDescendants(dbOrTx, existing.id);
+  if (incomplete.length === 0) return;
 
   const currentRevisionId = await readCurrentSdlcPlanRevisionId(dbOrTx, existing.id);
   const dor = latestSdlcRecord(
@@ -819,6 +878,7 @@ export async function assertSdlcRootReviewRequestAllowed(
     details: {
       code: "sdlc_dor_required",
       rootIssueId: governance.rootIssueId,
+      riskClass: governanceRiskClass(governance),
       missingRows,
     },
     actor,
@@ -849,6 +909,31 @@ export async function assertSdlcTransitionAllowed(
   actor?: SdlcActor,
 ): Promise<void> {
   if (existing.status === nextStatus) return;
+  if (existing.status === "backlog" && nextStatus === "done") {
+    const governance = await resolveSdlcGovernance(dbOrTx, existing);
+    if (governance) {
+      await logSdlcActivity(logDb, {
+        companyId: governance.companyId,
+        issueId: existing.id,
+        action: "issue.lifecycle_transition_forbidden",
+        details: {
+          code: "sdlc_invalid_transition",
+          reason: "Governed backlog work must activate before it can complete",
+          rootIssueId: governance.rootIssueId,
+          riskClass: governanceRiskClass(governance),
+          fromStatus: existing.status,
+          toStatus: nextStatus,
+        },
+        actor,
+      });
+      throw conflict("Governed backlog work must activate before it can transition to done", {
+        code: "sdlc_invalid_transition",
+        rootIssueId: governance.rootIssueId,
+        fromStatus: existing.status,
+        toStatus: nextStatus,
+      });
+    }
+  }
   if (SDLC_START_STATUSES.has(nextStatus)) {
     await assertSdlcIssueStartAllowed(dbOrTx, existing, logDb, actor);
     return;
@@ -1386,7 +1471,9 @@ export async function evaluateSdlcActivationCandidates(
       .from(issueRelations)
       .innerJoin(issues, eq(issues.id, issueRelations.issueId))
       .where(and(eq(issueRelations.relatedIssueId, child.id), eq(issueRelations.type, "blocks")));
-    if (blockerRows.some((row) => !isTerminalStatus(row.status))) continue;
+    // Generic dependency readiness treats cancelled blockers as unresolved;
+    // governed activation must use the same contract and wait for done.
+    if (blockerRows.some((row) => row.status !== "done")) continue;
     claimedAgents.add(plannedAssigneeAgentId);
     candidates.push({
       child: {

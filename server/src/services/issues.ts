@@ -69,6 +69,11 @@ import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import {
   assertSdlcIssueStartAllowed,
   assertSdlcTransitionAllowed,
+  evaluateSdlcActivationCandidates,
+  logSdlcActivity,
+  recordSdlcActivations,
+  resolveSdlcGovernance,
+  type SdlcActor,
 } from "./sdlc-lifecycle.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -90,7 +95,12 @@ import {
   type ParsedExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
-import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  buildInitialIssueMonitorFields,
+  normalizeIssueExecutionPolicy,
+} from "./issue-execution-policy.js";
+import { resolveTerminalReviewerRouting } from "./terminal-reviewer-routing.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -4346,6 +4356,107 @@ async function countBlockedInboxIssues(dbOrTx: any, companyId: string, filters?:
   }, 0);
 }
 
+type SdlcActivatedIssue = {
+  id: string;
+  assigneeAgentId: string;
+  status: "todo";
+};
+
+async function activateReadySdlcChildrenAfterCompletion(
+  dbOrTx: any,
+  completedIssue: { id: string; companyId: string; parentId: string | null },
+  actor: SdlcActor,
+): Promise<SdlcActivatedIssue[]> {
+  const governance = await resolveSdlcGovernance(dbOrTx, completedIssue);
+  if (!governance || governance.rootIssueId === completedIssue.id) return [];
+
+  // Serialize activation at the governed root. This makes concurrent blocker
+  // completions re-read the latest committed dependency state before choosing
+  // candidates, avoiding a write-skew gap where every blocker completes but no
+  // transaction observes the full ready set.
+  const lockedRoot = await dbOrTx
+    .select({ id: issues.id })
+    .from(issues)
+    .where(and(
+      eq(issues.id, governance.rootIssueId),
+      eq(issues.companyId, governance.companyId),
+    ))
+    .for("update")
+    .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+  if (!lockedRoot) return [];
+
+  const { candidates } = await evaluateSdlcActivationCandidates(dbOrTx, governance.rootIssueId);
+  const activatedIssues: SdlcActivatedIssue[] = [];
+  for (const candidate of candidates) {
+    const plannedAssigneeAgentId = candidate.child.assigneeAgentId;
+    if (!plannedAssigneeAgentId) continue;
+
+    // Re-run the normal governed-start and assignee guards immediately before
+    // the conditional write. The status predicate is the exactly-once claim.
+    await assertSdlcIssueStartAllowed(dbOrTx, {
+      id: candidate.child.id,
+      companyId: governance.companyId,
+      parentId: governance.rootIssueId,
+    }, dbOrTx, actor);
+    await assertAssignableAgent(dbOrTx as Db, governance.companyId, plannedAssigneeAgentId, { kind: "work" });
+
+    const activated = await dbOrTx
+      .update(issues)
+      .set({
+        status: "todo",
+        assigneeAgentId: plannedAssigneeAgentId,
+        assigneeUserId: null,
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(issues.id, candidate.child.id),
+        eq(issues.companyId, governance.companyId),
+        eq(issues.status, "backlog"),
+      ))
+      .returning({
+        id: issues.id,
+        assigneeAgentId: issues.assigneeAgentId,
+        status: issues.status,
+      })
+      .then((rows: Array<{ id: string; assigneeAgentId: string | null; status: string }>) => rows[0] ?? null);
+    if (!activated || activated.assigneeAgentId !== plannedAssigneeAgentId || activated.status !== "todo") {
+      continue;
+    }
+
+    await recordSdlcActivations(
+      dbOrTx as Db,
+      governance.rootIssueId,
+      governance.companyId,
+      [candidate],
+      actor,
+    );
+    await logSdlcActivity(dbOrTx, {
+      companyId: governance.companyId,
+      issueId: activated.id,
+      action: "issue.lifecycle_task_activated",
+      details: {
+        rootIssueId: governance.rootIssueId,
+        childIssueId: activated.id,
+        agentId: plannedAssigneeAgentId,
+        order: candidate.order,
+        trigger: "dependency_completed",
+        completedIssueId: completedIssue.id,
+      },
+      actor,
+    });
+    activatedIssues.push({
+      id: activated.id,
+      assigneeAgentId: plannedAssigneeAgentId,
+      status: "todo",
+    });
+  }
+  return activatedIssues;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -7520,6 +7631,35 @@ export function issueService(db: Db) {
         delete issueData.executionWorkspaceSettings;
       }
 
+      if (issueData.status === "in_review" && existing.status !== "in_review") {
+        const requestedPolicy = normalizeIssueExecutionPolicy(
+          issueData.executionPolicy === undefined
+            ? existing.executionPolicy
+            : issueData.executionPolicy,
+        );
+        const routing = await resolveTerminalReviewerRouting(dbOrTx, {
+          issue: existing,
+          requestedStatus: issueData.status,
+          policy: requestedPolicy,
+        });
+        if (routing) {
+          const transition = applyIssueExecutionPolicyTransition({
+            issue: existing,
+            policy: routing.policy,
+            previousPolicy: normalizeIssueExecutionPolicy(existing.executionPolicy),
+            requestedStatus: issueData.status,
+            requestedAssigneePatch: {
+              assigneeAgentId: issueData.assigneeAgentId,
+              assigneeUserId: issueData.assigneeUserId,
+            },
+            actor: { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+            reviewRequest: routing.reviewRequest,
+          });
+          issueData.executionPolicy = routing.policy as unknown as Record<string, unknown>;
+          Object.assign(issueData, transition.patch);
+        }
+      }
+
       if (issueData.status) {
         assertTransition(existing.status, issueData.status);
         // SDLC lifecycle gates (STA-2781): inert for issue trees whose
@@ -7726,6 +7866,7 @@ export function issueService(db: Db) {
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
         let reconciledCancelledBlockerDependentIds: string[] = [];
+        let sdlcActivatedIssues: SdlcActivatedIssue[] = [];
         if (existing.status !== updated.status) {
           if (updated.status === "done" || updated.status === "cancelled") {
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
@@ -7787,6 +7928,13 @@ export function issueService(db: Db) {
           ) {
             await finalizeStatusCardsForStalledGeneration(tx, updated);
           }
+        }
+        if (receiptExisting.status !== "done" && updated.status === "done") {
+          sdlcActivatedIssues = await activateReadySdlcChildrenAfterCompletion(
+            tx,
+            { id: updated.id, companyId: updated.companyId, parentId: updated.parentId },
+            { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+          );
         }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
@@ -7915,6 +8063,7 @@ export function issueService(db: Db) {
           ...(reconciledCancelledBlockerDependentIds.length > 0
             ? { reconciledCancelledBlockerDependentIds }
             : {}),
+          ...(sdlcActivatedIssues.length > 0 ? { sdlcActivatedIssues } : {}),
         };
       };
 

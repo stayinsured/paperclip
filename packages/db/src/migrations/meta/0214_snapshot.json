@@ -1,6 +1,6 @@
 {
-  "id": "ee86e385-acb1-46cc-b2c3-d309c34ab305",
-  "prevId": "71cc87e7-f28f-4a26-b89b-767f51068148",
+  "id": "9303cd80-cbf6-41bc-8da1-589a9cf37073",
+  "prevId": "ee86e385-acb1-46cc-b2c3-d309c34ab305",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -17421,6 +17421,260 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.instruction_mutation_receipts": {
+      "name": "instruction_mutation_receipts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issue_id": {
+          "name": "issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ledger_target_id": {
+          "name": "ledger_target_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_key": {
+          "name": "target_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_type": {
+          "name": "target_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_label": {
+          "name": "target_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_agent_id": {
+          "name": "target_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "accepted_interaction_id": {
+          "name": "accepted_interaction_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "application_issue_id": {
+          "name": "application_issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_agent_id": {
+          "name": "actor_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_run_id": {
+          "name": "actor_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "instruction_path": {
+          "name": "instruction_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "before_content": {
+          "name": "before_content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "applied_diff": {
+          "name": "applied_diff",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "post_write_content": {
+          "name": "post_write_content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "instruction_mutation_receipts_issue_idx": {
+          "name": "instruction_mutation_receipts_issue_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "instruction_mutation_receipts_ledger_target_uq": {
+          "name": "instruction_mutation_receipts_ledger_target_uq",
+          "columns": [
+            {
+              "expression": "ledger_target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "instruction_mutation_receipts_accepted_interaction_uq": {
+          "name": "instruction_mutation_receipts_accepted_interaction_uq",
+          "columns": [
+            {
+              "expression": "accepted_interaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "instruction_mutation_receipts_company_id_companies_id_fk": {
+          "name": "instruction_mutation_receipts_company_id_companies_id_fk",
+          "tableFrom": "instruction_mutation_receipts",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "instruction_mutation_receipts_issue_id_issues_id_fk": {
+          "name": "instruction_mutation_receipts_issue_id_issues_id_fk",
+          "tableFrom": "instruction_mutation_receipts",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "instruction_mutation_receipts_ledger_target_id_reflection_ledger_targets_id_fk": {
+          "name": "instruction_mutation_receipts_ledger_target_id_reflection_ledger_targets_id_fk",
+          "tableFrom": "instruction_mutation_receipts",
+          "tableTo": "reflection_ledger_targets",
+          "columnsFrom": [
+            "ledger_target_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "instruction_mutation_receipts_accepted_interaction_id_issue_thread_interactions_id_fk": {
+          "name": "instruction_mutation_receipts_accepted_interaction_id_issue_thread_interactions_id_fk",
+          "tableFrom": "instruction_mutation_receipts",
+          "tableTo": "issue_thread_interactions",
+          "columnsFrom": [
+            "accepted_interaction_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "instruction_mutation_receipts_actor_agent_id_agents_id_fk": {
+          "name": "instruction_mutation_receipts_actor_agent_id_agents_id_fk",
+          "tableFrom": "instruction_mutation_receipts",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "actor_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "instruction_mutation_receipts_actor_run_id_heartbeat_runs_id_fk": {
+          "name": "instruction_mutation_receipts_actor_run_id_heartbeat_runs_id_fk",
+          "tableFrom": "instruction_mutation_receipts",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "actor_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.invites": {
       "name": "invites",
       "schema": "",
@@ -28933,6 +29187,409 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.reflection_ledger_targets": {
+      "name": "reflection_ledger_targets",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issue_id": {
+          "name": "issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposal_agent_id": {
+          "name": "proposal_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_run_id": {
+          "name": "source_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposal_key": {
+          "name": "proposal_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_key": {
+          "name": "target_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_type": {
+          "name": "target_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_label": {
+          "name": "target_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposal_revision": {
+          "name": "proposal_revision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposed_diff": {
+          "name": "proposed_diff",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "evidence_markdown": {
+          "name": "evidence_markdown",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'proposed'"
+        },
+        "confirmation_interaction_id": {
+          "name": "confirmation_interaction_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "application_issue_id": {
+          "name": "application_issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "accepted_at": {
+          "name": "accepted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "applied_at": {
+          "name": "applied_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "validated_at": {
+          "name": "validated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "validated_by_agent_id": {
+          "name": "validated_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "validated_by_run_id": {
+          "name": "validated_by_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "validated_by_user_id": {
+          "name": "validated_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rejected_at": {
+          "name": "rejected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "reflection_ledger_targets_issue_idx": {
+          "name": "reflection_ledger_targets_issue_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "reflection_ledger_targets_issue_state_idx": {
+          "name": "reflection_ledger_targets_issue_state_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "reflection_ledger_targets_proposal_target_uq": {
+          "name": "reflection_ledger_targets_proposal_target_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "proposal_agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "proposal_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "target_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "proposal_revision",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "reflection_ledger_targets_confirmation_interaction_uq": {
+          "name": "reflection_ledger_targets_confirmation_interaction_uq",
+          "columns": [
+            {
+              "expression": "confirmation_interaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"reflection_ledger_targets\".\"confirmation_interaction_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "reflection_ledger_targets_application_issue_uq": {
+          "name": "reflection_ledger_targets_application_issue_uq",
+          "columns": [
+            {
+              "expression": "application_issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"reflection_ledger_targets\".\"application_issue_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "reflection_ledger_targets_company_id_companies_id_fk": {
+          "name": "reflection_ledger_targets_company_id_companies_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_issue_id_issues_id_fk": {
+          "name": "reflection_ledger_targets_issue_id_issues_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_proposal_agent_id_agents_id_fk": {
+          "name": "reflection_ledger_targets_proposal_agent_id_agents_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "proposal_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_source_run_id_heartbeat_runs_id_fk": {
+          "name": "reflection_ledger_targets_source_run_id_heartbeat_runs_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "source_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_confirmation_interaction_id_issue_thread_interactions_id_fk": {
+          "name": "reflection_ledger_targets_confirmation_interaction_id_issue_thread_interactions_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "issue_thread_interactions",
+          "columnsFrom": [
+            "confirmation_interaction_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_application_issue_id_issues_id_fk": {
+          "name": "reflection_ledger_targets_application_issue_id_issues_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "application_issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_validated_by_agent_id_agents_id_fk": {
+          "name": "reflection_ledger_targets_validated_by_agent_id_agents_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "validated_by_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reflection_ledger_targets_validated_by_run_id_heartbeat_runs_id_fk": {
+          "name": "reflection_ledger_targets_validated_by_run_id_heartbeat_runs_id_fk",
+          "tableFrom": "reflection_ledger_targets",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "validated_by_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "reflection_ledger_targets_state_check": {
+          "name": "reflection_ledger_targets_state_check",
+          "value": "\"reflection_ledger_targets\".\"state\" in ('proposed', 'pending', 'accepted', 'applied', 'independently_validated', 'rejected', 'evidence_backed_no_change')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.routine_documents": {

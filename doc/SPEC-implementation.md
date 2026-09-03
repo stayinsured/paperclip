@@ -505,6 +505,12 @@ Typed context failures distinguish missing tasks, expired tokens, wrong-company 
 missing run header. Pending execution-policy participants continue through the governed `PATCH`
 stage-transition path; the direct terminal operation rejects that state rather than bypassing it.
 
+When implementation work enters `in_review` without a configured execution-policy stage, Core
+binds the assignee of a completed independent QA/review child that explicitly blocks the
+implementation issue, or the independent actor on the latest governed QA verdict, as the terminal
+review participant. The implementation assignee cannot be selected. The participant receives the
+typed `approve` and `request_changes` actions; configured policy stages remain authoritative.
+
 V1 non-terminal liveness rule:
 
 - agent-owned `todo`, `in_progress`, `in_review`, and `blocked` issues must have a live execution path, an explicit waiting path, or an explicit recovery path

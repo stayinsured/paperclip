@@ -2235,6 +2235,8 @@ function renderApiAccessNote(env: Record<string, string>): string {
     lines.push(
       "Scoped issue comment example:",
       `  curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" -d '{"body":"Status update from agent."}' "$PAPERCLIP_API_BASE/api/issues/$PAPERCLIP_TASK_ID/comments"`,
+      "Terminal summary comments may also carry structured fields; progress-transcript headings are stripped before the comment is stored and raw execution detail belongs in run logs:",
+      `  curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "Content-Type: application/json" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" -d '{"body":"Outcome summary.","terminal":{"status":"done - outcome","evidence":["focused checks pass"],"nextOwner":"reviewer","disposition":"PR merged"}}' "$PAPERCLIP_API_BASE/api/issues/$PAPERCLIP_TASK_ID/comments"`,
     );
   } else {
     lines.push("Use a real issue id from the current context before making issue write requests.");

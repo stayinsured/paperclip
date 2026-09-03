@@ -873,6 +873,17 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
+  it("documents the structured terminal-comment submission contract", () => {
+    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain(
+      "For a run's terminal summary comment, submit structured fields too: `terminal` with `status` (required)",
+    );
+    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("`evidence`, `limitation`, `nextOwner`, `disposition`");
+    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Known progress-transcript headings");
+    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("Continuation Summary, Recent Concrete Actions, Commands Run, Files / Routes Touched, Blockers / Decisions, Next Action");
+    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("a comment that is only transcript scaffolding is rejected");
+    expect(DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE).toContain("keep raw execution detail in run logs");
+  });
+
   it("leaves the execution contract to the heartbeat template on fresh scoped wake prompts", () => {
     const prompt = renderPaperclipWakePrompt({
       reason: "issue_assigned",

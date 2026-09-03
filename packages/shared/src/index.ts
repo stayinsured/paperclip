@@ -4,6 +4,16 @@ export {
   type EvaluateAuthoritativeSessionReuse,
   type EvaluateSessionReusePilot,
 } from "./validators/issue.js";
+export {
+  PROGRESS_TRANSCRIPT_SECTION_HEADINGS,
+  sanitizeProgressTranscriptMarkdown,
+  terminalCommentDraftSchema,
+  renderTerminalCommentBody,
+  finalizeTerminalComment,
+  type ProgressTranscriptSanitization,
+  type TerminalCommentDraft,
+  type TerminalCommentFinalization,
+} from "./terminal-comment.js";
 export { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "./adapter-type.js";
 export {
   decisionEffectStalenessSchema,
@@ -966,6 +976,8 @@ export type {
   SuccessfulRunHandoffStateKind,
   IssueScheduledRetry,
   IssueScheduledRetryStatus,
+  IssueNextActionKind,
+  IssueNextActionProjection,
   IssueRetryNowOutcome,
   IssueRetryNowResponse,
   IssueReferenceSource,

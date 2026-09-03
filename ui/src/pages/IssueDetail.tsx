@@ -121,9 +121,11 @@ import {
   hasVisibleMonitorSurface,
 } from "../components/IssueMonitorBanner";
 import { IssueScheduledRetryCard } from "../components/IssueScheduledRetryCard";
+import { IssueNextActionCard } from "../components/IssueNextActionCard";
 import { IssueProperties } from "../components/IssueProperties";
 import { PendingDecisionStrip } from "../components/PendingDecisionStrip";
 import { IssueReviewPanel } from "../components/IssueReviewPanel";
+import { SdlcWorkflowPanel } from "../components/SdlcWorkflowPanel";
 import { PauseAffectsSummaryView } from "../components/interrupt-handoff/InterruptHandoffViews";
 import { computePauseAffectsSummary } from "../lib/interrupt-handoff";
 import { useIssueExternalObjects } from "../hooks/useIssueExternalObjects";
@@ -1595,6 +1597,7 @@ function IssueDetailActivityTab({
           ))}
         </div>
       )}
+      <IssueNextActionCard projection={issue.nextAction} />
       <IssueScheduledRetryCard issueId={issue.id} scheduledRetry={issue.scheduledRetry ?? null} />
       {/* Waiting-monitor state now lives in the pinned top banner (IssueMonitorBanner) — PAP-14557 decision 1. */}
     </>
@@ -4530,6 +4533,8 @@ export function IssueDetail() {
         <PendingDecisionStrip companyId={issue.companyId} issueId={issue.id} />
 
         <IssueReviewPanel issue={issue} />
+
+        <SdlcWorkflowPanel issue={issue} agentMap={agentMap} />
 
         {taskChatShellEnabled ? null : (
           <InlineEditor

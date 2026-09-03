@@ -597,6 +597,20 @@ export interface IssueScheduledRetry {
   errorCode?: string | null;
 }
 
+export type IssueNextActionKind = "approval" | "evidence" | "blocker" | "monitor" | "run_retry";
+
+export interface IssueNextActionProjection {
+  kind: IssueNextActionKind;
+  title: string;
+  description: string;
+  ownerType: "board" | "agent" | "user" | "system";
+  ownerId: string | null;
+  sourceId: string | null;
+  sourceRevision: string | null;
+  continuationKey: string;
+  scheduledAt: string | null;
+}
+
 export type IssueRetryNowOutcome =
   | "promoted"
   | "already_promoted"
@@ -840,6 +854,7 @@ export interface Issue {
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   watchdog?: IssueWatchdogSummary | null;
   scheduledRetry?: IssueScheduledRetry | null;
+  nextAction?: IssueNextActionProjection | null;
   liveDescendantCount?: number;
   relatedWork?: IssueRelatedWorkSummary;
   referencedIssueIdentifiers?: string[];

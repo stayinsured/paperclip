@@ -101,6 +101,7 @@ import {
   type WorkspaceRuntimeService,
   issueWriteDenialCodeForResponsibleUserDenial,
   issueWriteDenialResponse,
+  finalizeTerminalComment,
   type IssueWriteDenialCode,
   type IssueWriteDenialContext,
 } from "@paperclipai/shared";
@@ -142,7 +143,13 @@ import {
 import {
   buildSdlcTaskIdempotencyKey,
   recordSdlcProvisioningComplete,
+  SDLC_EVIDENCE_DOCUMENT_KEY,
 } from "../services/sdlc-lifecycle.js";
+import { resolveTerminalReviewerRouting } from "../services/terminal-reviewer-routing.js";
+import {
+  projectIssueNextAction,
+  readIssueContinuationSnapshot,
+} from "../services/issue-continuations.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import {
   decideIssueReviewPathRecovery,
@@ -2061,6 +2068,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
       mutation: "interaction",
     },
     idempotencyKey: input.idempotencyKey ?? `interaction:${input.interaction.id}:${input.interaction.status}`,
+    changeDrivenContinuation: true,
     requestedByActorType: input.actor.actorType,
     requestedByActorId: input.actor.actorId,
     contextSnapshot: {
@@ -6082,6 +6090,7 @@ export function issueRoutes(
       referenceSummary,
       successfulRunHandoffStates,
       scheduledRetry,
+      continuationSnapshot,
       activeRecoveryAction,
       linkedCases,
       inboxArchiveFields,
@@ -6097,6 +6106,7 @@ export function issueRoutes(
       issueReferencesSvc.listIssueReferenceSummary(issue.id),
       listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id]),
       svc.getCurrentScheduledRetry(issue.id),
+      readIssueContinuationSnapshot(db, issue),
       recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
       listIssueLinkedCases(db, issue.companyId, issue.id),
       inboxArchiveFieldsPromise,
@@ -6133,6 +6143,11 @@ export function issueRoutes(
       productivityReview,
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       scheduledRetry,
+      nextAction: projectIssueNextAction({
+        issue,
+        snapshot: continuationSnapshot,
+        scheduledRetry,
+      }),
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       blockedBy: relationsWithRecoveryActions.blockedBy,
       blocks: relationsWithRecoveryActions.blocks,
@@ -6876,6 +6891,36 @@ export function issueRoutes(
       actor,
       documentChanged: true,
     });
+
+    if (
+      doc.key === SDLC_EVIDENCE_DOCUMENT_KEY
+      && issue.assigneeAgentId
+      && !(actor.actorType === "agent" && actor.actorId === issue.assigneeAgentId)
+      && !["done", "cancelled"].includes(issue.status)
+    ) {
+      void heartbeat.wakeup(issue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "sdlc_evidence_revised",
+        payload: {
+          issueId: issue.id,
+          documentId: doc.id,
+          evidenceRevisionId: doc.latestRevisionId,
+          mutation: "document",
+        },
+        changeDrivenContinuation: true,
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: issue.id,
+          taskId: issue.id,
+          documentId: doc.id,
+          evidenceRevisionId: doc.latestRevisionId,
+          wakeReason: "sdlc_evidence_revised",
+          source: "issue.sdlc_evidence.updated",
+        },
+      }).catch((err) => logger.warn({ err, issueId: issue.id }, "failed to wake assignee after SDLC evidence revision"));
+    }
 
     res.status(result.created ? 201 : 200).json(doc);
   });
@@ -8842,6 +8887,7 @@ export function issueRoutes(
       onBehalfOfUserId: _requestedOnBehalfOfUserId,
       ...updateFields
     } = req.body;
+    let effectiveReviewRequest = reviewRequest;
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -9054,10 +9100,20 @@ export function issueRoutes(
       );
     }
     const previousExecutionPolicy = normalizeIssueExecutionPolicy(existing.executionPolicy ?? null);
-    const nextExecutionPolicy =
+    let nextExecutionPolicy =
       updateFields.executionPolicy !== undefined
         ? (updateFields.executionPolicy as NormalizedExecutionPolicy | null)
         : previousExecutionPolicy;
+    const terminalReviewerRouting = await resolveTerminalReviewerRouting(db, {
+      issue: existing,
+      requestedStatus: typeof updateFields.status === "string" ? updateFields.status : undefined,
+      policy: nextExecutionPolicy,
+    });
+    if (terminalReviewerRouting) {
+      nextExecutionPolicy = terminalReviewerRouting.policy;
+      updateFields.executionPolicy = terminalReviewerRouting.policy;
+      effectiveReviewRequest ??= terminalReviewerRouting.reviewRequest;
+    }
     if (normalizedAssigneeAgentId !== undefined) {
       updateFields.assigneeAgentId = normalizedAssigneeAgentId;
     }
@@ -9086,7 +9142,7 @@ export function issueRoutes(
       },
       allowBoardOverride: req.actor.type === "board",
       commentBody,
-      reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
+      reviewRequest: effectiveReviewRequest === undefined ? undefined : effectiveReviewRequest,
       monitorExplicitlyUpdated: req.body.executionPolicy !== undefined && monitorChanged,
     });
     const decisionId = transition.decision ? randomUUID() : null;
@@ -9160,17 +9216,17 @@ export function issueRoutes(
         return;
       }
     }
-    if (reviewRequest !== undefined && transition.patch.executionState === undefined) {
+    if (effectiveReviewRequest !== undefined && transition.patch.executionState === undefined) {
       const existingExecutionState = parseIssueExecutionState(existing.executionState);
       if (!existingExecutionState || existingExecutionState.status !== "pending") {
-        if (reviewRequest !== null) {
+        if (effectiveReviewRequest !== null) {
           res.status(422).json({ error: "reviewRequest requires an active review or approval stage" });
           return;
         }
       } else {
         updateFields.executionState = {
           ...existingExecutionState,
-          reviewRequest,
+          reviewRequest: effectiveReviewRequest,
         };
       }
     }
@@ -9950,6 +10006,7 @@ export function issueRoutes(
             mutation: input.mutation,
           },
           idempotencyKey,
+          changeDrivenContinuation: true,
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
@@ -10109,6 +10166,30 @@ export function issueRoutes(
             },
           });
         }
+      }
+
+      for (const activatedIssue of issue.sdlcActivatedIssues ?? []) {
+        addWakeup(activatedIssue.assigneeAgentId, {
+          source: "assignment",
+          triggerDetail: "system",
+          reason: "issue_assigned",
+          payload: {
+            issueId: activatedIssue.id,
+            mutation: "governed_dependency_activated",
+            resolvedBlockerIssueId: issue.id,
+          },
+          idempotencyKey: ["sdlc_dependency_activated", activatedIssue.id, issue.id].join(":"),
+          changeDrivenContinuation: true,
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: activatedIssue.id,
+            taskId: activatedIssue.id,
+            wakeReason: "issue_assigned",
+            source: "issue.sdlc_dependency_activation",
+            resolvedBlockerIssueId: issue.id,
+          },
+        });
       }
 
       const becameDone = existing.status !== "done" && issue.status === "done";
@@ -10643,6 +10724,7 @@ export function issueRoutes(
           mutation: "interaction",
         },
         idempotencyKey: `interaction-pending:${interaction.id}`,
+        changeDrivenContinuation: true,
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
         contextSnapshot: {
@@ -11378,6 +11460,30 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    // Structured terminal-comment finalizer: adapter-run comments may carry a
+    // structured draft, and every run-scoped body is stripped of known
+    // progress-transcript headings before it becomes durable. The rewritten
+    // body below is what every downstream consumer (presentation derivation,
+    // auto-approval matching, persistence) reads, so the write and its audit
+    // trail can never diverge. Raw execution detail stays in run logs.
+    const runScopedComment = typeof actor.runId === "string" && actor.runId.length > 0;
+    if (req.body.terminal != null && !runScopedComment) {
+      res.status(403).json({
+        error: "Only run-scoped adapter comments may submit structured terminal fields",
+        details: { securityPrinciples: ["Least Privilege", "Complete Mediation"] },
+      });
+      return;
+    }
+    const terminalFinalization = finalizeTerminalComment({
+      runScoped: runScopedComment,
+      body: req.body.body,
+      terminal: req.body.terminal ?? null,
+    });
+    if (!terminalFinalization.ok) {
+      res.status(422).json({ error: terminalFinalization.error });
+      return;
+    }
+    req.body.body = terminalFinalization.body;
     const commentPresentation = req.body.presentation ??
       await deriveRecoveryCommentPresentation(req, issue.companyId, req.body.body);
     const reopenRequested = req.body.reopen === true;
@@ -11831,6 +11937,7 @@ export function issueRoutes(
             mutation: "comment",
           },
           idempotencyKey,
+          changeDrivenContinuation: true,
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
           contextSnapshot: {
