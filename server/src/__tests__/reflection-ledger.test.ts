@@ -375,4 +375,50 @@ describeEmbeddedPostgres("reflectionLedgerService", () => {
       firstReceipt.receipt.id,
     )).rejects.toMatchObject({ status: 404 });
   });
+
+  it("proves the exact three-target terminal ledger with every accepted target independently validated", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const coachId = randomUUID();
+    const qaId = randomUUID();
+    const targetAgentId = randomUUID();
+    const sourceRunId = randomUUID();
+    const applyRunId = randomUUID();
+    const before = "# Agent\n";
+    const after = "# Agent\n\nKeep terminal evidence explicit.\n";
+    const proposedDiff = buildInstructionContentDiff("AGENTS.md", before, after);
+    await db.insert(companies).values({ id: companyId, name: "Paperclip", issuePrefix: "TERM", defaultResponsibleUserId: "board-user", requireBoardApprovalForNewAgents: false });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+    await db.insert(agents).values([
+      { id: coachId, companyId, name: "Reflection Coach", role: "general", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: { canCreateSkills: true }, metadata: { paperclipBuiltInAgent: { key: "reflection-coach", featureKeys: ["reflection-coach"] } } },
+      { id: qaId, companyId, name: "QA", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: targetAgentId, companyId, name: "Target", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+    await db.insert(issues).values({ id: issueId, companyId, title: "Terminal reflection ledger", status: "in_review", priority: "medium", identifier: "TERM-1", issueNumber: 1, assigneeAgentId: qaId, createdByAgentId: coachId });
+    await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId: coachId, status: "succeeded", contextSnapshot: { issueId } });
+    const ledger = reflectionLedgerService(db);
+    const interactions = issueThreadInteractionService(db);
+    const issue = { id: issueId, companyId, projectId: null, goalId: null };
+    const registered = await ledger.registerProposal(issue, { version: 1, proposalKey: "terminal-trio", targets: [
+      { targetKey: `agent:${targetAgentId}:instructions:accepted`, targetType: "agent_instructions", targetLabel: "Accepted", proposalRevision: "v1", proposedDiff, state: "proposed" },
+      { targetKey: `agent:${targetAgentId}:instructions:rejected`, targetType: "agent_instructions", targetLabel: "Rejected", proposalRevision: "v1", proposedDiff, state: "proposed" },
+      { targetKey: `agent:${targetAgentId}:instructions:no-change`, targetType: "agent_instructions", targetLabel: "No change", proposalRevision: "v1", evidenceMarkdown: "Authoritative readback already contains the rule exactly once.", state: "evidence_backed_no_change" },
+    ] }, { agentId: coachId, runId: sourceRunId });
+    const confirmations = [];
+    for (const target of registered.slice(0, 2)) confirmations.push(await interactions.create(issue, { kind: "request_confirmation", continuationPolicy: "wake_assignee_on_accept", idempotencyKey: `reflection:${target.id}`, sourceRunId, payload: { version: 1, prompt: `Apply ${target.targetLabel}?`, detailsMarkdown: proposedDiff, target: { type: "custom", key: target.targetKey, revisionId: target.proposalRevision } } }, { agentId: coachId, runId: sourceRunId }));
+    const accepted = await interactions.acceptInteraction(issue, confirmations[0].id, {}, { userId: "board-user" });
+    await interactions.rejectInteraction(issue, confirmations[1].id, { reason: "Rejected with explicit evidence." }, { userId: "board-user" });
+    await db.insert(heartbeatRuns).values({ id: applyRunId, companyId, agentId: coachId, status: "running", contextSnapshot: { issueId: accepted.continuationIssue.id } });
+    const grant = await ledger.findInstructionConsent({ companyId, actorAgentId: coachId, actorRunId: applyRunId, targetKey: registered[0].targetKey });
+    await ledger.consumeInstructionConsent({ grant: grant!, targetAgentId, instructionPath: "AGENTS.md", beforeContent: before, postWriteContent: after, actorAgentId: coachId, actorRunId: applyRunId });
+    const qaRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: qaRunId, companyId, agentId: qaId, status: "running", contextSnapshot: { issueId } });
+    await ledger.validateTarget(issue, registered[0].id, "QA verified receipt and authoritative readback.", { agentId: qaId, runId: qaRunId });
+    const evidence = await ledger.listForIssue(issue);
+    expect(evidence.targets).toHaveLength(3);
+    expect(evidence.targets.map((target) => target.state).sort()).toEqual(["evidence_backed_no_change", "independently_validated", "rejected"]);
+    const acceptedTargets = evidence.targets.filter((target) => target.acceptedAt !== null);
+    expect(acceptedTargets).toHaveLength(1);
+    expect(acceptedTargets.every((target) => target.state === "independently_validated")).toBe(true);
+  });
 });

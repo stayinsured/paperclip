@@ -512,6 +512,20 @@ describe("issue update comment wakeups", () => {
     expect(issueCommentedWakeCalls).toEqual([]);
   });
 
+  it("does not create comments or wakes for repeated unchanged blocked status updates", async () => {
+    const blocked = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "blocked" });
+    mockIssueService.getById.mockResolvedValue(blocked);
+    mockIssueService.update.mockResolvedValue(blocked);
+    const app = await createApp();
+    const first = await request(app).patch(`/api/issues/${blocked.id}`).send({ status: "blocked" });
+    const second = await request(app).patch(`/api/issues/${blocked.id}`).send({ status: "blocked" });
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
   it("wakes the assignee on top-level board issue comments", async () => {
     const existing = makeIssue({
       assigneeAgentId: ASSIGNEE_AGENT_ID,
