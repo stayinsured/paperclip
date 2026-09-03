@@ -7,12 +7,14 @@ import {
 import { detectClickUpOwnedFieldConflicts } from "./conflicts.js";
 import { clickUpIntakeKey, clickUpSha256 } from "./identity.js";
 import { ownedSnapshotFromRemote, redactClickUpText } from "./projection.js";
+import { selectClickUpWeeklySprints } from "./sprints.js";
 import type {
   ClickUpApiPort,
   ClickUpAuthorization,
   ClickUpDestinationConfig,
   ClickUpIntakeCandidate,
   ClickUpLinkRepository,
+  ClickUpSprintRepository,
   ClickUpOwnedSnapshot,
   ClickUpRemoteTask,
   ClickUpShadowProjection,
@@ -402,6 +404,7 @@ export async function intakeClickUpTask(input: {
   config: ClickUpDestinationConfig;
   authorization: ClickUpAuthorization;
   issues: PaperclipIssueIntakePort;
+  sprints: ClickUpSprintRepository;
   repository: ClickUpLinkRepository;
   now?: Date;
 }): Promise<{
@@ -427,8 +430,15 @@ export async function intakeClickUpTask(input: {
     return { action: "skipped", reason: "intake_opt_in_missing", issueId: null, link: null };
   }
 
+  const selectedSprints = selectClickUpWeeklySprints({ companyId: input.companyId, projectId: input.projectId, candidate,
+    configuredInProgressStatusId: config.statuses.inProgress.id,
+    sprints: await input.sprints.listWeeklySprints(input.companyId, input.projectId), now: input.now ?? new Date() });
   const existing = await input.repository.getByExternalTask(input.companyId, candidate.listId, candidate.taskId);
-  if (existing) return { action: "already_linked", reason: "existing_mapping", issueId: existing.issueId, link: existing };
+  if (existing) {
+    if (existing.projectId !== input.projectId) throw new ClickUpConfigurationError("clickup_existing_link_scope_mismatch");
+    await input.sprints.linkIssueToSprints({ companyId: input.companyId, projectId: input.projectId, issueId: existing.issueId, sprintIds: selectedSprints.map((s) => s.id) });
+    return { action: "already_linked", reason: "existing_mapping", issueId: existing.issueId, link: existing };
+  }
 
   const title = redactClickUpText(candidate.title);
   const summary = redactClickUpText(candidate.planningSummary);
@@ -466,5 +476,6 @@ export async function intakeClickUpTask(input: {
     lastProjectedAt: null,
     lastReconciledAt: (input.now ?? new Date()).toISOString(),
   });
+  await input.sprints.linkIssueToSprints({ companyId: input.companyId, projectId: input.projectId, issueId: issue.issueId, sprintIds: selectedSprints.map((s) => s.id) });
   return { action: "created", reason: "opted_in", issueId: issue.issueId, link };
 }

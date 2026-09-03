@@ -64,8 +64,8 @@ export function assertClickUpDestinationConfigured(config: ClickUpDestinationCon
 
   if (config.fields) {
     const configuredFields = Object.values(config.fields).filter((value): value is string => value != null);
-    if (configuredFields.length > 0) {
-      throw new ClickUpConfigurationError("clickup_custom_fields_not_approved");
+    if (configuredFields.some((value) => value.trim().length === 0) || new Set(configuredFields).size !== configuredFields.length) {
+      throw new ClickUpConfigurationError("clickup_custom_fields_invalid");
     }
   }
 }
@@ -222,9 +222,6 @@ export function assertClickUpModuleActivationUsable(
   if (destination.workspaceId !== APPROVED_CLICKUP_WORKSPACE_ID
     || destination.listId !== APPROVED_CLICKUP_LIST_ID) {
     throw new ClickUpConfigurationError("clickup_destination_outside_approved_boundary");
-  }
-  if (authorization.intakeEnabled) {
-    throw new ClickUpConfigurationError("clickup_reverse_intake_not_approved");
   }
   assertApprovalAndProof({ config: destination, authorization, now });
   if (authorization.readOnly || !authorization.externalWritesEnabled) {

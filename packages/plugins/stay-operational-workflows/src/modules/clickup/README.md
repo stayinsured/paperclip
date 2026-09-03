@@ -73,3 +73,7 @@ pnpm --filter @staydigital/stay-operational-workflows test -- tests/clickup.spec
 Live ClickUp validation belongs to the separately approved QA sandbox-UAT lane.
 The validator must prove the exact non-production/company identity before any
 provider request and stop on a production or wrong-list mismatch.
+
+## Weekly sprint intake assignment
+
+Inbound ClickUp due dates cross the intake boundary as UTC epoch milliseconds. Weekly sprint `startDate`/`endDate` values are local calendar dates and are resolved start-inclusive/end-exclusive in the sprint's company IANA timezone. When the timezone is absent the resolver uses UTC; invalid zones, mixed zones, cross-company/project rows, malformed intervals, and overlapping intervals fail visibly. The configured `statuses.inProgress.id` alone normalizes to `in_progress`. Sprint links use `(company_id, issue_id, sprint_id)` uniqueness, and replay also revisits an existing ClickUp correlation so a partial first attempt converges without another issue or link.
