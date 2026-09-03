@@ -4,5 +4,7 @@ export * from "./health.js";
 export * from "./identity.js";
 export * from "./projection.js";
 export * from "./repository.js";
+export * from "./sprint-repository.js";
 export * from "./sync.js";
+export * from "./sprints.js";
 export * from "./types.js";

@@ -227,8 +227,22 @@ export interface ClickUpIntakeCandidate {
   title: string;
   planningSummary: string;
   statusId: string;
+  /** ClickUp due date normalized to a UTC epoch-millisecond instant. */
+  dueDateMs: number | null;
   revision: string | null;
   customFields: Record<string, string | boolean | null | undefined>;
+}
+
+export interface WeeklySprint {
+  id: string; companyId: string; projectId: string; name: string;
+  startDate: string; endDate: string; timezone: string | null;
+}
+export interface IssueSprintLink {
+  id: string; companyId: string; projectId: string; issueId: string; sprintId: string;
+}
+export interface ClickUpSprintRepository {
+  listWeeklySprints(companyId: string, projectId: string): Promise<WeeklySprint[]>;
+  linkIssueToSprints(input: { companyId: string; projectId: string; issueId: string; sprintIds: string[] }): Promise<IssueSprintLink[]>;
 }
 
 export interface ClickUpApiPort {

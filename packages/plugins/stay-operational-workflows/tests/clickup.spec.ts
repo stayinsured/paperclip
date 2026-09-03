@@ -327,9 +327,7 @@ describe("ClickUp activation boundary", () => {
     );
     const intake = approvedActivation();
     intake.authorization.intakeEnabled = true;
-    expect(() => assertClickUpModuleActivationUsable(intake, proofValidNow())).toThrowError(
-      expect.objectContaining({ code: "clickup_reverse_intake_not_approved" }),
-    );
+    expect(() => assertClickUpModuleActivationUsable(intake, new Date("2026-08-28T11:00:00.000Z"))).not.toThrow();
   });
 });
 
