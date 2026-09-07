@@ -14,6 +14,7 @@ import { calculateClickUpProjectionHealth } from "../src/modules/clickup/health.
 import { mergeClickUpManagedDescription, ownedSnapshotFromRemote, renderClickUpShadowProjection } from "../src/modules/clickup/projection.js";
 import { acceptedClickUpDeliveryMetadata } from "../src/modules/clickup/metadata.js";
 import { reconcileClickUpRelationships } from "../src/modules/clickup/relationships.js";
+import { isClickUpParentReconciliationReady } from "../src/modules/clickup/runtime.js";
 import {
   ClickUpAmbiguousWriteError,
   projectIssueToClickUp,
@@ -43,6 +44,7 @@ const config: ClickUpDestinationConfig = {
   workspaceId: "workspace-1",
   spaceId: "space-1",
   listId: "list-1",
+  dateOnlyTimeZone: "Europe/Berlin",
   statuses: {
     toDo: { id: "status-todo", name: "to do" },
     inProgress: { id: "status-progress", name: "in progress" },
@@ -166,6 +168,9 @@ class MemoryClickUp implements ClickUpApiPort {
   commitAmbiguousCreate = false;
   dueDateReadbackOffsetMs = 0;
   dueDateTimeReadback = false;
+  postWriteReadbackMisses = 0;
+  readbackMissesRemaining = 0;
+  postRelationshipReadbackMisses = 0;
 
   async findTasksByCorrelation(input: { listId: string; correlationValue: string }): Promise<ClickUpRemoteTask[]> {
     this.calls.push(`find:${input.correlationValue}`);
@@ -176,6 +181,10 @@ class MemoryClickUp implements ClickUpApiPort {
 
   async getTask(taskId: string): Promise<ClickUpRemoteTask | null> {
     this.calls.push(`get:${taskId}`);
+    if (this.readbackMissesRemaining > 0) {
+      this.readbackMissesRemaining -= 1;
+      return null;
+    }
     return this.tasks.get(taskId) ?? null;
   }
 
@@ -206,6 +215,7 @@ class MemoryClickUp implements ClickUpApiPort {
     const task = this.fromProjection(input, `task-${this.tasks.size + 1}`);
     if (!this.ambiguousCreate || this.commitAmbiguousCreate) this.tasks.set(task.id, task);
     if (this.ambiguousCreate) throw new ClickUpAmbiguousWriteError();
+    this.readbackMissesRemaining = this.postWriteReadbackMisses;
     return task;
   }
 
@@ -220,18 +230,21 @@ class MemoryClickUp implements ClickUpApiPort {
   async updateParent(taskId: string, parentTaskId: string): Promise<void> {
     this.calls.push(`parent:${taskId}:${parentTaskId}`);
     this.tasks.get(taskId)!.parentTaskId = parentTaskId;
+    this.readbackMissesRemaining = this.postRelationshipReadbackMisses;
   }
 
   async addDependency(taskId: string, dependsOnTaskId: string): Promise<void> {
     this.calls.push(`dependency-add:${taskId}:${dependsOnTaskId}`);
     const task = this.tasks.get(taskId)!;
     task.dependencyTaskIds = [...new Set([...task.dependencyTaskIds, dependsOnTaskId])];
+    this.readbackMissesRemaining = this.postRelationshipReadbackMisses;
   }
 
   async removeDependency(taskId: string, dependsOnTaskId: string): Promise<void> {
     this.calls.push(`dependency-remove:${taskId}:${dependsOnTaskId}`);
     const task = this.tasks.get(taskId)!;
     task.dependencyTaskIds = task.dependencyTaskIds.filter((id) => id !== dependsOnTaskId);
+    this.readbackMissesRemaining = this.postRelationshipReadbackMisses;
   }
 }
 
@@ -415,7 +428,7 @@ describe("ClickUp exact configuration and shadow projection", () => {
       statusName: "in progress",
       nativeAssigneeId: 94656177,
       timeEstimateMs: 20 * 60 * 60 * 1_000,
-      dueDateMs: Date.parse("2026-09-11T00:00:00.000Z"),
+      dueDateMs: Date.parse("2026-09-10T02:00:00.000Z"),
       customFields: {},
     });
     expect(result.description).toMatch(/^<!-- paperclip-sync:start -->\n/);
@@ -497,6 +510,24 @@ describe("ClickUp exact configuration and shadow projection", () => {
 });
 
 describe("ClickUp projection replay, echo suppression, and conflicts", () => {
+  it("keeps the parent gated until terminal child projection and relationship readback both recover", () => {
+    const parent = { id: "parent" };
+    const children = [{ id: "child-a", status: "done" }, { id: "child-b", status: "cancelled" }] as const;
+    const projectionHealthy = new Set(["parent", "child-a", "child-b"]);
+    const relationshipsHealthy = new Set(["parent", "child-a"]);
+
+    expect(isClickUpParentReconciliationReady(parent, children, projectionHealthy, relationshipsHealthy)).toBe(false);
+    relationshipsHealthy.add("child-b");
+    expect(isClickUpParentReconciliationReady(parent, children, projectionHealthy, relationshipsHealthy)).toBe(true);
+
+    projectionHealthy.delete("child-a");
+    expect(isClickUpParentReconciliationReady(parent, children, projectionHealthy, relationshipsHealthy)).toBe(false);
+    projectionHealthy.add("child-a");
+    projectionHealthy.delete("parent");
+    expect(isClickUpParentReconciliationReady(parent, children, projectionHealthy, relationshipsHealthy)).toBe(false);
+    projectionHealthy.add("parent");
+    expect(isClickUpParentReconciliationReady(parent, children, projectionHealthy, relationshipsHealthy)).toBe(true);
+  });
   it("keeps provider access impossible while shadow/read-only mode is active", async () => {
     const api = new MemoryClickUp();
     await expect(projectIssueToClickUp({
@@ -523,11 +554,29 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     expect(api.calls.filter((call) => call === "get:task-1").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("compares the observed date-only readback by its calendar date", async () => {
+  it("waits for bounded provider readback before declaring a create ambiguous", async () => {
+    const api = new MemoryClickUp();
+    api.postWriteReadbackMisses = 2;
+    const repository = new MemoryLinks();
+
+    const result = await projectIssueToClickUp({
+      projection: projection(),
+      config,
+      authorization: authorization(),
+      api,
+      repository,
+      now: proofValidNow(),
+      readbackPolicy: { attempts: 3, delayMs: 0 },
+    });
+
+    expect(result).toMatchObject({ action: "created", outcome: "succeeded" });
+    expect(api.calls.filter((call) => call === "get:task-1")).toHaveLength(3);
+    expect(api.calls.filter((call) => call.startsWith("create:"))).toHaveLength(1);
+  });
+  it("preserves the STA-2996 September 8 date across the destination-timezone wire readback", async () => {
     const api = new MemoryClickUp();
     const repository = new MemoryLinks();
-    api.dueDateReadbackOffsetMs = 2 * 60 * 60 * 1_000;
-    const expected = projection({ dueDate: "2026-09-04" });
+    const expected = projection({ dueDate: "2026-09-08" });
     const input = {
       projection: expected, config, authorization: authorization(), api, repository,
       now: proofValidNow(),
@@ -536,11 +585,11 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     const first = await projectIssueToClickUp(input);
     const replay = await projectIssueToClickUp(input);
 
-    expect(expected.dueDateMs).toBe(1788480000000);
-    expect(api.tasks.get("task-1")?.dueDateMs).toBe(1788487200000);
+    expect(expected.dueDateMs).toBe(Date.parse("2026-09-07T02:00:00.000Z"));
+    expect(api.tasks.get("task-1")?.dueDateMs).toBe(Date.parse("2026-09-07T02:00:00.000Z"));
     expect(first).toMatchObject({ action: "created", outcome: "succeeded", errorClass: null });
     expect(replay).toMatchObject({ action: "already_current", outcome: "succeeded", errorClass: null });
-    api.tasks.get("task-1")!.dueDateMs = 1788487200000 + 24 * 60 * 60 * 1_000;
+    api.tasks.get("task-1")!.dueDateMs = expected.dueDateMs! + 24 * 60 * 60 * 1_000;
     const drift = await projectIssueToClickUp(input);
 
     expect(drift).toMatchObject({ action: "conflict", outcome: "conflict" });
@@ -562,7 +611,7 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
     }, config).dueDate).toBe(1788487200000);
     expect(ownedSnapshotFromRemote({
       ...readback,
-      dueDateMs: 1788487200000,
+      dueDateMs: Date.parse("2026-09-03T02:00:00.000Z"),
       dueDateTime: false,
     }, config).dueDate).toBe("2026-09-04");
   });
@@ -651,6 +700,7 @@ describe("ClickUp hierarchy and native dependencies", () => {
     const child = repository.links.find((link) => link.issueId === "child-issue")!;
     const blocker = repository.links.find((link) => link.issueId === "blocker-issue")!;
     api.tasks.get(child.taskId)!.dependencyTaskIds = [parent.taskId, "external-dependency"];
+    api.postRelationshipReadbackMisses = 2;
     const input = {
       api,
       config,
@@ -659,6 +709,7 @@ describe("ClickUp hierarchy and native dependencies", () => {
       desiredParentTaskId: parent.taskId,
       desiredDependencyTaskIds: [blocker.taskId],
       managedDependencyTaskIds: [parent.taskId, child.taskId, blocker.taskId],
+      readbackPolicy: { attempts: 3, delayMs: 0 },
     };
     const repaired = await reconcileClickUpRelationships(input);
     const replay = await reconcileClickUpRelationships(input);

@@ -1,4 +1,5 @@
 import type { ClickUpApiPort, ClickUpDestinationConfig } from "./types.js";
+import { readClickUpTaskUntil, type ClickUpReadbackPolicy } from "./readback.js";
 
 export class ClickUpRelationshipError extends Error {
   constructor(public readonly code: string) {
@@ -21,6 +22,7 @@ export async function reconcileClickUpRelationships(input: {
   desiredParentTaskId: string | null;
   desiredDependencyTaskIds: string[];
   managedDependencyTaskIds: string[];
+  readbackPolicy?: ClickUpReadbackPolicy;
 }): Promise<{ action: "already_current" | "updated"; writes: number }> {
   const before = await input.api.getTask(input.taskId);
   if (!before) throw new ClickUpRelationshipError("clickup_relationship_task_missing");
@@ -55,7 +57,14 @@ export async function reconcileClickUpRelationships(input: {
   }
 
   if (writes === 0) return { action: "already_current", writes: 0 };
-  const after = await input.api.getTask(input.taskId);
+  const after = await readClickUpTaskUntil({
+    api: input.api,
+    taskId: input.taskId,
+    policy: input.readbackPolicy,
+    matches: (task) => Boolean(task
+      && task.parentTaskId === input.desiredParentTaskId
+      && sameIds(task.dependencyTaskIds.filter((id) => managedDependencies.has(id)), desiredDependencies)),
+  });
   const afterManagedDependencies = after?.dependencyTaskIds.filter((dependencyId) => managedDependencies.has(dependencyId)) ?? [];
   if (!after
     || after.parentTaskId !== input.desiredParentTaskId

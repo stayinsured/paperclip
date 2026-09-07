@@ -10,6 +10,7 @@ const config: ClickUpDestinationConfig = {
   workspaceId: "90151122957",
   spaceId: "approved-space",
   listId: "901511200089",
+  dateOnlyTimeZone: "Europe/Berlin",
   statuses: {
     toDo: { id: "status-todo", name: "to do" },
     inProgress: { id: "status-progress", name: "in progress" },

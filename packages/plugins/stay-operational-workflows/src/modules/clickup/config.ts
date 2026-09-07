@@ -47,6 +47,14 @@ export function assertClickUpDestinationConfigured(config: ClickUpDestinationCon
   requiredExactId(config.spaceId, "clickup_space_id_missing");
   requiredExactId(config.listId, "clickup_list_id_missing");
 
+  try {
+    new Intl.DateTimeFormat("en", {
+      timeZone: requiredExactId(config.dateOnlyTimeZone, "clickup_date_only_timezone_missing"),
+    });
+  } catch {
+    throw new ClickUpConfigurationError("clickup_date_only_timezone_invalid");
+  }
+
   const seenStatusIds = new Set<string>();
   for (const [key, requiredName] of Object.entries(REQUIRED_STATUS_NAMES)) {
     const configured = config.statuses[key as keyof typeof config.statuses];

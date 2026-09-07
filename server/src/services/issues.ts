@@ -145,6 +145,10 @@ import {
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
 
+import {
+  assertParentIntegrationReconciliationReady,
+  getParentIntegrationReconciliationFailures,
+} from "./integration-reconciliation.js";
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 export const ISSUE_LIST_DEFAULT_LIMIT = 500;
@@ -6628,6 +6632,10 @@ export function issueService(db: Db) {
       if (!children.every((child) => child.status === "done" || child.status === "cancelled")) {
         return null;
       }
+      const integrationFailures = await getParentIntegrationReconciliationFailures(db, parent.id);
+      if (integrationFailures.length > 0) {
+        return null;
+      }
 
       const childIdsForSummaries = children.slice(0, MAX_CHILD_COMPLETION_SUMMARIES).map((child) => child.id);
       const commentRows = childIdsForSummaries.length > 0
@@ -7831,6 +7839,9 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (issueData.status === "done") {
+          await assertParentIntegrationReconciliationReady(tx, receiptExisting.id, { lock: true });
+        }
         const [previousLabelsByIssueId, previousRelationSummaries] = await Promise.all([
           nextLabelIds !== undefined
             ? labelMapForIssues(tx, [id])

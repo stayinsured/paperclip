@@ -24,6 +24,7 @@ export function clickUpConfigurationFingerprint(config: ClickUpDestinationConfig
     workspaceId: config.workspaceId,
     spaceId: config.spaceId,
     listId: config.listId,
+    dateOnlyTimeZone: config.dateOnlyTimeZone,
     statuses: config.statuses,
     ownerAssigneeId: config.ownerAssigneeId,
   }))}`;

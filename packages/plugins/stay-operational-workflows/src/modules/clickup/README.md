@@ -10,6 +10,7 @@ list, status, custom field, or assignee from a display name.
 The activation is fail-closed and requires:
 
 - one exact workspace, space, and list ID;
+- an explicit IANA destination timezone included in the approved configuration fingerprint;
 - exact `to do`, `in progress`, and `done` status IDs;
 - the exact native assignee ID and a managed secret reference;
 - an accepted configuration revision whose fingerprint matches runtime;
@@ -34,7 +35,11 @@ Forecast metadata is accepted only from the strict provisioned-plan format or
 the explicit bootstrap `## Planning metadata` format. The upper bound is
 converted at eight hours per person-day and rounded upward to four hours.
 Missing or malformed estimate, due date, or revision metadata produces one
-stable visible exception and no provider write.
+stable visible exception and no provider write. Date-only due dates are encoded
+and decoded against the configured destination timezone, including the provider
+preceding-day 04:00 wire convention, so the intended calendar date survives DST
+and UTC-offset changes. Create, update, and relationship verification use bounded
+eventual-consistency readback.
 
 Comments, attachments, watchers, deletion, arbitrary descriptions, list moves,
 universal assignment synchronization, customer data, and unknown fields have no
@@ -53,6 +58,12 @@ fields. A ClickUp-side divergence creates a stable, visible conflict row with
 allowlisted values and timestamps; it is never overwritten using last-write
 wins. Deletion produces a conflict receipt and never deletes or cancels the
 Paperclip issue.
+
+Each reconciliation writes a revision-safe issue receipt for projection and
+relationship health. Parent wakeup and closure remain gated until the parent and
+every direct terminal child have current healthy receipts. Retryable provider
+failures keep that barrier closed and a later successful replay revises the
+receipt without duplicating provider tasks or dependency writes.
 
 Projection timing health reports p95 freshness and a stable visible exception
 when oldest lag exceeds 15 minutes. The authoritative plugin job runs every five

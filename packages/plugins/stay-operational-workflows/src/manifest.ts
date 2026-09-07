@@ -45,6 +45,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.update",
     "issues.wakeup",
     "issue.documents.read",
+    "issue.documents.write",
     "issue.interactions.read",
     "issue.interactions.create"
   ],

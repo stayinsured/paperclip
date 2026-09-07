@@ -5,6 +5,19 @@ export {
   type EvaluateSessionReusePilot,
 } from "./validators/issue.js";
 export {
+  INTEGRATION_RECONCILIATION_DOCUMENT_KEY,
+  LiveIssueDagValidationError,
+  assertLiveIssueDag,
+  isIntegrationReceiptCurrentAndHealthy,
+  parseIntegrationReconciliationReceipt,
+  validateLiveIssueDag,
+  type IntegrationReconciliationReceipt,
+  type IntegrationReconciliationStatus,
+  type LiveIssueDagFinding,
+  type LiveIssueDagFindingCode,
+  type LiveIssueDagNode,
+} from "./live-issue-dag.js";
+export {
   PROGRESS_TRANSCRIPT_SECTION_HEADINGS,
   sanitizeProgressTranscriptMarkdown,
   terminalCommentDraftSchema,
