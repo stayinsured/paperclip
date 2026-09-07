@@ -1244,6 +1244,200 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return { companyId, agentId, runId, wakeupRequestId, issueId };
   }
 
+  it("drains a caller fire-and-forget wake through PID and completion before immediate DB teardown", async () => {
+    const { companyId, agentId } = await seedIdleTimerAgentFixture();
+    mockAdapterExecute.mockImplementationOnce(async (rawInput) => {
+      const input = rawInput as {
+        onMeta?: (meta: Record<string, unknown>) => Promise<void>;
+        onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
+      };
+      await input.onMeta?.({ command: "test-adapter", env: {} });
+      await input.onSpawn?.({
+        pid: process.pid,
+        processGroupId: null,
+        startedAt: "2026-03-19T00:00:01.000Z",
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Fire-and-forget wake completed.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+    const heartbeat = heartbeatService(db);
+
+    void heartbeat.wakeup(agentId, {
+      source: "on_demand",
+      triggerDetail: "system",
+      reason: "dispatch_handoff_test",
+      requestedByActorType: "user",
+      requestedByActorId: "responsible-user",
+    });
+    await heartbeat.drainActiveRunExecutions();
+
+    const run = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId))
+      .then((rows) => rows[0] ?? null);
+    expect(run).toMatchObject({
+      companyId,
+      status: "succeeded",
+      processPid: process.pid,
+      processStartedAt: new Date("2026-03-19T00:00:01.000Z"),
+    });
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.runId, run!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("completed");
+    expect(wakeup?.claimedAt).toBeInstanceOf(Date);
+
+    const events = await db
+      .select({ message: heartbeatRunEvents.message, payload: heartbeatRunEvents.payload })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, run!.id));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: "adapter launch requested",
+        payload: expect.objectContaining({ dispatchState: "launch_requested" }),
+      }),
+      expect.objectContaining({
+        message: "agent process started",
+        payload: expect.objectContaining({ dispatchState: "pid_recorded", processPid: process.pid }),
+      }),
+      expect.objectContaining({ message: "run succeeded" }),
+    ]));
+
+    // The drain is the teardown boundary: all background writes are complete,
+    // so deleting the run graph immediately cannot race a late wake or run.
+    await db.delete(activityLog).where(eq(activityLog.runId, run!.id));
+    await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run!.id));
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+    await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeup!.id));
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id))).toHaveLength(0);
+  });
+
+  it("recovers a claimed local run lost before PID exactly once under duplicate recovery scans", async () => {
+    const { agentId, runId, wakeupRequestId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: null,
+      processGroupId: null,
+      includeIssue: false,
+      contextSnapshot: { wakeReason: "issue_assigned" },
+    });
+    const firstHeartbeat = heartbeatService(db);
+    const duplicateHeartbeat = heartbeatService(db);
+
+    const [first, duplicate] = await Promise.all([
+      firstHeartbeat.reapOrphanedRuns(),
+      duplicateHeartbeat.reapOrphanedRuns(),
+    ]);
+    await firstHeartbeat.drainActiveRunExecutions();
+
+    expect(first.reaped + duplicate.reaped).toBe(1);
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    const sourceRun = runs.find((row) => row.id === runId);
+    const retryRuns = runs.filter((row) => row.retryOfRunId === runId);
+    expect(sourceRun).toMatchObject({
+      status: "failed",
+      errorCode: "process_launch_missing",
+      processPid: null,
+      processGroupId: null,
+    });
+    expect(sourceRun?.resultJson).toMatchObject({
+      stopReason: "process_lost",
+      dispatchRecovery: {
+        state: "recovery",
+        cause: "process_launch_missing",
+        disposition: "retry_eligible",
+        pidRecorded: false,
+      },
+    });
+    expect(retryRuns).toHaveLength(1);
+    expect(retryRuns[0]).toMatchObject({
+      processLossRetryCount: 1,
+      contextSnapshot: expect.objectContaining({
+        wakeReason: "process_lost_retry",
+        processRecoveryCause: "process_launch_missing",
+      }),
+    });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    const retryWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.reason, "process_lost_retry"));
+    expect(retryWakeups).toHaveLength(1);
+    expect(retryWakeups[0]?.runId).toBe(retryRuns[0]?.id);
+
+    const sourceWakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(sourceWakeup?.status).toBe("failed");
+
+    const recoveryEvents = await db
+      .select({ message: heartbeatRunEvents.message, payload: heartbeatRunEvents.payload })
+      .from(heartbeatRunEvents)
+      .where(inArray(heartbeatRunEvents.runId, [runId, retryRuns[0]!.id]));
+    expect(recoveryEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          dispatchState: "recovery",
+          recoveryCause: "process_launch_missing",
+          recoveryDisposition: "retry_queued",
+        }),
+      }),
+      expect.objectContaining({
+        message: "Queued automatic retry after a claimed run was lost before child process launch",
+        payload: expect.objectContaining({
+          dispatchState: "recovery_queued",
+          recoveryCause: "process_launch_missing",
+        }),
+      }),
+    ]));
+  });
+
+  it("terminalizes a second pre-PID loss without exceeding the existing retry budget", async () => {
+    const { agentId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: null,
+      processGroupId: null,
+      processLossRetryCount: 1,
+      includeIssue: false,
+      contextSnapshot: {
+        wakeReason: "process_lost_retry",
+        retryReason: "process_lost",
+      },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      errorCode: "process_launch_missing",
+      processLossRetryCount: 1,
+      resultJson: expect.objectContaining({
+        dispatchRecovery: expect.objectContaining({ disposition: "terminal", pidRecorded: false }),
+      }),
+    });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
   it("keeps a local run active when the recorded pid is still alive", async () => {
     const child = spawnAliveProcess();
     childProcesses.add(child);
@@ -3025,12 +3219,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
-  // Scenario 4: `process_lost` before the agent started is retried like
-  // other infrastructure failures. Distinct from the pid-based process-loss retry
+  // Scenario 4: a claimed continuation with no PID uses the established interaction
+  // infrastructure budget. Distinct from the generic one-shot process-loss retry
   // ("queues exactly one retry when the recorded local pid is dead"): here no pid was ever
-  // recorded (the process died before producing output), so the reaper falls through to the
-  // accepted-interaction infra-retry path. Pre-P1 `process_lost` was not retry-eligible there.
-  it("retries a plan-approval continuation lost as process_lost before agent start as an infrastructure failure", async () => {
+  // recorded, so the reaper records process_launch_missing and falls through to the
+  // accepted-interaction infrastructure retry path without stacking another retry budget.
+  it("retries a plan-approval continuation lost before PID within its infrastructure budget", async () => {
     const { companyId, agentId, runId, wakeupRequestId, issueId } = await seedQueuedIssueRunFixture();
     const interactionId = randomUUID();
 
@@ -3104,7 +3298,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const failedRun = runs.find((row) => row.id === runId);
     const retryRun = runs.find((row) => row.id !== runId);
-    expect(failedRun).toMatchObject({ status: "failed", errorCode: "process_lost" });
+    expect(failedRun).toMatchObject({ status: "failed", errorCode: "process_launch_missing" });
     expect(retryRun).toMatchObject({
       status: "scheduled_retry",
       retryOfRunId: runId,
@@ -3131,7 +3325,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]).toMatchObject({
       authorType: "system",
-      body: "Agent failed to resume after approval: `process_lost` — retrying (attempt 1/3)",
+      body: "Agent failed to resume after approval: `process_launch_missing` — retrying (attempt 1/3)",
     });
 
     const interaction = await db
@@ -3144,7 +3338,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       outcome: "accepted",
       resumeFailure: {
         status: "retrying",
-        errorCode: "process_lost",
+        errorCode: "process_launch_missing",
         attempt: 1,
         maxAttempts: 3,
         runId,

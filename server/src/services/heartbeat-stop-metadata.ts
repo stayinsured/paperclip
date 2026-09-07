@@ -90,7 +90,10 @@ export function inferHeartbeatRunStopReason(input: {
   if (maxTurnStopReason) return maxTurnStopReason;
   if (input.outcome === "timed_out") return "timeout";
   if (input.outcome === "failed" && input.errorCode === "unmanaged_background_task_stopped") return "unmanaged_background_task_stopped";
-  if (input.outcome === "failed" && input.errorCode === "process_lost") return "process_lost";
+  if (
+    input.outcome === "failed" &&
+    (input.errorCode === "process_lost" || input.errorCode === "process_launch_missing")
+  ) return "process_lost";
   if (input.outcome === "cancelled") {
     const message = (input.errorMessage ?? "").toLowerCase();
     if (message.includes("budget")) return "budget_paused";

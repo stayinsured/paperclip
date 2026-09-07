@@ -359,6 +359,7 @@ const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
 const PAPERCLIP_AGENT_MESSAGE_KEY = "paperclipAgentMessage";
 const PAPERCLIP_HARNESS_CHECKOUT_KEY = "paperclipHarnessCheckedOut";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
+const PROCESS_LAUNCH_MISSING_ERROR_CODE = "process_launch_missing";
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_INLINE_WAKE_COMMENTS = 8;
@@ -636,7 +637,11 @@ function isSpawnLikeFailureMessage(value: unknown) {
 function isRetryableInteractionContinuationInfrastructureFailure(
   run: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode" | "resultJson">,
 ) {
-  if (run.errorCode === WORKSPACE_VALIDATION_FAILURE_CODE || run.errorCode === "process_lost") {
+  if (
+    run.errorCode === WORKSPACE_VALIDATION_FAILURE_CODE ||
+    run.errorCode === "process_lost" ||
+    run.errorCode === PROCESS_LAUNCH_MISSING_ERROR_CODE
+  ) {
     return true;
   }
 
@@ -6379,7 +6384,7 @@ function buildProcessLossMessage(run: {
   if (run.processGroupId) {
     return `Process lost -- process group ${run.processGroupId} is no longer running`;
   }
-  return "Process lost -- server may have restarted";
+  return "Process launch lost -- the run was claimed but no child PID or process group was recorded";
 }
 
 function readHotRestartAdoptionMetadata(resultJson: Record<string, unknown> | null | undefined) {
@@ -10224,7 +10229,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     meta: { pid: number; processGroupId: number | null; startedAt: string },
   ) {
     const startedAt = new Date(meta.startedAt);
-    return db
+    const updated = await db
       .update(heartbeatRuns)
       .set({
         processPid: meta.pid,
@@ -10235,6 +10240,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(eq(heartbeatRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
+    if (updated) {
+      await appendRunEvent(updated, await nextRunEventSeq(updated.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: "agent process started",
+        payload: {
+          dispatchState: "pid_recorded",
+          processPid: updated.processPid,
+          processGroupId: updated.processGroupId,
+          processStartedAt: updated.processStartedAt?.toISOString() ?? null,
+        },
+      });
+    }
+    return updated;
   }
 
   async function clearDetachedRunWarning(runId: string) {
@@ -10645,6 +10665,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryOfRunId: run.id,
       wakeReason: "process_lost_retry",
       retryReason,
+      processRecoveryCause: run.errorCode ?? "process_lost",
     }, "normal_model");
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(run, retryContextSnapshot);
 
@@ -10660,6 +10681,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           payload: withRecoveryModelProfileHint({
             ...(issueId ? { issueId } : {}),
             retryOfRunId: run.id,
+            processRecoveryCause: run.errorCode ?? "process_lost",
           }, "normal_model"),
           status: "queued",
           requestedByActorType: "system",
@@ -10728,9 +10750,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       eventType: "lifecycle",
       stream: "system",
       level: "warn",
-      message: "Queued automatic retry after orphaned child process was confirmed dead",
+      message: run.errorCode === PROCESS_LAUNCH_MISSING_ERROR_CODE
+        ? "Queued automatic retry after a claimed run was lost before child process launch"
+        : "Queued automatic retry after heartbeat execution was interrupted or its child process was lost",
       payload: {
         retryOfRunId: run.id,
+        dispatchState: "recovery_queued",
+        recoveryCause: run.errorCode ?? "process_lost",
       },
     });
 
@@ -13800,6 +13826,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const tracksLocalChild = isTrackedLocalChildProcessAdapter(adapterType);
       const processPidAlive = tracksLocalChild && run.processPid && isProcessAlive(run.processPid);
       const processGroupAlive = tracksLocalChild && run.processGroupId && isProcessGroupAlive(run.processGroupId);
+      const processLaunchMissing = tracksLocalChild && !run.processPid && !run.processGroupId;
+      const processLaunchUsesContinuationRetry =
+        processLaunchMissing && isResolvedInteractionContinuationWakeContext(run.contextSnapshot);
       if (
         (processPidAlive || processGroupAlive) &&
         readHotRestartAdoptionMetadata(parseObject(run.resultJson))
@@ -13847,10 +13876,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         monitorNextCheckAt !== undefined &&
         (!monitorNextCheckAt || monitorNextCheckAt.getTime() <= now.getTime());
       const shouldRetry = (run.processLossRetryCount ?? 0) < 1 && (
+        (processLaunchMissing && !processLaunchUsesContinuationRetry) ||
         (tracksLocalChild && (!!run.processPid || !!run.processGroupId)) ||
         monitorDispatchLostWithoutFutureWake
       );
       const baseMessage = buildProcessLossMessage(run, descendantOnlyCleanup ? { descendantOnly: true } : undefined);
+      const processLossErrorCode = processLaunchMissing
+        ? PROCESS_LAUNCH_MISSING_ERROR_CODE
+        : "process_lost";
       const unmanagedBackgroundTaskEvidence = descendantOnlyCleanup
         ? {
           kind: "orphaned_process_group_cleanup",
@@ -13862,9 +13895,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
         : null;
 
-      let finalizedRun = await setRunStatus(run.id, "failed", {
+      const finalizedWrite = await setRunStatusIfRunning(run.id, "failed", {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-        errorCode: "process_lost",
+        errorCode: processLossErrorCode,
         finishedAt: now,
         resultJson: (() => {
           const result = mergeRunStopMetadataForAgent(
@@ -13872,25 +13905,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             "failed",
             {
               resultJson: parseObject(run.resultJson),
-              errorCode: "process_lost",
+              errorCode: processLossErrorCode,
               errorMessage: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
             },
           );
-          return unmanagedBackgroundTaskEvidence
-            ? {
-              ...result,
-              stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
-              unmanagedBackgroundTask: unmanagedBackgroundTaskEvidence,
-            }
-            : result;
+          return {
+            ...result,
+            ...(unmanagedBackgroundTaskEvidence
+              ? {
+                  stopReason: UNMANAGED_BACKGROUND_TASK_STOP_REASON,
+                  unmanagedBackgroundTask: unmanagedBackgroundTaskEvidence,
+                }
+              : {}),
+            dispatchRecovery: {
+              state: "recovery",
+              cause: processLossErrorCode,
+              disposition: shouldRetry
+                ? "retry_eligible"
+                : processLaunchUsesContinuationRetry
+                  ? "continuation_retry_eligible"
+                  : "terminal",
+              queuedAt: run.createdAt.toISOString(),
+              claimedAt: run.startedAt?.toISOString() ?? null,
+              launchRecordedAt: run.processStartedAt?.toISOString() ?? null,
+              pidRecorded: Boolean(run.processPid || run.processGroupId),
+            },
+          };
         })(),
       });
+      if (!finalizedWrite.updated || !finalizedWrite.run) continue;
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: now,
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
       });
-      if (!finalizedRun) finalizedRun = await getRun(run.id);
-      if (!finalizedRun) continue;
+      let finalizedRun = finalizedWrite.run;
       finalizedRun = await classifyAndPersistRunLiveness(finalizedRun, parseObject(finalizedRun.resultJson)) ?? finalizedRun;
       await releaseEnvironmentLeasesForRun({
         runId: finalizedRun.id,
@@ -13923,6 +13971,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           ? `${baseMessage}; queued retry ${retriedRun?.id ?? ""}`.trim()
           : baseMessage,
         payload: {
+          dispatchState: "recovery",
+          recoveryCause: processLossErrorCode,
+          recoveryDisposition: retriedRun ? "retry_queued" : shouldRetry ? "retry_suppressed" : "terminal",
+          queuedAt: run.createdAt.toISOString(),
+          claimedAt: run.startedAt?.toISOString() ?? null,
+          launchRecordedAt: run.processStartedAt?.toISOString() ?? null,
           ...(run.processPid ? { processPid: run.processPid } : {}),
           ...(run.processGroupId ? { processGroupId: run.processGroupId } : {}),
           ...(descendantOnlyCleanup ? { descendantOnlyCleanup: true } : {}),
@@ -16711,6 +16765,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         if (managedMcpConfig) {
           adapterContext.paperclipManagedMcp = managedMcpConfig;
         }
+        await appendRunEvent(currentRun, seq++, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "info",
+          message: "adapter launch requested",
+          payload: {
+            dispatchState: "launch_requested",
+            adapterType: agent.adapterType,
+          },
+        });
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,
