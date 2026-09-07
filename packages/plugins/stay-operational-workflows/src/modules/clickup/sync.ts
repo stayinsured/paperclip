@@ -99,7 +99,7 @@ async function storeHealthyLink(input: {
   originSide: "paperclip" | "clickup";
   projectedAt: Date;
 }): Promise<ClickUpTaskLink> {
-  return input.repository.upsertLink({
+  const next: Omit<ClickUpTaskLink, "id"> = {
     companyId: input.projection.companyId,
     projectId: input.projection.projectId,
     issueId: input.projection.issueId,
@@ -114,7 +114,28 @@ async function storeHealthyLink(input: {
     status: "healthy",
     lastProjectedAt: input.projectedAt.toISOString(),
     lastReconciledAt: input.projectedAt.toISOString(),
-  });
+  };
+  const existing = input.existing;
+  if (
+    existing
+    && existing.companyId === next.companyId
+    && existing.projectId === next.projectId
+    && existing.issueId === next.issueId
+    && existing.listId === next.listId
+    && existing.taskId === next.taskId
+    && existing.taskUrl === next.taskUrl
+    && existing.originSide === next.originSide
+    && existing.correlationValueHash === next.correlationValueHash
+    && stableSnapshot(existing.baseSnapshot) === stableSnapshot(next.baseSnapshot)
+    && existing.lastProjectionVersion === next.lastProjectionVersion
+    && existing.lastExternalRevision === next.lastExternalRevision
+    && existing.status === next.status
+    && existing.lastProjectedAt !== null
+    && existing.lastReconciledAt !== null
+  ) {
+    return existing;
+  }
+  return input.repository.upsertLink(next);
 }
 
 async function reconcileAmbiguousCreate(input: {

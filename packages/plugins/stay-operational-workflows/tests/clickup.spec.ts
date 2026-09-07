@@ -128,6 +128,7 @@ function projection(overrides: Partial<ClickUpProjectionSource> = {}): ClickUpSh
 class MemoryLinks implements ClickUpLinkRepository {
   links: ClickUpTaskLink[] = [];
   conflicts: ClickUpConflict[] = [];
+  upsertCalls = 0;
 
   async getByIssue(targetCompanyId: string, targetIssueId: string): Promise<ClickUpTaskLink | null> {
     return this.links.find((link) => link.companyId === targetCompanyId && link.issueId === targetIssueId) ?? null;
@@ -140,6 +141,7 @@ class MemoryLinks implements ClickUpLinkRepository {
   }
 
   async upsertLink(input: Omit<ClickUpTaskLink, "id">): Promise<ClickUpTaskLink> {
+    this.upsertCalls += 1;
     const issueMatch = this.links.find((link) => link.companyId === input.companyId && link.issueId === input.issueId);
     const taskMatch = this.links.find((link) => (
       link.companyId === input.companyId && link.listId === input.listId && link.taskId === input.taskId
@@ -545,9 +547,14 @@ describe("ClickUp projection replay, echo suppression, and conflicts", () => {
       now: new Date("2026-08-07T11:00:00.000Z"),
     };
     const first = await projectIssueToClickUp(input);
-    const replay = await projectIssueToClickUp(input);
+    expect(repository.upsertCalls).toBe(1);
+    const replay = await projectIssueToClickUp({
+      ...input,
+      now: new Date("2026-08-07T11:01:00.000Z"),
+    });
     expect(first).toMatchObject({ action: "created", outcome: "succeeded", errorClass: null });
     expect(replay.action).toBe("already_current");
+    expect(repository.upsertCalls).toBe(1);
     expect(api.tasks).toHaveLength(1);
     expect(repository.links).toHaveLength(1);
     expect(api.calls.filter((call) => call.startsWith("create:"))).toHaveLength(1);
