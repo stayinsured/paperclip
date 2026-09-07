@@ -64,6 +64,18 @@ describe("heartbeat stop metadata", () => {
     ).toBe("cancelled");
   });
 
+  it("normalizes a claimed pre-PID launch loss under the process-loss stop family", () => {
+    expect(
+      buildHeartbeatRunStopMetadata({
+        adapterType: "codex_local",
+        adapterConfig: {},
+        outcome: "failed",
+        errorCode: "process_launch_missing",
+        errorMessage: "Run was claimed but no child PID was recorded",
+      }).stopReason,
+    ).toBe("process_lost");
+  });
+
   it("records graceful interruption separately from failure", () => {
     expect(
       buildHeartbeatRunStopMetadata({
