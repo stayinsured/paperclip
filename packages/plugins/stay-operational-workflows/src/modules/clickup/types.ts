@@ -32,6 +32,7 @@ export interface ClickUpDestinationConfig {
   workspaceId: string;
   spaceId: string;
   listId: string;
+  dateOnlyTimeZone: string;
   statuses: Record<ClickUpStatusKey, ClickUpConfiguredStatus>;
   ownerAssigneeId: number;
   fields?: ClickUpFieldIds;

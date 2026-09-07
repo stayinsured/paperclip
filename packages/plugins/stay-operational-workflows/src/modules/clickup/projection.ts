@@ -134,19 +134,92 @@ export function parseClickUpMirrorDescription(value: string): {
   };
 }
 
-function dueDateMilliseconds(value: string | null): number | null {
-  if (value == null) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+function parseCalendarDate(value: string): { year: number; month: number; day: number } {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) throw new ClickUpConfigurationError("clickup_due_date_invalid");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
     throw new ClickUpConfigurationError("clickup_due_date_invalid");
   }
-  const milliseconds = Date.parse(`${value}T00:00:00.000Z`);
-  if (!Number.isFinite(milliseconds)) throw new ClickUpConfigurationError("clickup_due_date_invalid");
-  return milliseconds;
+  return { year, month, day };
 }
 
-function remoteDueDateValue(value: number | null, includesTime: boolean): string | number | null {
+function zonedParts(value: number, timeZone: string): {
+  year: number; month: number; day: number; hour: number; minute: number; second: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(value));
+  const read = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: read("year"),
+    month: read("month"),
+    day: read("day"),
+    hour: read("hour"),
+    minute: read("minute"),
+    second: read("second"),
+  };
+}
+
+function zonedDateTimeMilliseconds(input: {
+  year: number; month: number; day: number; hour: number; timeZone: string;
+}): number {
+  const targetAsUtc = Date.UTC(input.year, input.month - 1, input.day, input.hour);
+  let candidate = targetAsUtc;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const observed = zonedParts(candidate, input.timeZone);
+    candidate += targetAsUtc - Date.UTC(
+      observed.year,
+      observed.month - 1,
+      observed.day,
+      observed.hour,
+      observed.minute,
+      observed.second,
+    );
+  }
+  const observed = zonedParts(candidate, input.timeZone);
+  if (
+    observed.year !== input.year || observed.month !== input.month || observed.day !== input.day
+    || observed.hour !== input.hour || observed.minute !== 0 || observed.second !== 0
+  ) throw new ClickUpConfigurationError("clickup_date_only_timezone_conversion_failed");
+  return candidate;
+}
+
+/**
+ * ClickUp's date-only wire value is 04:00 in the destination timezone on
+ * the preceding calendar day. The API readback therefore needs the inverse
+ * calendar-day transform instead of a UTC ISO slice.
+ */
+export function clickUpDateOnlyMilliseconds(value: string | null, timeZone: string): number | null {
+  if (value == null) return null;
+  const intended = parseCalendarDate(value);
+  const preceding = new Date(Date.UTC(intended.year, intended.month - 1, intended.day - 1));
+  return zonedDateTimeMilliseconds({
+    year: preceding.getUTCFullYear(),
+    month: preceding.getUTCMonth() + 1,
+    day: preceding.getUTCDate(),
+    hour: 4,
+    timeZone,
+  });
+}
+
+function remoteDueDateValue(value: number | null, includesTime: boolean, timeZone: string): string | number | null {
   if (value == null || includesTime) return value;
-  return new Date(value).toISOString().slice(0, 10);
+  const wireDate = zonedParts(value, timeZone);
+  return new Date(Date.UTC(wireDate.year, wireDate.month - 1, wireDate.day + 1))
+    .toISOString()
+    .slice(0, 10);
 }
 
 function conservativeEstimateHours(source: ApprovedEstimateSource | null): number | null {
@@ -199,7 +272,7 @@ export function renderClickUpShadowProjection(input: {
   const status = config.statuses[statusKey];
   const estimateHours = conservativeEstimateHours(source.approvedEstimate);
   if (!source.dueDate) throw new ClickUpConfigurationError("clickup_planning_metadata_invalid");
-  const dueDateMs = dueDateMilliseconds(source.dueDate);
+  const dueDateMs = clickUpDateOnlyMilliseconds(source.dueDate, config.dateOnlyTimeZone);
   const forecastSource = source.approvedEstimate!.documentKey;
   const forecastRevision = source.approvedEstimate!.revisionId;
   const rawTitle = redactClickUpText(source.title);
@@ -295,7 +368,7 @@ export function ownedSnapshotFromRemote(
     dueDateTime: boolean;
     customFields: Record<string, string | boolean | null | undefined>;
   },
-  _config: ClickUpDestinationConfig,
+  config: ClickUpDestinationConfig,
 ): ClickUpOwnedSnapshot {
   const parsed = parseClickUpMirrorDescription(task.description);
   const estimateHours = task.timeEstimateMs == null ? null : task.timeEstimateMs / (60 * 60 * 1_000);
@@ -309,7 +382,7 @@ export function ownedSnapshotFromRemote(
     acceptanceSummary: parsed.acceptanceSummary,
     estimate: estimateHours,
     nativeAssignee,
-    dueDate: remoteDueDateValue(task.dueDateMs, task.dueDateTime),
+    dueDate: remoteDueDateValue(task.dueDateMs, task.dueDateTime, config.dateOnlyTimeZone),
     sourceStatus: parsed.sourceStatus,
     forecastSource: parsed.forecastSource,
     forecastRevision: parsed.forecastRevision,

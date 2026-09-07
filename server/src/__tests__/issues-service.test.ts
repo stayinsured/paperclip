@@ -37,12 +37,13 @@ import {
   ISSUE_LIST_MAX_LIMIT,
   issueService,
 } from "../services/issues.ts";
+import { documentService } from "../services/documents.ts";
 import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
 } from "../services/execution-workspace-policy.ts";
-import { buildAgentMentionHref, buildProjectMentionHref, MAX_ISSUE_REQUEST_DEPTH, type IssueWorkMode } from "@paperclipai/shared";
+import { buildAgentMentionHref, buildProjectMentionHref, INTEGRATION_RECONCILIATION_DOCUMENT_KEY, MAX_ISSUE_REQUEST_DEPTH, type IssueWorkMode } from "@paperclipai/shared";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -4454,6 +4455,89 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       ],
       childIssueSummaryTruncated: false,
     });
+  });
+
+  it("keeps an opted-in parent blocked until current parent and child reconciliation receipts are healthy", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const parentId = randomUUID();
+    const childAId = randomUUID();
+    const childBId = randomUUID();
+    const updatedAt = new Date("2026-09-07T12:00:00.000Z");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: parentId, companyId, identifier: "PAP-1", title: "Parent", status: "todo", priority: "high", assigneeAgentId, updatedAt },
+      { id: childAId, companyId, identifier: "PAP-2", parentId, title: "Child A", status: "done", priority: "high", updatedAt },
+      { id: childBId, companyId, identifier: "PAP-3", parentId, title: "Child B", status: "done", priority: "high", updatedAt },
+    ]);
+
+    const documentsSvc = documentService(db);
+    const upsertReceipt = async (issueId: string, status: string, healthy: boolean) => {
+      const existing = await documentsSvc.getIssueDocumentByKey(issueId, INTEGRATION_RECONCILIATION_DOCUMENT_KEY);
+      await documentsSvc.upsertIssueDocument({
+        issueId,
+        key: INTEGRATION_RECONCILIATION_DOCUMENT_KEY,
+        title: "Required integration reconciliation",
+        format: "markdown",
+        body: JSON.stringify({
+          schemaVersion: 1,
+          issueId,
+          source: { status, updatedAt: updatedAt.toISOString() },
+          requiredIntegrations: ["clickup"],
+          integrations: {
+            clickup: {
+              status: healthy ? "healthy" : "retryable_failure",
+              projectionVersion: "pcv1:test",
+              taskId: `clickup-${issueId}`,
+              projectionHealthy: healthy,
+              relationshipsHealthy: healthy,
+              errorClass: healthy ? null : "clickup_relationship_readback_mismatch",
+            },
+          },
+        }),
+        baseRevisionId: existing?.latestRevisionId ?? null,
+      });
+    };
+
+    await upsertReceipt(childAId, "done", true);
+    await upsertReceipt(childBId, "done", false);
+
+    expect(await svc.getWakeableParentAfterChildCompletion(parentId)).toBeNull();
+    await expect(svc.update(parentId, { status: "done" })).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "parent_integration_reconciliation_pending",
+        failures: expect.arrayContaining([
+          expect.objectContaining({ issueId: parentId, reason: "parent_integration_receipt_missing_or_stale" }),
+          expect.objectContaining({ issueId: childBId, reason: "integration_receipt_missing_or_stale" }),
+        ]),
+      },
+    });
+
+    await upsertReceipt(parentId, "todo", true);
+    await upsertReceipt(childBId, "done", true);
+
+    expect(await svc.getWakeableParentAfterChildCompletion(parentId)).toMatchObject({
+      id: parentId,
+      childIssueIds: [childAId, childBId],
+    });
+    await expect(svc.update(parentId, { status: "done" })).resolves.toMatchObject({ status: "done" });
   });
 
   it("reconciles cancelled blocker edges and advances only after every active blocker clears", async () => {

@@ -1,5 +1,13 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import type { Agent, Issue, IssueDocument, IssueThreadInteraction } from "@paperclipai/shared";
+import {
+  INTEGRATION_RECONCILIATION_DOCUMENT_KEY,
+  validateLiveIssueDag,
+  type Agent,
+  type IntegrationReconciliationReceipt,
+  type Issue,
+  type IssueDocument,
+  type IssueThreadInteraction,
+} from "@paperclipai/shared";
 import { isClickUpActiveConfig, sha256, type AuditIdentity, type ModuleConfig } from "../../contracts.js";
 import type { WorkflowRepository } from "../../repository.js";
 import { assertClickUpModuleActivationUsable, ClickUpConfigurationError } from "./config.js";
@@ -25,6 +33,7 @@ export interface ClickUpReconcileResult {
   updated: number;
   alreadyCurrent: number;
   relationshipsUpdated: number;
+  reconciliationReceiptsUpdated: number;
   conflicts: number;
   retryableFailures: number;
   terminalFailures: number;
@@ -73,6 +82,20 @@ function sortParentsFirst(issues: Issue[]): Issue[] {
     || left.id.localeCompare(right.id));
 }
 
+export function isClickUpParentReconciliationReady(
+  parent: Pick<Issue, "id">,
+  children: ReadonlyArray<Pick<Issue, "id" | "status">>,
+  projectionHealthyIssueIds: ReadonlySet<string>,
+  relationshipHealthyIssueIds: ReadonlySet<string>,
+): boolean {
+  return projectionHealthyIssueIds.has(parent.id)
+    && relationshipHealthyIssueIds.has(parent.id)
+    && children.length > 0 && children.every((child) =>
+    ["done", "cancelled"].includes(child.status)
+    && projectionHealthyIssueIds.has(child.id)
+    && relationshipHealthyIssueIds.has(child.id));
+}
+
 export class ClickUpReconciliationService {
   private readonly links: PostgresClickUpRepository;
   private readonly inFlightCompanies = new Set<string>();
@@ -94,6 +117,7 @@ export class ClickUpReconciliationService {
       updated: 0,
       alreadyCurrent: 0,
       relationshipsUpdated: 0,
+      reconciliationReceiptsUpdated: 0,
       conflicts: 0,
       retryableFailures: 0,
       terminalFailures: 0,
@@ -131,6 +155,30 @@ export class ClickUpReconciliationService {
       const links = new Map<string, ClickUpTaskLink>();
       const planContexts = new Map<string, { planDocument: IssueDocument | null; interactions: IssueThreadInteraction[] }>();
 
+      const projectionReceipts = new Map<string, ClickUpProjectionReceipt>();
+      const relationshipHealthy = new Set<string>();
+      const failureClasses = new Map<string, string>();
+
+      await Promise.all(issues.map(async (issue) => {
+        relations.set(issue.id, await this.ctx.issues.relations.get(issue.id, config.companyId));
+      }));
+      const dagFindings = validateLiveIssueDag(issues.map((issue) => ({
+        id: issue.id,
+        parentId: issue.parentId,
+        status: issue.status,
+        blockedByIssueIds: (relations.get(issue.id)?.blockedBy ?? []).map((blocker) => blocker.id),
+      })));
+      if (dagFindings.length > 0) {
+        await this.recordException(
+          config,
+          audit,
+          null,
+          "clickup_live_dag_invalid",
+          `Provider writes stopped: ${dagFindings.map((finding) => `${finding.code}:${finding.issueId}`).join(", ")}`,
+        );
+        result.terminalFailures += 1;
+        return;
+      }
       for (const issue of issues) {
         result.scanned += 1;
         let planDocument: IssueDocument | null = null;
@@ -152,12 +200,12 @@ export class ClickUpReconciliationService {
         if (!deliveryMetadata.approvedEstimate || !deliveryMetadata.dueDate) {
           await this.recordException(config, audit, issue.id, "clickup_planning_metadata_invalid", "Approved estimate, due date, or forecast revision metadata is absent or malformed; this mirror stayed fail-closed.");
           result.terminalFailures += 1;
+          failureClasses.set(issue.id, "clickup_planning_metadata_invalid");
           continue;
         }
 
-        const relation = await this.ctx.issues.relations.get(issue.id, config.companyId);
-        relations.set(issue.id, relation);
         let assignee: Agent | null = null;
+        const relation = relations.get(issue.id)!;
         if (issue.assigneeAgentId) {
           if (!agents.has(issue.assigneeAgentId)) {
             agents.set(issue.assigneeAgentId, await this.ctx.agents.get(issue.assigneeAgentId, config.companyId));
@@ -168,6 +216,7 @@ export class ClickUpReconciliationService {
         if (issue.parentId && issueIds.has(issue.parentId) && !desiredParentTaskId) {
           await this.recordException(config, audit, issue.id, "clickup_parent_mapping_pending", "Parent mirror is not yet available; child create stayed fail-closed.");
           result.retryableFailures += 1;
+          failureClasses.set(issue.id, "clickup_parent_mapping_pending");
           continue;
         }
 
@@ -201,10 +250,12 @@ export class ClickUpReconciliationService {
           repository: this.links,
         });
         this.countReceipt(receipt, result);
+        projectionReceipts.set(issue.id, receipt);
         const stored = await this.links.getByIssue(config.companyId, issue.id);
         if (stored) links.set(issue.id, stored);
         if (receipt.outcome !== "succeeded") {
           await this.recordException(config, audit, issue.id, receipt.errorClass ?? "clickup_projection_failed", receipt.outcome);
+          failureClasses.set(issue.id, receipt.errorClass ?? "clickup_projection_failed");
         }
       }
 
@@ -230,6 +281,7 @@ export class ClickUpReconciliationService {
             `Missing mapped ${missingParent ? "parent" : ""}${missingParent && missingBlockers.length ? " and " : ""}${missingBlockers.length ? "blocker" : ""} task identities.`,
           );
           result.retryableFailures += 1;
+          failureClasses.set(issue.id, "clickup_relationship_mapping_incomplete");
           continue;
         }
         try {
@@ -242,6 +294,7 @@ export class ClickUpReconciliationService {
             desiredDependencyTaskIds,
             managedDependencyTaskIds: [...links.values()].map((candidate) => candidate.taskId),
           });
+          relationshipHealthy.add(issue.id);
           if (relationship.action === "updated") {
             result.relationshipsUpdated += 1;
             result.externalWrites += relationship.writes;
@@ -250,8 +303,17 @@ export class ClickUpReconciliationService {
           const code = error instanceof Error ? error.message : "clickup_relationship_failed";
           await this.recordException(config, audit, issue.id, code, "Relationship drift could not be repaired; Paperclip remained unchanged.");
           result.conflicts += 1;
+          failureClasses.set(issue.id, code);
         }
       }
+      result.reconciliationReceiptsUpdated += await this.persistReconciliationReceipts({
+        config,
+        issues,
+        projectionReceipts,
+        relationshipHealthy,
+        failureClasses,
+      });
+      await this.wakeReconciledParents(config, issues, projectionReceipts, relationshipHealthy);
     } catch (error) {
       const code = error instanceof Error ? error.message : "clickup_reconciliation_failed";
       await this.recordException(config, audit, null, code, "ClickUp reconciliation failed closed before Paperclip authority changed.");
@@ -259,6 +321,105 @@ export class ClickUpReconciliationService {
     }
   }
 
+  private async persistReconciliationReceipts(input: {
+    config: ModuleConfig;
+    issues: Issue[];
+    projectionReceipts: Map<string, ClickUpProjectionReceipt>;
+    relationshipHealthy: Set<string>;
+    failureClasses: Map<string, string>;
+  }): Promise<number> {
+    let writes = 0;
+    for (const issue of input.issues) {
+      const projection = input.projectionReceipts.get(issue.id);
+      const projectionHealthy = projection?.outcome === "succeeded";
+      const relationshipsHealthy = input.relationshipHealthy.has(issue.id);
+      const status: IntegrationReconciliationReceipt["integrations"][string]["status"] =
+        projectionHealthy && relationshipsHealthy
+          ? "healthy"
+          : projection?.outcome === "conflict"
+            ? "conflict"
+            : projection?.outcome === "terminal_failure" || input.failureClasses.get(issue.id) === "clickup_planning_metadata_invalid"
+              ? "terminal_failure"
+              : "retryable_failure";
+      const receipt: IntegrationReconciliationReceipt = {
+        schemaVersion: 1,
+        issueId: issue.id,
+        source: {
+          status: issue.status,
+          updatedAt: issue.updatedAt.toISOString(),
+        },
+        requiredIntegrations: ["clickup"],
+        integrations: {
+          clickup: {
+            status,
+            projectionVersion: projection?.projectionVersion ?? null,
+            taskId: projection?.taskId ?? null,
+            projectionHealthy,
+            relationshipsHealthy,
+            errorClass: input.failureClasses.get(issue.id) ?? null,
+          },
+        },
+      };
+      const body = `${JSON.stringify(receipt, null, 2)}\n`;
+      const existing = await this.ctx.issues.documents.get(
+        issue.id,
+        INTEGRATION_RECONCILIATION_DOCUMENT_KEY,
+        input.config.companyId,
+      );
+      if (existing?.body === body) continue;
+      await this.ctx.issues.documents.upsert({
+        issueId: issue.id,
+        key: INTEGRATION_RECONCILIATION_DOCUMENT_KEY,
+        companyId: input.config.companyId,
+        title: "Required integration reconciliation",
+        format: "json",
+        body,
+        changeSummary: "Record current ClickUp projection and relationship readback health",
+        baseRevisionId: existing?.latestRevisionId ?? null,
+      });
+      writes += 1;
+    }
+    return writes;
+  }
+
+  private async wakeReconciledParents(
+    config: ModuleConfig,
+    issues: Issue[],
+    projectionReceipts: Map<string, ClickUpProjectionReceipt>,
+    relationshipHealthy: Set<string>,
+  ): Promise<void> {
+    for (const parent of issues) {
+      if (
+        !parent.assigneeAgentId
+        || ["backlog", "done", "cancelled"].includes(parent.status)
+      ) continue;
+      const children = issues.filter((issue) => issue.parentId === parent.id);
+      if (children.length === 0) continue;
+      const ready = isClickUpParentReconciliationReady(
+        parent,
+        children,
+        new Set([...projectionReceipts.entries()]
+          .filter(([, receipt]) => receipt.outcome === "succeeded")
+          .map(([issueId]) => issueId)),
+        relationshipHealthy,
+      );
+      if (!ready) continue;
+      const signature = [parent, ...children]
+        .map((child) => [
+          child.id,
+          child.status,
+          child.updatedAt.toISOString(),
+          projectionReceipts.get(child.id)?.projectionVersion ?? "missing",
+        ].join(":"))
+        .sort()
+        .join("|");
+      await this.ctx.issues.requestWakeup(parent.id, config.companyId, {
+        reason: "children_and_required_integrations_reconciled",
+        contextSource: "stay-operational-workflows.clickup",
+        idempotencyKey: `clickup-parent-ready:${parent.id}:${sha256(signature)}`,
+      });
+    }
+  }
   private async listProjectIssues(config: ModuleConfig): Promise<Issue[]> {
     const issues: Issue[] = [];
     for (let offset = 0; ; offset += 100) {

@@ -7,6 +7,7 @@ import {
 import { detectClickUpOwnedFieldConflicts } from "./conflicts.js";
 import { clickUpIntakeKey, clickUpSha256 } from "./identity.js";
 import { ownedSnapshotFromRemote, redactClickUpText } from "./projection.js";
+import { readClickUpTaskUntil, type ClickUpReadbackPolicy } from "./readback.js";
 import type {
   ClickUpApiPort,
   ClickUpAuthorization,
@@ -164,6 +165,7 @@ export async function projectIssueToClickUp(input: {
   api: ClickUpApiPort;
   repository: ClickUpLinkRepository;
   now?: Date;
+  readbackPolicy?: ClickUpReadbackPolicy;
 }): Promise<ClickUpProjectionReceipt> {
   const now = input.now ?? new Date();
   assertClickUpProjectionAuthorized({
@@ -215,7 +217,12 @@ export async function projectIssueToClickUp(input: {
     } else {
       try {
         const created = await input.api.createTask(input.projection);
-        const readback = await input.api.getTask(created.id);
+        const readback = await readClickUpTaskUntil({
+          api: input.api,
+          taskId: created.id,
+          matches: (task) => Boolean(task && remoteMatchesProjection(task, input.projection, input.config)),
+          policy: input.readbackPolicy,
+        });
         if (!readback || !remoteMatchesProjection(readback, input.projection, input.config)) {
           return reconcileAmbiguousCreate({ ...input, now });
         }
@@ -325,7 +332,12 @@ export async function projectIssueToClickUp(input: {
 
   try {
     await input.api.updateTask(link.taskId, input.projection);
-    const verified = await input.api.getTask(link.taskId);
+    const verified = await readClickUpTaskUntil({
+      api: input.api,
+      taskId: link.taskId,
+      matches: (task) => Boolean(task && remoteMatchesProjection(task, input.projection, input.config)),
+      policy: input.readbackPolicy,
+    });
     if (!verified || !remoteMatchesProjection(verified, input.projection, input.config)) {
       throw new ClickUpAmbiguousWriteError("clickup_update_verification_mismatch");
     }
@@ -341,7 +353,12 @@ export async function projectIssueToClickUp(input: {
     });
   } catch (error) {
     if (error instanceof ClickUpAmbiguousWriteError) {
-      const reconciled = await input.api.getTask(link.taskId);
+      const reconciled = await readClickUpTaskUntil({
+        api: input.api,
+        taskId: link.taskId,
+        matches: (task) => Boolean(task && remoteMatchesProjection(task, input.projection, input.config)),
+        policy: input.readbackPolicy,
+      });
       if (reconciled && remoteMatchesProjection(reconciled, input.projection, input.config)) {
         await storeHealthyLink({ repository: input.repository, existing: link, projection: input.projection, remote: reconciled, originSide: link.originSide, projectedAt: now });
         return receipt(input.projection, {
